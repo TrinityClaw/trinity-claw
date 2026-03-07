@@ -1,0 +1,1845 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrinityClaw - AI Agent v.1.2</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+        :root {
+            --bg:            #0d0d0d;
+            --surface:       #161616;
+            --surface-2:     #1e1e1e;
+            --surface-3:     #262626;
+            --border:        rgba(255,255,255,0.08);
+            --border-strong: rgba(255,255,255,0.14);
+            --text:          #e8e8e8;
+            --text-muted:    #888;
+            --text-dim:      #555;
+            --accent:        #10a37f;
+            --accent-dim:    rgba(16,163,127,0.15);
+            --user-bubble:   #1e1e1e;
+            --red:           #e53e3e;
+            --radius-sm:     8px;
+            --radius-md:     12px;
+            --radius-lg:     18px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ── Layout ── */
+        .container {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            position: relative;
+        }
+
+        /* ── Sidebar ── */
+        .sidebar {
+            width: 230px;
+            flex-shrink: 0;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .sidebar-header {
+            height: 52px;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            color: var(--text);
+            flex-shrink: 0;
+        }
+        .sidebar-header span { color: var(--accent); }
+
+        .sidebar-nav {
+            display: flex;
+            padding: 8px;
+            gap: 4px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .sidebar-tab {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            border-radius: var(--radius-sm);
+            padding: 7px 4px 6px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 3px;
+            transition: background 0.15s, color 0.15s;
+            font-family: inherit;
+        }
+        .sidebar-tab:hover { background: var(--surface-2); color: var(--text); }
+        .sidebar-tab.active { background: var(--accent-dim); color: var(--accent); }
+
+        .sidebar-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+
+        .panel { display: none; }
+        .panel.active { display: block; }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .panel-title {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.7px;
+        }
+        .count-badge {
+            background: var(--surface-3);
+            color: var(--text-muted);
+            padding: 1px 5px;
+            border-radius: 10px;
+            font-size: 0.68rem;
+            margin-left: 4px;
+            vertical-align: middle;
+        }
+        .panel-refresh-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            border-radius: 5px;
+            padding: 2px 7px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.15s, color 0.15s;
+        }
+        .panel-refresh-btn:hover { background: var(--surface-2); color: var(--text); }
+
+        .panel-empty {
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 0.75rem;
+            padding: 20px 0;
+        }
+
+        /* ── Skills panel ── */
+        .skill-module {
+            margin-bottom: 5px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+        }
+        .skill-module-header {
+            padding: 6px 10px;
+            background: var(--surface-2);
+            font-size: 0.76rem;
+            font-weight: 600;
+            color: var(--text);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            user-select: none;
+        }
+        .skill-module-header:hover { background: var(--surface-3); }
+        .skill-fn-count {
+            font-size: 0.66rem;
+            color: var(--text-dim);
+            font-weight: 400;
+            margin-left: auto;
+        }
+        .skill-chevron {
+            transition: transform 0.2s;
+            color: var(--text-dim);
+            flex-shrink: 0;
+        }
+        .skill-module.open .skill-chevron { transform: rotate(90deg); }
+        .skill-fn-list {
+            display: none;
+            padding: 3px 6px 5px;
+            background: var(--bg);
+        }
+        .skill-module.open .skill-fn-list { display: block; }
+        .skill-fn {
+            padding: 3px 6px;
+            font-size: 0.72rem;
+            color: var(--accent);
+            font-family: 'Menlo', 'Consolas', monospace;
+            cursor: pointer;
+            border-radius: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .skill-fn:hover { background: var(--accent-dim); }
+        .skill-fn:active { opacity: 0.7; }
+
+        /* ── Health panel ── */
+        .health-card {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            margin-bottom: 8px;
+        }
+        .health-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 7px 10px;
+            font-size: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .health-row:last-child { border-bottom: none; }
+        .health-label { color: var(--text-muted); }
+        .health-val { font-weight: 500; color: var(--text); }
+        .h-ok  { color: #48bb78; }
+        .h-err { color: #e53e3e; }
+        .h-dim { color: var(--text-dim); }
+
+        /* ── Cron Jobs panel ── */
+        .cron-item {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 8px 10px;
+            margin-bottom: 6px;
+        }
+        .cron-row1 {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .cron-name {
+            font-size: 0.77rem;
+            font-weight: 600;
+            color: var(--text);
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .cron-badge {
+            font-size: 0.62rem;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .badge-once      { background: rgba(16,163,127,0.15); color: #10a37f; }
+        .badge-recurring { background: rgba(99,179,237,0.15); color: #63b3ed; }
+        .cron-delete {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            cursor: pointer;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            line-height: 1.2;
+            flex-shrink: 0;
+            transition: background 0.15s, color 0.15s;
+        }
+        .cron-delete:hover { background: rgba(229,62,62,0.15); color: #e53e3e; }
+        .cron-meta {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 5px;
+        }
+        .cron-prompt {
+            font-size: 0.68rem;
+            color: var(--text-dim);
+            margin-top: 3px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* ── Header / Navbar ── */
+        .header {
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 12px 0 14px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg);
+            position: relative;
+            z-index: 10;
+            flex-shrink: 0;
+        }
+
+        /* Left slot */
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            min-width: 80px;
+        }
+
+        /* Centre — brand */
+        .header-brand {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.95rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            color: var(--text);
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .header-brand span {
+            color: var(--accent);
+        }
+
+        /* Right slot */
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            min-width: 80px;
+            justify-content: flex-end;
+        }
+
+        /* Shared nav-button style */
+        .nav-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            width: 34px;
+            height: 34px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+            transition: background 0.15s, color 0.15s;
+            position: relative;
+        }
+        .nav-btn:hover {
+            background: var(--surface-3);
+            color: var(--text);
+        }
+
+        /* Keep old class names working */
+        .new-chat-btn  { /* same as nav-btn — defined below */ }
+        .settings-btn  { }
+
+        /* ── Update banner ── */
+        .update-banner {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 14px;
+            background: rgba(191, 144, 0, 0.12);
+            border-bottom: 1px solid rgba(191, 144, 0, 0.3);
+            font-size: 0.8rem;
+            color: #e6b800;
+            flex-shrink: 0;
+            z-index: 9;
+        }
+        .update-banner.visible { display: flex; }
+        .update-banner-icon { font-size: 0.9rem; flex-shrink: 0; }
+        .update-banner-text { flex: 1; line-height: 1.4; }
+        .update-banner-text strong { color: #ffd43b; }
+        .update-banner-commits {
+            display: none;
+            margin-top: 6px;
+            padding: 6px 8px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 0.75rem;
+            color: #aaa;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .update-banner-commits.visible { display: block; }
+        .update-how {
+            margin-top: 6px;
+            padding: 6px 8px;
+            background: rgba(0,0,0,0.4);
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 0.75rem;
+            color: #7ec8a4;
+            white-space: pre;
+        }
+        .update-banner-actions { display: flex; gap: 6px; flex-shrink: 0; align-items: flex-start; }
+        .update-link-btn {
+            background: transparent;
+            border: 1px solid rgba(191,144,0,0.4);
+            color: #e6b800;
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .update-link-btn:hover { background: rgba(191,144,0,0.15); }
+        .update-dismiss {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 1rem;
+            line-height: 1;
+            padding: 2px 4px;
+            flex-shrink: 0;
+        }
+        .update-dismiss:hover { color: var(--text-muted); }
+
+        /* ── Chat area ── */
+        .chat-box {
+            flex: 1;
+            overflow-y: auto;
+            padding: 28px 16px 160px;
+            scroll-behavior: smooth;
+        }
+        .chat-box::-webkit-scrollbar { width: 5px; }
+        .chat-box::-webkit-scrollbar-track { background: transparent; }
+        .chat-box::-webkit-scrollbar-thumb {
+            background: var(--surface-3);
+            border-radius: 99px;
+        }
+
+        /* ── Messages ── */
+        .message {
+            max-width: 100%;
+            margin-bottom: 28px;
+            display: flex;
+            gap: 14px;
+            animation: msgIn 0.25s ease;
+        }
+        @keyframes msgIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        .user-avatar  { background: #3b3b9e; color: #c5c4ff; }
+        .agent-avatar { background: var(--accent-dim); color: var(--accent); border: 1px solid rgba(16,163,127,0.3); }
+
+        .content {
+            flex: 1;
+            line-height: 1.65;
+            font-size: 14.5px;
+            white-space: pre-wrap;
+            min-width: 0;
+        }
+
+        .user-msg .content {
+            background: var(--user-bubble);
+            border: 1px solid var(--border);
+            padding: 10px 15px;
+            border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px;
+            display: inline-block;
+            max-width: 82%;
+            font-size: 14.5px;
+        }
+
+        /* ── Typing indicator ── */
+        .typing-container {
+            display: flex;
+            gap: 5px;
+            padding: 14px 16px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            width: fit-content;
+        }
+        .dot {
+            width: 5px;
+            height: 5px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            animation: bounce 1.4s infinite ease-in-out;
+        }
+        .dot:nth-child(2) { animation-delay: 0.16s; }
+        .dot:nth-child(3) { animation-delay: 0.32s; }
+        @keyframes bounce {
+            0%, 80%, 100% { transform: translateY(0);   opacity: 0.4; }
+            40%            { transform: translateY(-5px); opacity: 1;   }
+        }
+
+        /* ── Status line ── */
+        .status {
+            color: var(--text-dim);
+            font-size: 11.5px;
+            text-align: center;
+            margin-bottom: 24px;
+            letter-spacing: 0.3px;
+        }
+
+        /* ── Input area ── */
+        .input-area {
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            padding: 16px 16px 20px;
+            background: linear-gradient(to bottom, transparent, var(--bg) 28%);
+        }
+
+        .input-container {
+            background: var(--surface-2);
+            border-radius: var(--radius-lg);
+            padding: 6px 8px 6px 14px;
+            display: flex;
+            align-items: flex-end;
+            gap: 6px;
+            border: 1px solid var(--border-strong);
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 8px 32px rgba(0,0,0,0.4);
+            transition: border-color 0.2s;
+        }
+        .input-container:focus-within {
+            border-color: rgba(16,163,127,0.4);
+        }
+
+        textarea {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text);
+            font-size: 14.5px;
+            font-family: inherit;
+            resize: none;
+            outline: none;
+            padding: 9px 4px;
+            max-height: 180px;
+            line-height: 1.6;
+        }
+        textarea::placeholder { color: var(--text-dim); }
+
+        .icon-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            width: 34px;
+            height: 34px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+            transition: background 0.15s, color 0.15s;
+            flex-shrink: 0;
+        }
+        .icon-btn:hover { background: var(--surface-3); color: var(--text); }
+
+        #sendBtn {
+            background: var(--text);
+            color: var(--bg);
+            width: 34px;
+            height: 34px;
+            border-radius: var(--radius-sm);
+            font-size: 1rem;
+            font-weight: 700;
+            flex-shrink: 0;
+            transition: opacity 0.15s, background 0.15s;
+        }
+        #sendBtn:hover:not(:disabled) { background: #fff; }
+        #sendBtn:disabled {
+            background: var(--surface-3);
+            color: var(--text-dim);
+            cursor: not-allowed;
+        }
+        #sendBtn.stop-mode {
+            background: var(--red);
+            color: #fff;
+        }
+        #sendBtn.stop-mode:hover { background: #c53030; }
+
+        #preview-box {
+            display: flex;
+            gap: 10px;
+            padding: 0 0 10px;
+            display: none;
+        }
+        .img-preview-wrapper { position: relative; width: 56px; height: 56px; }
+        .img-preview-wrapper img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+        }
+
+        /* ── Modals ── */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(4px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+        }
+        .modal-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        .modal {
+            background: var(--surface);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            width: 90%;
+            max-width: 480px;
+            box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+            transform: translateY(16px) scale(0.98);
+            transition: transform 0.22s ease, opacity 0.22s ease;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .modal-overlay.active .modal {
+            transform: translateY(0) scale(1);
+        }
+        .modal::-webkit-scrollbar { width: 4px; }
+        .modal::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 99px; }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid var(--border);
+        }
+        .modal-title { font-size: 1rem; font-weight: 600; letter-spacing: 0.2px; }
+        .modal-close {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 1.3rem;
+            cursor: pointer;
+            width: 30px;
+            height: 30px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s, color 0.15s;
+        }
+        .modal-close:hover { background: var(--surface-3); color: var(--text); }
+
+        .form-group { margin-bottom: 14px; }
+        .form-label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .form-input {
+            width: 100%;
+            padding: 9px 12px;
+            background: var(--surface-2);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            font-size: 13.5px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.18s;
+        }
+        .form-input:focus { border-color: var(--accent); }
+        .form-hint { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
+
+        .form-section {
+            margin-top: 18px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+        }
+        .form-section-title {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 12px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 22px;
+        }
+        .btn {
+            padding: 9px 18px;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 13.5px;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.15s, opacity 0.15s;
+        }
+        .btn-secondary {
+            background: var(--surface-3);
+            color: var(--text-muted);
+            border: 1px solid var(--border-strong);
+        }
+        .btn-secondary:hover { background: #2e2e2e; color: var(--text); }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-primary:hover { opacity: 0.88; }
+
+        /* ── Execution log ── */
+        .exec-log {
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+        }
+        .exec-toggle {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            font-size: 11.5px;
+            cursor: pointer;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            transition: color 0.15s;
+            font-family: inherit;
+        }
+        .exec-toggle:hover { color: var(--text-muted); }
+        .exec-arrow { font-size: 9px; }
+        .exec-entries {
+            margin-top: 6px;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+        .exec-entry {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+            padding: 3px 8px;
+            background: rgba(255, 255, 255, 0.04);
+            border-radius: 4px;
+        }
+        .exec-skill { color: #a0cfff; flex: 1; }
+        .exec-status { flex-shrink: 0; }
+        .exec-error {
+            display: block;
+            font-size: 11px;
+            color: #ff6b6b;
+            margin-top: 2px;
+            padding-left: 4px;
+            white-space: normal;
+            word-break: break-word;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        const _renderer = new marked.Renderer();
+        // marked v5+ passes a single token object {href,title,text} instead of
+        // three separate arguments. Handle both APIs so we never get [object Object].
+        _renderer.link = (hrefOrToken, title, text) => {
+            const href  = hrefOrToken?.href  ?? hrefOrToken;
+            const _title = hrefOrToken?.title ?? title;
+            const _text  = hrefOrToken?.text  ?? text ?? '';
+            const t = _title ? ` title="${_title}"` : '';
+            return `<a href="${href}"${t} target="_blank" rel="noopener noreferrer">${_text}</a>`;
+        };
+        marked.setOptions({ renderer: _renderer });
+    </script>
+</head>
+
+<body>
+
+    <!-- ── Command Center Sidebar ── -->
+    <aside class="sidebar" id="commandSidebar">
+        <div class="sidebar-header">DASHBOARD</div>
+
+        <nav class="sidebar-nav">
+            <button class="sidebar-tab active" data-panel="skills" onclick="showPanel('skills')" title="Skills">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                Skills
+            </button>
+            <button class="sidebar-tab" data-panel="health" onclick="showPanel('health')" title="Health">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                Health
+            </button>
+            <button class="sidebar-tab" data-panel="crons" onclick="showPanel('crons')" title="Cron Jobs">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Cron Jobs
+            </button>
+        </nav>
+
+        <div class="sidebar-content">
+
+            <!-- Skills Panel -->
+            <div class="panel active" id="panel-skills">
+                <div class="panel-header">
+                    <span class="panel-title">Skills <span id="skills-count" class="count-badge"></span></span>
+                    <button class="panel-refresh-btn" onclick="loadSkills()">↻</button>
+                </div>
+                <div id="skills-list"><div class="panel-empty">Loading…</div></div>
+            </div>
+
+            <!-- Health Panel -->
+            <div class="panel" id="panel-health">
+                <div class="panel-header">
+                    <span class="panel-title">Agent Health</span>
+                    <button class="panel-refresh-btn" onclick="loadHealth()">↻</button>
+                </div>
+                <div id="health-content"><div class="panel-empty">Loading…</div></div>
+            </div>
+
+            <!-- Cron Jobs Panel -->
+            <div class="panel" id="panel-crons">
+                <div class="panel-header">
+                    <span class="panel-title">Cron Jobs <span id="crons-count" class="count-badge"></span></span>
+                    <button class="panel-refresh-btn" onclick="loadCronJobs()">↻</button>
+                </div>
+                <div id="crons-list"><div class="panel-empty">Loading…</div></div>
+            </div>
+
+        </div>
+    </aside>
+
+    <div class="container">
+        <div class="header">
+            <div class="header-left">
+                <button class="nav-btn new-chat-btn" onclick="newChat()" title="New Chat">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                </button>
+            </div>
+            <div class="header-brand">Trinity<span>Claw</span></div>
+            <div class="header-right">
+                <button class="nav-btn settings-btn" onclick="openSettings()" title="Settings">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                </button>
+            </div>
+        </div>
+        <!-- Update notification banner -->
+        <div class="update-banner" id="updateBanner">
+            <span class="update-banner-icon">⬆</span>
+            <div class="update-banner-text">
+                <span id="updateBannerMsg"><strong>Update available</strong></span>
+                <div class="update-banner-commits" id="updateCommits"></div>
+                <div class="update-how" id="updateHow" style="display:none">git pull
+docker compose up --build -d</div>
+            </div>
+            <div class="update-banner-actions">
+                <button class="update-link-btn" onclick="toggleUpdateDetails()">View changes</button>
+                <button class="update-link-btn" onclick="toggleUpdateHow()">How to update</button>
+                <button class="update-dismiss" onclick="dismissUpdate()" title="Dismiss">✕</button>
+            </div>
+        </div>
+
+        <div class="chat-box" id="chatBox">
+            <div class="status" id="statusText">TrinityClaw Ready</div>
+        </div>
+        <div class="input-area">
+            <div id="preview-box"></div>
+            <div class="input-container">
+                <button class="icon-btn" onclick="document.getElementById('imageInput').click()" title="Attach image or document">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <input type="file" id="imageInput" hidden accept="image/*,.pdf,.doc,.docx,.txt,.csv,.xlsx,.pptx,.md">
+                <textarea id="userInput" placeholder="Message TrinityClaw..." rows="1"></textarea>
+                <button class="icon-btn" id="voiceBtn" onclick="toggleVoice()" title="Voice input">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                </button>
+                <button id="sendBtn" onclick="sendMessage()" title="Send message">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">⚙️ Settings</div>
+                <button class="modal-close" onclick="closeSettings()">&times;</button>
+            </div>
+
+            <!-- LiteLLM Configuration -->
+            <div class="form-group">
+                <label class="form-label" for="modelNameInput">Model Name</label>
+                <input type="text" id="modelNameInput" class="form-input"
+                    placeholder="openai/moonshotai/kimi-k2-instruct">
+                <div class="form-hint">From litellm_config.yaml</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" for="apiBaseInput">API Base URL</label>
+                <input type="text" id="apiBaseInput" class="form-input" placeholder="https://api.moonshot.cn/v1">
+                <div class="form-hint">API endpoint for the model provider</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" for="apiKeyEnvInput">API Key Env Variable</label>
+                <input type="text" id="apiKeyEnvInput" class="form-input" placeholder="MOONSHOT_API_KEY">
+                <div class="form-hint">Name of env var containing your API key</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" for="apiKeyValueInput">🔒 API Key Value</label>
+                <input type="password" id="apiKeyValueInput" class="form-input"
+                    placeholder="Enter new API key or leave blank to keep existing">
+                <div class="form-hint">Masked for security • Leave blank to keep existing</div>
+            </div>
+            <!-- Model Source Selection -->
+            <div class="form-section">
+                <div class="form-section-title">🤖 Model Source</div>
+
+                <div class="form-group">
+                    <label class="form-label" for="modelSourceSelect">Choose LLM Provider</label>
+                    <select id="modelSourceSelect" class="form-input" style="cursor: pointer;">
+                        <option value="cloud">☁️ Cloud API (LiteLLM)</option>
+                        <option value="local">🖥️ Local Model (Ollama)</option>
+                    </select>
+                    <div class="form-hint">Cloud: Requires API key • Local: Requires Ollama running</div>
+                </div>
+
+                <div class="form-group" id="localModelGroup" style="display:none;">
+                    <label class="form-label" for="ollamaModelSelect">Local Model</label>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <select id="ollamaModelSelect" class="form-input" style="cursor:pointer; flex:1;">
+                            <option value="">— click ↻ to load —</option>
+                        </select>
+                        <button id="refreshModelsBtn" onclick="loadOllamaModels()"
+                            title="Refresh model list from Ollama"
+                            style="background:var(--input-bg); border:1px solid var(--modal-border);
+                                   color:var(--text-main); border-radius:6px; padding:6px 10px;
+                                   cursor:pointer; font-size:1rem; flex-shrink:0;">↻</button>
+                    </div>
+                    <div class="form-hint">Models pulled in Ollama • Only shown when Local is active</div>
+                </div>
+            </div>
+            <!-- Telegram Configuration -->
+            <div class="form-section">
+                <div class="form-section-title">📱 Telegram Bot</div>
+
+                <div class="form-group">
+                    <label class="form-label" for="telegramTokenInput">Telegram Token</label>
+                    <input type="password" id="telegramTokenInput" class="form-input"
+                        placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz">
+                    <div class="form-hint">From @BotFather • Leave blank to keep existing</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" for="telegramChatIdInput">Telegram Chat ID</label>
+                    <input type="text" id="telegramChatIdInput" class="form-input" placeholder="-1234567890">
+                    <div class="form-hint">Your chat/group ID • Leave blank to keep existing</div>
+                </div>
+            </div>
+
+            <!-- Agent Security -->
+            <div class="form-section">
+                <div class="form-section-title">🔑 Agent Security</div>
+                <div class="form-group">
+                    <label class="form-label" for="agentApiKeyInput">Agent API Key</label>
+                    <input type="password" id="agentApiKeyInput" class="form-input"
+                        placeholder="Your TRINITY_API_KEY from .env">
+                    <div class="form-hint">Stored in browser only • Required to save settings</div>
+                </div>
+            </div>
+
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveSettings()">💾 Save & Update</button>
+            </div>
+
+            <div id="saveStatus" style="margin-top: 12px; font-size: 0.85rem; color: var(--text-secondary);"></div>
+        </div>
+    </div>
+
+    <script>
+        const chatBox = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+        const imageInput = document.getElementById('imageInput');
+        const previewBox = document.getElementById('preview-box');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusText = document.getElementById('statusText');
+        let _abortController = null;
+        const settingsModal = document.getElementById('settingsModal');
+
+        // LiteLLM inputs
+        const modelNameInput = document.getElementById('modelNameInput');
+        const apiBaseInput = document.getElementById('apiBaseInput');
+        const apiKeyEnvInput = document.getElementById('apiKeyEnvInput');
+        const apiKeyValueInput = document.getElementById('apiKeyValueInput');
+
+        // Telegram inputs
+        const telegramTokenInput = document.getElementById('telegramTokenInput');
+        const telegramChatIdInput = document.getElementById('telegramChatIdInput');
+
+        // Show/hide local model group based on source selection
+        document.getElementById('modelSourceSelect').addEventListener('change', function () {
+            document.getElementById('localModelGroup').style.display =
+                this.value === 'local' ? 'block' : 'none';
+        });
+
+        async function loadOllamaModels() {
+            const select = document.getElementById('ollamaModelSelect');
+            const btn = document.getElementById('refreshModelsBtn');
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            try {
+                const [modelsRes, currentRes] = await Promise.all([
+                    fetch(`${agentUrl}/config/ollama/models`),
+                    fetch(`${agentUrl}/config/ollama/get`),
+                ]);
+                const modelsData = await modelsRes.json();
+                const currentData = currentRes.ok ? await currentRes.json() : {};
+                const current = currentData.model || '';
+                const models = modelsData.models || [];
+
+                select.innerHTML = '';
+                if (models.length === 0) {
+                    select.innerHTML = '<option value="">No models found — is Ollama running?</option>';
+                } else {
+                    models.forEach(m => {
+                        const opt = document.createElement('option');
+                        opt.value = m;
+                        opt.textContent = m;
+                        if (m === current) opt.selected = true;
+                        select.appendChild(opt);
+                    });
+                    // If current model not in the list, add it as manual entry
+                    if (current && !models.includes(current)) {
+                        const opt = document.createElement('option');
+                        opt.value = current;
+                        opt.textContent = current + ' (current)';
+                        opt.selected = true;
+                        select.insertBefore(opt, select.firstChild);
+                    }
+                }
+            } catch (e) {
+                select.innerHTML = '<option value="">Could not reach Ollama</option>';
+            } finally {
+                btn.textContent = '↻';
+                btn.disabled = false;
+            }
+        }
+
+        const agentApiKeyInput = document.getElementById('agentApiKeyInput');
+        const saveStatus = document.getElementById('saveStatus');
+        const agentUrl = 'http://localhost:8001';
+
+        // Generate a unique session ID for this tab session
+        if (!localStorage.getItem('trinity_session_id')) {
+            localStorage.setItem('trinity_session_id', 'sess_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now());
+        }
+        let sessionId = localStorage.getItem('trinity_session_id');
+
+        let uploadedImageData = null;
+        let uploadedDocData = null;
+        let uploadedDocName = null;
+
+        // Load current config from backend
+        async function loadSettings() {
+            try {
+                // Fetch LiteLLM config
+                const configRes = await fetch(`${agentUrl}/config/get-all`);
+                if (configRes.ok) {
+                    const config = await configRes.json();
+                    if (config.success) {
+                        modelNameInput.value = config.data.model || '';
+                        apiBaseInput.value = config.data.api_base || '';
+                        apiKeyEnvInput.value = config.data.api_key_env || '';
+                        apiKeyValueInput.value = ''; // Never show existing key
+                        agentApiKeyInput.value = localStorage.getItem('trinity_api_key') || '';
+                    }
+                }
+
+                // Fetch Telegram config
+                const telegramRes = await fetch(`${agentUrl}/config/telegram/get`);
+                const sourceRes = await fetch(`${agentUrl}/config/model-source/get`);
+                if (sourceRes.ok) {
+                    const source = await sourceRes.json();
+                    if (source.success) {
+                        const src = source.model_source || 'cloud';
+                        document.getElementById('modelSourceSelect').value = src;
+                        document.getElementById('localModelGroup').style.display =
+                            src === 'local' ? 'block' : 'none';
+                        if (src === 'local') loadOllamaModels();
+                    }
+                }
+                if (telegramRes.ok) {
+                    const telegram = await telegramRes.json();
+                    if (telegram.success) {
+                        telegramTokenInput.value = ''; // Never show existing token
+                        telegramChatIdInput.value = telegram.data.chat_id || '';
+                    }
+                }
+            } catch (e) {
+                console.log('Using cached settings (backend may not be ready)');
+            }
+        }
+
+        // Returns headers including X-API-Key if set
+        function getAuthHeaders() {
+            const key = localStorage.getItem('trinity_api_key') || '';
+            return {
+                'Content-Type': 'application/json',
+                ...(key ? { 'X-API-Key': key } : {})
+            };
+        }
+
+        // Save all settings
+        async function saveSettings() {
+            const btn = document.querySelector('.btn-primary');
+            const originalText = btn.textContent;
+            btn.textContent = '⏳ Saving...';
+            btn.disabled = true;
+            saveStatus.textContent = '';
+
+            try {
+                // Update LiteLLM config
+                const modelName = modelNameInput.value.trim();
+                const apiBase = apiBaseInput.value.trim();
+                const apiKeyEnv = apiKeyEnvInput.value.trim();
+                const apiKeyVal = apiKeyValueInput.value.trim();
+
+                // Save Agent API key to localStorage first
+                const agentKey = agentApiKeyInput.value.trim();
+                if (agentKey) localStorage.setItem('trinity_api_key', agentKey);
+
+                if (modelName) {
+                    await fetch(`${agentUrl}/config/update`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({ skill: 'model', function: 'model_name', args: [modelName] })
+                    });
+                }
+
+                if (apiBase) {
+                    await fetch(`${agentUrl}/config/update`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({ skill: 'api', function: 'base', args: [apiBase] })
+                    });
+                }
+
+                if (apiKeyEnv) {
+                    await fetch(`${agentUrl}/config/update`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({ skill: 'api', function: 'key', args: [apiKeyEnv] })
+                    });
+                }
+
+                if (apiKeyVal) {
+                    await fetch(`${agentUrl}/config/update-api-key`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({ skill: apiKeyEnv || 'MOONSHOT_API_KEY', function: 'value', args: [apiKeyVal] })
+                    });
+                }
+
+                // Update Telegram config
+                const modelSource = document.getElementById('modelSourceSelect').value;
+                if (modelSource) {
+                    await fetch(`${agentUrl}/config/model-source/set`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({ source: modelSource })
+                    });
+                }
+                // Save local Ollama model if one is selected
+                const ollamaModel = document.getElementById('ollamaModelSelect').value.trim();
+                if (ollamaModel) {
+                    await fetch(`${agentUrl}/config/ollama/set`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({ model: ollamaModel })
+                    });
+                }
+
+                const telegramToken = telegramTokenInput.value.trim();
+                const telegramChatId = telegramChatIdInput.value.trim();
+
+                if (telegramToken || telegramChatId) {
+                    await fetch(`${agentUrl}/config/telegram/update`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({
+                            token: telegramToken,
+                            chat_id: telegramChatId
+                        })
+                    });
+                }
+
+                saveStatus.textContent = '✅ Settings saved! Restart services for changes to take effect.';
+                saveStatus.style.color = 'var(--accent)';
+
+                setTimeout(() => {
+                    closeSettings();
+                    saveStatus.textContent = '';
+                }, 2500);
+
+            } catch (e) {
+                console.error('Save error:', e);
+                saveStatus.textContent = `❌ Error: ${e.message}`;
+                saveStatus.style.color = '#ff6b6b';
+            } finally {
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        function openSettings() {
+            loadSettings();
+            settingsModal.classList.add('active');
+            // Always restore saved API key — loadSettings() only sets it if /config/get-all
+            // succeeds (it returns 401 before auth is set), so we ensure it's always shown.
+            agentApiKeyInput.value = localStorage.getItem('trinity_api_key') || '';
+        }
+
+        function closeSettings() {
+            settingsModal.classList.remove('active');
+            saveStatus.textContent = '';
+        }
+
+        settingsModal.addEventListener('click', (e) => {
+            if (e.target === settingsModal) closeSettings();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { closeSettings(); }
+        });
+
+        userInput.addEventListener('input', function () {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+        });
+
+        imageInput.addEventListener('change', function (e) {
+            const file = e.target.files[0];
+            if (file) handleFileAttachment(file);
+        });
+
+        function handleFileAttachment(file) {
+            const isImage = file.type.startsWith('image/');
+            const reader = new FileReader();
+            reader.onload = function (event) {
+                clearImage();
+                if (isImage) {
+                    uploadedImageData = event.target.result;
+                    previewBox.style.display = 'block';
+                    previewBox.innerHTML = `<div class="img-preview-wrapper"><img src="${uploadedImageData}"><div style="position:absolute; top:-5px; right:-5px; background:#ff4b4b; color:white; border-radius:50%; width:18px; height:18px; font-size:12px; display:flex; justify-content:center; align-items:center; cursor:pointer;" onclick="clearImage()">×</div></div>`;
+                } else {
+                    uploadedDocData = event.target.result;
+                    uploadedDocName = file.name;
+                    previewBox.style.display = 'block';
+                    previewBox.innerHTML = `<div class="img-preview-wrapper" style="width:auto;height:auto;padding:6px 10px;background:var(--surface-3);border-radius:8px;border:1px solid var(--border);display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);max-width:200px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${file.name}</span><div style="cursor:pointer;color:#ff4b4b;flex-shrink:0" onclick="clearImage()">×</div></div>`;
+                }
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function clearImage() {
+            uploadedImageData = null;
+            uploadedDocData = null;
+            uploadedDocName = null;
+            previewBox.innerHTML = '';
+            previewBox.style.display = 'none';
+            imageInput.value = '';
+        }
+
+        function toggleTyping(show) {
+            const existing = document.getElementById('typing-indicator');
+            if (show && !existing) {
+                const msgDiv = document.createElement('div');
+                msgDiv.className = 'message agent-msg';
+                msgDiv.id = 'typing-indicator';
+                msgDiv.innerHTML = `<div class="avatar agent-avatar">TC</div><div class="content"><div class="typing-container"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div></div>`;
+                chatBox.appendChild(msgDiv);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            } else if (!show && existing) {
+                existing.remove();
+            }
+        }
+
+        function renderExecutionLog(logs) {
+            if (!logs || logs.length === 0) return null;
+            const wrap = document.createElement('div');
+            wrap.className = 'exec-log';
+
+            const toggle = document.createElement('button');
+            toggle.className = 'exec-toggle';
+            const arrow = document.createElement('span');
+            arrow.className = 'exec-arrow';
+            arrow.textContent = '▶';
+            const label = document.createTextNode(` ${logs.length} skill${logs.length !== 1 ? 's' : ''} used`);
+            toggle.appendChild(arrow);
+            toggle.appendChild(label);
+
+            const entries = document.createElement('div');
+            entries.className = 'exec-entries';
+            entries.style.display = 'none';
+
+            logs.forEach(log => {
+                const row = document.createElement('div');
+                row.className = 'exec-entry';
+                const name = document.createElement('span');
+                name.className = 'exec-skill';
+                name.textContent = `${log.skill}.${log.function}`;
+                const status = document.createElement('span');
+                status.className = 'exec-status';
+                status.textContent = log.status === 'success' ? '✅' : '❌';
+                row.appendChild(name);
+                row.appendChild(status);
+                if (log.status !== 'success' && log.error) {
+                    const err = document.createElement('span');
+                    err.className = 'exec-error';
+                    err.textContent = String(log.error).slice(0, 120);
+                    row.appendChild(err);
+                }
+                entries.appendChild(row);
+            });
+
+            toggle.addEventListener('click', () => {
+                const open = entries.style.display !== 'none';
+                entries.style.display = open ? 'none' : 'flex';
+                arrow.textContent = open ? '▶' : '▼';
+            });
+
+            wrap.appendChild(toggle);
+            wrap.appendChild(entries);
+            return wrap;
+        }
+
+        function newChat() {
+            sessionId = 'sess_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+            localStorage.setItem('trinity_session_id', sessionId);
+            chatBox.innerHTML = '<div class="status">New session started — say hello!</div>';
+        }
+
+        function addMessage(text, sender, image = null, executionLog = null, docName = null) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${sender}-msg`;
+            const avatar = document.createElement('div');
+            avatar.className = `avatar ${sender}-avatar`;
+            avatar.textContent = sender === 'user' ? 'U' : 'TC';
+            const content = document.createElement('div');
+            content.className = 'content';
+            if (image) {
+                const img = document.createElement('img');
+                img.src = image;
+                img.style.maxWidth = '100%';
+                img.style.maxHeight = '300px';
+                img.style.borderRadius = '10px';
+                img.style.display = 'block';
+                img.style.marginBottom = '10px';
+                content.appendChild(img);
+            }
+            if (docName) {
+                const docBadge = document.createElement('div');
+                docBadge.style.cssText = 'display:inline-flex;align-items:center;gap:5px;background:var(--surface-3);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;color:var(--text-muted);margin-bottom:6px;';
+                docBadge.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>${docName}`;
+                content.appendChild(docBadge);
+            }
+            const txt = document.createElement('div');
+            if (sender === 'agent') {
+                txt.innerHTML = marked.parse(text);
+            } else {
+                txt.textContent = text;
+            }
+            content.appendChild(txt);
+            if (sender === 'agent' && executionLog && executionLog.length > 0) {
+                const logEl = renderExecutionLog(executionLog);
+                if (logEl) content.appendChild(logEl);
+            }
+            msgDiv.appendChild(avatar);
+            msgDiv.appendChild(content);
+            chatBox.appendChild(msgDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function _setSendBtnStop() {
+            sendBtn.classList.add('stop-mode');
+            sendBtn.title = 'Stop';
+            sendBtn.onclick = stopRequest;
+            sendBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>`;
+        }
+
+        function _restoreSendBtn() {
+            sendBtn.classList.remove('stop-mode');
+            sendBtn.disabled = false;
+            sendBtn.title = 'Send message';
+            sendBtn.onclick = sendMessage;
+            sendBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>`;
+        }
+
+        function stopRequest() {
+            if (_abortController) _abortController.abort();
+        }
+
+        async function sendMessage() {
+            if (_abortController) return; // request already in flight
+            const message = userInput.value.trim();
+            if (!message && !uploadedImageData && !uploadedDocData) return;
+            addMessage(message, 'user', uploadedImageData, null, uploadedDocName);
+            const tempImg = uploadedImageData;
+            const tempDoc = uploadedDocData;
+            const tempDocName = uploadedDocName;
+            userInput.value = '';
+            userInput.style.height = 'auto';
+            clearImage();
+            toggleTyping(true);
+            _abortController = new AbortController();
+            _setSendBtnStop();
+            try {
+                const response = await fetch(`${agentUrl}/chat`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({
+                        message: message,
+                        image: tempImg,
+                        document: tempDoc,
+                        document_name: tempDocName,
+                        session_id: sessionId
+                    }),
+                    signal: _abortController.signal
+                });
+
+                toggleTyping(false);
+                const data = await response.json();
+
+                if (response.ok) {
+                    addMessage(data.reply || "No response content", 'agent', null, data.execution_log);
+                } else {
+                    addMessage(`⚠️ Backend Error: ${data.detail || 'Unknown error'}`, 'agent');
+                }
+            } catch (e) {
+                toggleTyping(false);
+                if (e.name === 'AbortError') {
+                    addMessage('⏹ Request cancelled.', 'agent');
+                } else {
+                    addMessage(`❌ Connection Error: Ensure your Agent is running at ${agentUrl}`, "agent");
+                }
+            } finally {
+                _abortController = null;
+                _restoreSendBtn();
+                userInput.focus();
+            }
+        }
+
+        userInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        userInput.addEventListener('paste', (e) => {
+            const items = e.clipboardData && e.clipboardData.items;
+            if (!items) return;
+            for (const item of items) {
+                if (item.kind === 'file') {
+                    const file = item.getAsFile();
+                    if (file) {
+                        e.preventDefault();
+                        handleFileAttachment(file);
+                        return;
+                    }
+                }
+            }
+            // No file in clipboard — let native text paste proceed, then trigger resize
+            setTimeout(() => {
+                userInput.style.height = 'auto';
+                userInput.style.height = userInput.scrollHeight + 'px';
+            }, 0);
+        });
+
+        // ── Voice recording ──────────────────────────────────────────────────
+        let _mediaRecorder = null;
+        let _audioChunks = [];
+        let _isRecording = false;
+
+        async function toggleVoice() {
+            const voiceBtn = document.getElementById('voiceBtn');
+
+            if (_isRecording) {
+                // Stop recording
+                _mediaRecorder.stop();
+                return;
+            }
+
+            if (!navigator.mediaDevices || !window.MediaRecorder) {
+                addMessage('❌ Your browser does not support audio recording.', 'agent');
+                return;
+            }
+
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            } catch (err) {
+                addMessage('❌ Microphone access denied. Please allow microphone access and try again.', 'agent');
+                return;
+            }
+
+            _audioChunks = [];
+            _mediaRecorder = new MediaRecorder(stream);
+            _isRecording = true;
+            voiceBtn.textContent = '⏹';
+            voiceBtn.title = 'Stop recording';
+
+            _mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) _audioChunks.push(e.data);
+            };
+
+            _mediaRecorder.onstop = async () => {
+                _isRecording = false;
+                voiceBtn.textContent = '🎤';
+                voiceBtn.title = 'Voice message';
+                stream.getTracks().forEach(t => t.stop());
+
+                const mimeType = _mediaRecorder.mimeType || 'audio/webm';
+                const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm';
+                const blob = new Blob(_audioChunks, { type: mimeType });
+
+                // Convert to base64
+                const reader = new FileReader();
+                reader.onload = async () => {
+                    const base64 = reader.result.split(',')[1];
+                    voiceBtn.disabled = true;
+                    voiceBtn.textContent = '⏳';
+                    try {
+                        const resp = await fetch(`${agentUrl}/transcribe`, {
+                            method: 'POST',
+                            headers: getAuthHeaders(),
+                            body: JSON.stringify({ audio: base64, filename: `voice.${ext}` })
+                        });
+                        const data = await resp.json();
+                        if (resp.ok && data.text) {
+                            userInput.value = data.text;
+                            userInput.dispatchEvent(new Event('input'));
+                            userInput.focus();
+                        } else {
+                            addMessage(`⚠️ Transcription failed: ${data.detail || 'Unknown error'}`, 'agent');
+                        }
+                    } catch (e) {
+                        addMessage('❌ Could not reach transcription endpoint. Is the agent running?', 'agent');
+                    } finally {
+                        voiceBtn.disabled = false;
+                        voiceBtn.textContent = '🎤';
+                    }
+                };
+                reader.readAsDataURL(blob);
+            };
+
+            _mediaRecorder.start();
+        }
+
+        // ── Update checker ───────────────────────────────────────────────────
+        // Compares the deployed git SHA (from /version) against GitHub's latest.
+        // No manual BUILD_DATE needed — updates automatically after every deploy.
+        const GITHUB_REPO = 'TrinityClaw/trinity-claw';
+
+        let _updateDetails = null;
+
+        async function checkForUpdates() {
+            if (GITHUB_REPO === 'YOUR_USERNAME/trinity-claw') return;
+            try {
+                // Get the SHA currently running on the server
+                const versionRes = await fetch('/version');
+                if (!versionRes.ok) return;
+                const { sha: deployedSha } = await versionRes.json();
+                if (!deployedSha || deployedSha === 'unknown') return;
+
+                // Get latest commits from GitHub
+                const ghRes = await fetch(
+                    `https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=10`,
+                    { headers: { 'Accept': 'application/vnd.github.v3+json' } }
+                );
+                if (!ghRes.ok) return;
+                const commits = await ghRes.json();
+                if (!commits.length) return;
+
+                const latestSha = commits[0].sha;
+                if (latestSha === deployedSha) return; // already up to date
+
+                const dismissed = localStorage.getItem('update_dismissed');
+                if (dismissed === latestSha) return; // user already dismissed this version
+
+                // Count commits ahead of deployed SHA
+                const deployedIdx = commits.findIndex(c => c.sha === deployedSha);
+                const newCommits  = deployedIdx === -1 ? commits : commits.slice(0, deployedIdx);
+                const count       = newCommits.length || 1;
+
+                _updateDetails = {
+                    sha: latestSha,
+                    lines: newCommits.map(c =>
+                        `• ${c.commit.message.split('\n')[0].slice(0, 72)}`
+                    ).join('\n')
+                };
+
+                document.getElementById('updateBannerMsg').innerHTML =
+                    `<strong>Update available</strong> — ${count} new commit${count !== 1 ? 's' : ''}`;
+                document.getElementById('updateCommits').textContent = _updateDetails.lines;
+                document.getElementById('updateBanner').classList.add('visible');
+            } catch (e) {
+                // silently ignore — network error or rate limit
+            }
+        }
+
+        function toggleUpdateDetails() {
+            const el = document.getElementById('updateCommits');
+            el.classList.toggle('visible');
+        }
+
+        function toggleUpdateHow() {
+            const el = document.getElementById('updateHow');
+            el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function dismissUpdate() {
+            if (_updateDetails) localStorage.setItem('update_dismissed', _updateDetails.sha);
+            document.getElementById('updateBanner').classList.remove('visible');
+        }
+
+        // Check on load, then once per day
+        checkForUpdates();
+        setInterval(checkForUpdates, 24 * 60 * 60 * 1000);
+
+        // ── Command Center Sidebar ────────────────────────────────────────────
+
+        function showPanel(name) {
+            document.querySelectorAll('.sidebar-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.panel === name);
+            });
+            document.querySelectorAll('.panel').forEach(p => {
+                p.classList.toggle('active', p.id === 'panel-' + name);
+            });
+            if (name === 'health') loadHealth();
+            if (name === 'crons') loadCronJobs();
+        }
+
+        async function loadSkills() {
+            const el = document.getElementById('skills-list');
+            const cnt = document.getElementById('skills-count');
+            try {
+                const res = await fetch(`${agentUrl}/skills`);
+                const data = await res.json();
+                const metadata = data.skills || {};
+                const modules = Object.entries(metadata);
+                cnt.textContent = modules.length;
+                if (modules.length === 0) {
+                    el.innerHTML = '<div class="panel-empty">No skills loaded</div>';
+                    return;
+                }
+                el.innerHTML = modules.map(([name, meta]) => {
+                    const fns = meta.functions || [];
+                    return `
+                    <div class="skill-module" id="skm-${name}">
+                        <div class="skill-module-header" onclick="toggleSkillModule('${name}')">
+                            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</span>
+                            <span class="skill-fn-count">${fns.length} fn${fns.length !== 1 ? 's' : ''}</span>
+                            <svg class="skill-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                        </div>
+                        <div class="skill-fn-list">
+                            ${fns.map(fn => {
+                                const fnName = fn.name || fn;
+                                const fnArgs = fn.args ? fn.args.filter(a => a !== 'self').join(', ') : '';
+                                return `<div class="skill-fn" onclick="insertSkillRef('${name}.${fnName}')" title="${fnArgs || 'no args'}">${fnName}</div>`;
+                            }).join('')}
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                el.innerHTML = '<div class="panel-empty">Could not load skills</div>';
+            }
+        }
+
+        function toggleSkillModule(name) {
+            const mod = document.getElementById('skm-' + name);
+            if (mod) mod.classList.toggle('open');
+        }
+
+        function insertSkillRef(ref) {
+            const pos = userInput.selectionStart;
+            const val = userInput.value;
+            userInput.value = val.slice(0, pos) + ref + val.slice(pos);
+            userInput.focus();
+            userInput.selectionStart = userInput.selectionEnd = pos + ref.length;
+        }
+
+        async function loadHealth() {
+            const el = document.getElementById('health-content');
+            try {
+                const res = await fetch(`${agentUrl}/health`);
+                const d = await res.json();
+                el.innerHTML = `
+                <div class="health-card">
+                    <div class="health-row">
+                        <span class="health-label">Status</span>
+                        <span class="health-val h-ok">● ${d.status}</span>
+                    </div>
+                    <div class="health-row">
+                        <span class="health-label">Version</span>
+                        <span class="health-val h-dim">${d.version}</span>
+                    </div>
+                    <div class="health-row">
+                        <span class="health-label">Skills loaded</span>
+                        <span class="health-val">${d.skills_loaded}</span>
+                    </div>
+                    <div class="health-row">
+                        <span class="health-label">ChromaDB</span>
+                        <span class="health-val ${d.chroma_connected ? 'h-ok' : 'h-err'}">${d.chroma_connected ? '● connected' : '● disconnected'}</span>
+                    </div>
+                    <div class="health-row">
+                        <span class="health-label">Sandbox</span>
+                        <span class="health-val ${d.sandbox === 'enabled' ? 'h-ok' : 'h-dim'}">${d.sandbox}</span>
+                    </div>
+                </div>`;
+            } catch (e) {
+                el.innerHTML = '<div class="panel-empty">Agent offline</div>';
+            }
+        }
+
+        function _cronEta(isoStr) {
+            const diff = Math.floor((new Date(isoStr) - Date.now()) / 1000);
+            if (diff <= 0) return 'overdue';
+            if (diff < 3600)  return `in ${Math.floor(diff / 60)}m`;
+            if (diff < 86400) return `in ${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`;
+            return `in ${Math.floor(diff / 86400)}d`;
+        }
+
+        function _humanInterval(secs) {
+            if (!secs)        return '';
+            if (secs < 60)    return `${secs}s`;
+            if (secs < 3600)  return `${Math.floor(secs / 60)}m`;
+            if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+            return `${Math.floor(secs / 86400)}d`;
+        }
+
+        async function loadCronJobs() {
+            const el = document.getElementById('crons-list');
+            const cnt = document.getElementById('crons-count');
+            try {
+                const res = await fetch(`${agentUrl}/scheduler/list`);
+                const data = await res.json();
+                const tasks = data.tasks || {};
+                const entries = Object.entries(tasks);
+                cnt.textContent = entries.length;
+                if (entries.length === 0) {
+                    el.innerHTML = '<div class="panel-empty">No scheduled jobs</div>';
+                    return;
+                }
+                el.innerHTML = entries.map(([name, t]) => {
+                    const isRecurring = t.type === 'recurring';
+                    const badge = isRecurring
+                        ? `<span class="cron-badge badge-recurring">↻ ${_humanInterval(t.interval_seconds)}</span>`
+                        : `<span class="cron-badge badge-once">once</span>`;
+                    const nextRun = new Date(t.next_run);
+                    const dateStr = nextRun.toLocaleDateString([], {month:'short', day:'numeric'})
+                                  + ' ' + nextRun.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+                    const prompt = (t.prompt || '').slice(0, 55) + (t.prompt?.length > 55 ? '…' : '');
+                    const safeName = name.replace(/'/g, "\\'");
+                    return `
+                    <div class="cron-item" id="cron-${name}">
+                        <div class="cron-row1">
+                            <span class="cron-name" title="${name}">${name}</span>
+                            ${badge}
+                            <button class="cron-delete" onclick="deleteCronJob('${safeName}')" title="Delete">✕</button>
+                        </div>
+                        <div class="cron-meta">Next: ${dateStr} (${_cronEta(t.next_run)}) · ${t.run_count || 0} runs</div>
+                        <div class="cron-prompt">"${prompt}"</div>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                el.innerHTML = '<div class="panel-empty">Could not load jobs</div>';
+            }
+        }
+
+        async function deleteCronJob(name) {
+            if (!confirm(`Delete cron job "${name}"?`)) return;
+            const apiKey = localStorage.getItem('trinity_api_key') || '';
+            try {
+                const res = await fetch(`${agentUrl}/scheduler/task/${encodeURIComponent(name)}`, {
+                    method: 'DELETE',
+                    headers: apiKey ? {'X-API-Key': apiKey} : {}
+                });
+                if (res.ok) {
+                    document.getElementById('cron-' + name)?.remove();
+                    const remaining = document.querySelectorAll('.cron-item').length;
+                    document.getElementById('crons-count').textContent = remaining;
+                    if (remaining === 0) {
+                        document.getElementById('crons-list').innerHTML = '<div class="panel-empty">No scheduled jobs</div>';
+                    }
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    alert(`Delete failed: ${err.detail || res.status}`);
+                }
+            } catch (e) {
+                alert('Could not reach agent');
+            }
+        }
+
+        // Auto-load skills on page startup
+        loadSkills();
+
+        // Auto-refresh health every 60s while panel is visible
+        setInterval(() => {
+            if (document.getElementById('panel-health').classList.contains('active')) loadHealth();
+        }, 60000);
+        // ────────────────────────────────────────────────────────────────────
+    </script>
+</body>
+
+</html>

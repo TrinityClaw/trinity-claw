@@ -1,0 +1,381 @@
+# scheduler.py
+import json
+import os
+import re
+import threading
+import time
+import requests
+from datetime import datetime, timedelta
+from pathlib import Path
+
+NAME = 'scheduler'
+DOC = 'Schedule agent prompts to run once or recurring. Natural language: "tomorrow at 3pm", "in 2 hours", "every 1h"'
+
+_TASKS_FILE = Path("/app/memory/scheduled_tasks.json")
+_lock = threading.Lock()
+_running = False
+_thread = None
+
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+
+def _load() -> dict:
+    _TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _TASKS_FILE.exists():
+        try:
+            return json.loads(_TASKS_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save(tasks: dict):
+    _TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _TASKS_FILE.write_text(json.dumps(tasks, indent=2, default=str))
+
+
+# ── Time Parsing ──────────────────────────────────────────────────────────────
+
+def _parse_when(when_str: str) -> datetime:
+    """
+    Parse natural language or ISO datetime to a datetime object.
+
+    Supported formats:
+      - "in 2 hours", "in 30 minutes", "in 1 day"
+      - "tomorrow", "tomorrow at 3pm", "tomorrow at 14:30"
+      - "today at 5pm"
+      - "at 3pm", "at 14:30"  (today if future, else tomorrow)
+      - "next monday", "next friday at 9am"
+      - ISO: "2026-03-01 10:00", "2026-03-01T10:00:00"
+    """
+    s = when_str.strip().lower()
+    now = datetime.now()
+
+    # "in X seconds/minutes/hours/days"
+    m = re.match(
+        r'in\s+(\d+)\s*'
+        r'(s|sec|secs|second|seconds|'
+        r'm|min|mins|minute|minutes|'
+        r'h|hr|hrs|hour|hours|'
+        r'd|day|days)',
+        s
+    )
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        if unit.startswith('s'):   return now + timedelta(seconds=n)
+        if unit.startswith('m'):   return now + timedelta(minutes=n)
+        if unit.startswith('h'):   return now + timedelta(hours=n)
+        if unit.startswith('d'):   return now + timedelta(days=n)
+
+    # Extract optional "at H:MM [am/pm]" component
+    tp = re.search(r'at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', s)
+    t_hour = t_min = None
+    if tp:
+        t_hour = int(tp.group(1))
+        t_min  = int(tp.group(2) or 0)
+        ampm   = tp.group(3)
+        if ampm == 'pm' and t_hour != 12:
+            t_hour += 12
+        elif ampm == 'am' and t_hour == 12:
+            t_hour = 0
+
+    # Determine base date
+    base = None
+    if 'tomorrow' in s:
+        base = (now + timedelta(days=1)).date()
+    elif 'today' in s:
+        base = now.date()
+    else:
+        weekdays = {
+            'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+            'friday': 4, 'saturday': 5, 'sunday': 6,
+        }
+        for day_name, day_num in weekdays.items():
+            if day_name in s:
+                diff = (day_num - now.weekday()) % 7 or 7  # always future
+                base = (now + timedelta(days=diff)).date()
+                break
+
+    if base is not None:
+        hour   = t_hour if t_hour is not None else 9   # default 09:00
+        minute = t_min  if t_min  is not None else 0
+        return datetime.combine(base, datetime.min.time()).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+
+    # "at H:MM" alone → today if still in the future, otherwise tomorrow
+    if t_hour is not None:
+        candidate = now.replace(hour=t_hour, minute=t_min, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        return candidate
+
+    # ISO / structured date string fallback (uses python-dateutil if available)
+    try:
+        from dateutil import parser as dparser
+        return dparser.parse(when_str, default=now)
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"Cannot parse time expression: '{when_str}'. "
+        "Try: 'tomorrow at 3pm', 'in 2 hours', 'at 14:30', "
+        "'next monday at 9am', '2026-03-01 10:00'"
+    )
+
+
+def _parse_interval(interval_str: str) -> int:
+    """
+    Parse an interval string to seconds.
+    Examples: '30m', '2h', '1d', 'every 6 hours', '90 minutes', '45s'
+    """
+    s = re.sub(r'^every\s+', '', interval_str.strip().lower())
+    m = re.match(
+        r'(\d+)\s*'
+        r'(s|sec|secs|second|seconds|'
+        r'm|min|mins|minute|minutes|'
+        r'h|hr|hrs|hour|hours|'
+        r'd|day|days)',
+        s
+    )
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        if unit.startswith('s'):  return n
+        if unit.startswith('m'):  return n * 60
+        if unit.startswith('h'):  return n * 3600
+        if unit.startswith('d'):  return n * 86400
+    raise ValueError(
+        f"Cannot parse interval: '{interval_str}'. "
+        "Try: '30m', '2h', '1d', 'every 6 hours', '90 minutes'"
+    )
+
+
+def _human_interval(seconds: int) -> str:
+    if seconds < 60:    return f"{seconds}s"
+    if seconds < 3600:  return f"{seconds // 60}m"
+    if seconds < 86400: return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _eta(next_run: datetime) -> str:
+    diff = next_run - datetime.now()
+    secs = int(diff.total_seconds())
+    if secs <= 0:
+        return "overdue"
+    h, rem = divmod(secs, 3600)
+    m = rem // 60
+    if h > 0:
+        return f"in {h}h {m}m"
+    return f"in {m}m"
+
+
+# ── Agent Dispatch ────────────────────────────────────────────────────────────
+
+def _dispatch(prompt: str, task_name: str) -> str:
+    """POST the stored prompt to the agent's /chat endpoint."""
+    api_key = os.getenv("TRINITY_API_KEY", "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+    try:
+        resp = requests.post(
+            "http://localhost:8000/chat",
+            json={"message": prompt, "session_id": f"sched_{task_name}"},
+            headers=headers,
+            timeout=120,
+        )
+        if resp.ok:
+            data = resp.json()
+            return data.get("response", str(data))[:300]
+        return f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return f"dispatch error: {e}"
+
+
+# ── Background Loop ───────────────────────────────────────────────────────────
+
+def _run():
+    global _running
+    while _running:
+        try:
+            now = datetime.now()
+            with _lock:
+                tasks = _load()
+                changed = False
+                to_delete = []
+
+                for name, t in tasks.items():
+                    next_run = datetime.fromisoformat(t['next_run'])
+                    if now >= next_run:
+                        print(f"[scheduler] firing: {name}")
+                        result = _dispatch(t['prompt'], name)
+                        print(f"[scheduler] {name} → {result[:80]}")
+                        t['last_run']  = now.isoformat()
+                        t['run_count'] = t.get('run_count', 0) + 1
+                        changed = True
+                        if t['type'] == 'once':
+                            to_delete.append(name)
+                        else:
+                            t['next_run'] = (
+                                now + timedelta(seconds=t['interval_seconds'])
+                            ).isoformat()
+
+                for name in to_delete:
+                    del tasks[name]
+
+                if changed:
+                    _save(tasks)
+        except Exception as e:
+            print(f"[scheduler] loop error: {e}")
+
+        time.sleep(30)  # check every 30 seconds
+
+
+def _ensure_running():
+    global _running, _thread
+    if not _running:
+        _running = True
+        _thread = threading.Thread(target=_run, daemon=True, name="scheduler")
+        _thread.start()
+
+
+# Auto-start when skill is imported
+_ensure_running()
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def schedule(name: str, when: str, prompt: str) -> str:
+    """
+    Schedule a prompt to run ONCE at a specific time.
+
+    name   — unique identifier for this task
+    when   — when to run: 'tomorrow at 3pm', 'in 2 hours', 'at 14:30',
+             'next friday at 9am', '2026-03-01 10:00'
+    prompt — what the agent should do at that time
+    """
+    try:
+        run_at = _parse_when(when)
+    except ValueError as e:
+        return f"❌ {e}"
+
+    if run_at <= datetime.now():
+        return f"❌ Parsed time {run_at.strftime('%Y-%m-%d %H:%M')} is already in the past."
+
+    task = {
+        "type":             "once",
+        "prompt":           prompt,
+        "next_run":         run_at.isoformat(),
+        "interval_seconds": None,
+        "created":          datetime.now().isoformat(),
+        "last_run":         None,
+        "run_count":        0,
+    }
+    with _lock:
+        tasks = _load()
+        tasks[name] = task
+        _save(tasks)
+    _ensure_running()
+    return (
+        f"✅ Scheduled '{name}' to run once at "
+        f"{run_at.strftime('%Y-%m-%d %H:%M')} ({_eta(run_at)})"
+    )
+
+
+def schedule_recurring(name: str, interval: str, prompt: str) -> str:
+    """
+    Schedule a prompt to run REPEATEDLY on an interval.
+
+    name     — unique identifier for this task
+    interval — how often: '30m', '2h', '1d', 'every 6 hours'
+    prompt   — what the agent should do each time
+    """
+    try:
+        secs = _parse_interval(interval)
+    except ValueError as e:
+        return f"❌ {e}"
+
+    next_run = datetime.now() + timedelta(seconds=secs)
+    task = {
+        "type":             "recurring",
+        "prompt":           prompt,
+        "next_run":         next_run.isoformat(),
+        "interval_seconds": secs,
+        "created":          datetime.now().isoformat(),
+        "last_run":         None,
+        "run_count":        0,
+    }
+    with _lock:
+        tasks = _load()
+        tasks[name] = task
+        _save(tasks)
+    _ensure_running()
+    return (
+        f"✅ Scheduled '{name}' to run every {_human_interval(secs)}, "
+        f"first at {next_run.strftime('%H:%M')}"
+    )
+
+
+def remove(name: str) -> str:
+    """Remove a scheduled task by name."""
+    with _lock:
+        tasks = _load()
+        if name in tasks:
+            del tasks[name]
+            _save(tasks)
+            return f"✅ Removed task '{name}'"
+        return f"❌ Task '{name}' not found. Use list_tasks to see what's scheduled."
+
+
+def list_tasks() -> str:
+    """List all scheduled tasks with next run time and prompt preview."""
+    tasks = _load()
+    if not tasks:
+        return "📭 No scheduled tasks"
+
+    lines = [f"📅 Scheduled tasks ({len(tasks)}):"]
+    for name, t in tasks.items():
+        next_run = datetime.fromisoformat(t['next_run'])
+        kind     = "🔁 recurring" if t['type'] == 'recurring' else "1️⃣  once"
+        ivl      = f" every {_human_interval(t['interval_seconds'])}" if t['type'] == 'recurring' else ""
+        lines.append(
+            f"\n  {kind}{ivl} | {name}\n"
+            f"  next: {next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)}) | "
+            f"runs so far: {t.get('run_count', 0)}\n"
+            f"  prompt: \"{t['prompt'][:80]}{'...' if len(t['prompt']) > 80 else ''}\""
+        )
+    return "\n".join(lines)
+
+
+def clear() -> str:
+    """Cancel and remove ALL scheduled tasks."""
+    with _lock:
+        tasks = _load()
+        count = len(tasks)
+        _save({})
+    return f"✅ Cleared {count} task(s)"
+
+
+def status() -> str:
+    """Show scheduler health: running state, task count, check interval."""
+    tasks = _load()
+    thread_alive = _thread is not None and _thread.is_alive()
+    return (
+        f"Scheduler: {'running ✅' if thread_alive else 'stopped ❌'} | "
+        f"Tasks: {len(tasks)} | "
+        f"Check interval: 30s | "
+        f"Storage: {_TASKS_FILE}"
+    )
+
+
+def parse_preview(when: str) -> str:
+    """
+    Preview what a time expression resolves to without scheduling anything.
+    Useful to verify before committing: parse_preview('next monday at 9am')
+    """
+    try:
+        dt = _parse_when(when)
+        now = datetime.now()
+        if dt <= now:
+            return f"⚠️  '{when}' → {dt.strftime('%Y-%m-%d %H:%M')} (already in the past!)"
+        return f"🕐 '{when}' → {dt.strftime('%Y-%m-%d %H:%M')} ({_eta(dt)})"
+    except ValueError as e:
+        return f"❌ {e}"

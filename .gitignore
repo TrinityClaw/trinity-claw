@@ -1,0 +1,24 @@
+# ── Secrets — NEVER upload these ──────────────────────────────────────────────
+.env
+.env.*
+*.env
+
+# ── Memory data — personal, credentials & can get large ───────────────────────
+memory/
+
+# ── Dynamic skills created locally ────────────────────────────────────────────
+# Remove this line if you want to share your custom skills on GitHub
+agent/skills/dynamic/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── OS junk ───────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+gcal_credentials.json

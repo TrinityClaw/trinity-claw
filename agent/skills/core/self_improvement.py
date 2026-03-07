@@ -1,0 +1,777 @@
+"""
+Self-Improvement Skill - SUPERPOWER EDITION
+Analyzes skills, learns from mistakes, auto-generates fixes, and prevents repeat errors.
+
+Features:
+• AST-based code analysis for anti-patterns, security, performance
+• Mistake memory: stores errors + fixes in /app/memory/lessons.jsonl
+• Auto-patch generation with diff output
+• Test case suggestion for regression prevention
+• Pattern learning: recognizes recurring issues across skills
+• Best-practice enforcement (PEP8, security, type hints)
+"""
+
+import ast
+import re
+import json
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from typing import List, Dict, Optional
+
+# ============================================================================
+# SKILL METADATA (Required for skill loader)
+# ============================================================================
+
+NAME = "self_improvement"  # Must match filename: self_improvement.py
+DOC = (
+    "Self-healing and learning: analyze skills, record mistakes, auto-fix code, prevent repeat errors. "
+    "Returns: audit(skill_name)→health report with issues; "
+    "fix(skill_name, issue_type, line_number)→apply fix at line (use 'all' to fix every occurrence at once); "
+    "daily_review(skill_name?)→scan skill(s), summarize lessons learned, surface recurring patterns; "
+    "record_mistake(skill, error_type, error_msg)→save lesson to lessons.jsonl; "
+    "report()→system-wide improvement summary with top recurring issues."
+)
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+SKILLS_DIR = Path("/app/skills/dynamic")
+CORE_SKILLS_DIR = Path("/app/skills/core")
+LESSONS_FILE = Path("/app/memory/lessons.jsonl")
+PATTERNS_FILE = Path("/app/memory/error_patterns.json")
+
+# ============================================================================
+# MISTAKE MEMORY: Learn from every error
+# ============================================================================
+
+def _load_lessons() -> List[Dict]:
+    """Load learned lessons from persistent storage"""
+    lessons = []
+    if LESSONS_FILE.exists():
+        try:
+            with open(LESSONS_FILE, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            lessons.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+        except (IOError, OSError):
+            pass
+    return lessons
+
+def _save_lesson(lesson: Dict) -> bool:
+    """Save a new lesson to persistent storage. Returns True on success."""
+    try:
+        LESSONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LESSONS_FILE, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(lesson, ensure_ascii=False) + '\n')
+        return True
+    except (IOError, OSError) as e:
+        print(f"⚠️ Failed to save lesson: {e}")
+        return False
+
+def _load_error_patterns() -> Dict:
+    """Load recognized error patterns for faster detection"""
+    default_patterns = {
+        "bare_except": {"count": 0, "severity": "medium", "fix": "Use 'except SpecificError:'"},
+        "missing_docstring": {"count": 0, "severity": "low", "fix": "Add triple-quoted docstring"},
+        "no_type_hints": {"count": 0, "severity": "low", "fix": "Add type hints to function signatures"},
+        "hardcoded_path": {"count": 0, "severity": "high", "fix": "Use pathlib or config-driven paths"},
+        "sql_injection_risk": {"count": 0, "severity": "critical", "fix": "Use parameterized queries"},
+        "missing_timeout": {"count": 0, "severity": "medium", "fix": "Add timeout to network requests"},
+        "no_rate_limit": {"count": 0, "severity": "medium", "fix": "Add rate limiting for external APIs"},
+    }
+    
+    if PATTERNS_FILE.exists():
+        try:
+            with open(PATTERNS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return default_patterns
+
+def _save_error_patterns(patterns: Dict) -> bool:
+    """Save updated error patterns. Returns True on success."""
+    try:
+        PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(PATTERNS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(patterns, f, indent=2, ensure_ascii=False)
+        return True
+    except (IOError, OSError):
+        return False
+
+def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied: str = "") -> str:
+    """Record a mistake + fix for future learning."""
+    lesson = {
+        "timestamp": datetime.now().isoformat(),
+        "skill": skill_name,
+        "error_type": error_type,
+        "error_message": error_msg[:200],
+        "fix_applied": fix_applied,
+        "hash": hashlib.md5(f"{skill_name}:{error_type}:{error_msg[:100]}".encode()).hexdigest()[:12]
+    }
+    
+    saved = _save_lesson(lesson)
+    patterns = _load_error_patterns()
+    if error_type in patterns:
+        patterns[error_type]["count"] += 1
+        _save_error_patterns(patterns)
+    
+    return f"✅ Recorded lesson: {error_type} in {skill_name}" if saved else "⚠️ Failed to record lesson"
+
+def check_for_learned_fix(skill_name: str, error_type: str) -> Optional[str]:
+    """Check if we've already learned a fix for this error type in this skill."""
+    lessons = _load_lessons()
+    for lesson in lessons:
+        if lesson["skill"] == skill_name and lesson["error_type"] == error_type:
+            return lesson.get("fix_applied")
+    return None
+
+# ============================================================================
+# AST-BASED CODE ANALYSIS
+# ============================================================================
+
+class CodeAnalyzer(ast.NodeVisitor):
+    """AST visitor that detects anti-patterns, security issues, and improvements"""
+    
+    def __init__(self, source_code: str, skill_name: str) -> None:
+        """Initialize the analyzer with source code and skill name."""
+        self.source = source_code
+        self.skill = skill_name
+        self.issues: List[Dict] = []
+        self.patterns = _load_error_patterns()
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        """Flag bare except clauses that swallow all exceptions."""
+        if node.type is None:
+            self.issues.append({
+                "type": "bare_except",
+                "line": node.lineno,
+                "severity": self.patterns.get("bare_except", {}).get("severity", "medium"),
+                "message": "Bare 'except:' catches all errors, including SystemExit/KeyboardInterrupt",
+                "suggestion": self.patterns.get("bare_except", {}).get("fix", "Use specific exception types")
+            })
+        self.generic_visit(node)
+    
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Flag functions missing docstrings or type hints."""
+        if ast.get_docstring(node) is None:
+            self.issues.append({
+                "type": "missing_docstring",
+                "line": node.lineno,
+                "severity": self.patterns.get("missing_docstring", {}).get("severity", "low"),
+                "message": f"Function '{node.name}' lacks docstring",
+                "suggestion": self.patterns.get("missing_docstring", {}).get("fix")
+            })
+        
+        args_without_hints = [
+            arg.arg for arg in node.args.args 
+            if arg.arg not in ('self', 'cls') and arg.annotation is None
+        ]
+        if args_without_hints or node.returns is None:
+            self.issues.append({
+                "type": "no_type_hints",
+                "line": node.lineno,
+                "severity": self.patterns.get("no_type_hints", {}).get("severity", "low"),
+                "message": f"Function '{node.name}' lacks type hints",
+                "suggestion": self.patterns.get("no_type_hints", {}).get("fix")
+            })
+        self.generic_visit(node)
+    
+    def visit_Call(self, node: ast.Call) -> None:
+        """Flag network requests without timeouts and SQL injection risks."""
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr in ['get', 'post', 'put', 'delete'] and isinstance(node.func.value, ast.Name):
+                if node.func.value.id == 'requests':
+                    has_timeout = any(kw.arg == 'timeout' for kw in node.keywords if kw.arg)
+                    if not has_timeout:
+                        self.issues.append({
+                            "type": "missing_timeout",
+                            "line": node.lineno,
+                            "severity": self.patterns.get("missing_timeout", {}).get("severity", "medium"),
+                            "message": "Network request without timeout may hang indefinitely",
+                            "suggestion": self.patterns.get("missing_timeout", {}).get("fix")
+                        })
+        
+        if isinstance(node.func, ast.Attribute) and node.func.attr == 'execute':
+            for arg in node.args:
+                if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Mod):
+                    self.issues.append({
+                        "type": "sql_injection_risk",
+                        "line": node.lineno,
+                        "severity": self.patterns.get("sql_injection_risk", {}).get("severity", "critical"),
+                        "message": "String formatting in SQL query may allow injection",
+                        "suggestion": self.patterns.get("sql_injection_risk", {}).get("fix")
+                    })
+        self.generic_visit(node)
+    
+    # Paths that are intentional Docker/container architecture — not bugs
+    _DOCKER_PATH_PREFIXES = ("/app/", "/app\\")
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        """Flag string constants that look like hardcoded absolute file paths."""
+        if not isinstance(node.value, str):
+            self.generic_visit(node)
+            return
+
+        value = node.value
+
+        # Must have at least one directory separator after the root to be a real path.
+        # This prevents false positives on short detection strings like 'C:\\', '/', '/100'.
+        has_subpath = ('/' in value[1:]) or ('\\' in value[2:])
+        if not has_subpath:
+            self.generic_visit(node)
+            return
+
+        is_windows_abs = value.startswith('C:\\') or value.startswith('C:/')
+        is_non_docker_abs = value.startswith('/') and not value.startswith(self._DOCKER_PATH_PREFIXES)
+
+        if not (is_windows_abs or is_non_docker_abs):
+            self.generic_visit(node)
+            return
+
+        # Check the actual source lines around this node (line number ≠ char offset)
+        source_lines = self.source.splitlines()
+        line_idx = node.lineno - 1
+        window = "\n".join(source_lines[max(0, line_idx - 2): line_idx + 3])
+        if not any(name in window for name in ['Path(', 'os.path', 'pathlib', 'os.getenv']):
+            self.issues.append({
+                "type": "hardcoded_path",
+                "line": node.lineno,
+                "severity": self.patterns.get("hardcoded_path", {}).get("severity", "high"),
+                "message": "Hardcoded file path may break in different environments",
+                "suggestion": self.patterns.get("hardcoded_path", {}).get("fix")
+            })
+        self.generic_visit(node)
+
+def analyze_skill_code(skill_name: str) -> Dict:
+    """Deep AST analysis of a skill's code."""
+    path = SKILLS_DIR / f"{skill_name}.py"
+    if not path.exists():
+        path = CORE_SKILLS_DIR / f"{skill_name}.py"
+        if not path.exists():
+            return {"error": f"Skill '{skill_name}' not found in dynamic or core directories"}
+    
+    try:
+        source = path.read_text(encoding='utf-8')
+    except (IOError, OSError) as e:
+        return {"error": f"Could not read {skill_name}.py: {e}"}
+    
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        return {
+            "error": f"Syntax error in {skill_name}.py",
+            "line": e.lineno,
+            "message": str(e),
+            "suggestion": "Fix syntax before analysis"
+        }
+    
+    analyzer = CodeAnalyzer(source, skill_name)
+    analyzer.visit(tree)
+    
+    severity_weights = {"critical": 25, "high": 15, "medium": 8, "low": 3}
+    penalty = sum(severity_weights.get(i["severity"], 5) for i in analyzer.issues)
+    health = max(0, 100 - penalty)
+    
+    for issue in analyzer.issues:
+        learned_fix = check_for_learned_fix(skill_name, issue["type"])
+        if learned_fix:
+            issue["learned_fix"] = learned_fix
+            issue["auto_applicable"] = True
+    
+    return {
+        "skill": skill_name,
+        "health_score": health,
+        "issues_found": len(analyzer.issues),
+        "issues": analyzer.issues,
+        "critical_count": sum(1 for i in analyzer.issues if i["severity"] == "critical"),
+        "timestamp": datetime.now().isoformat()
+    }
+
+# ============================================================================
+# AUTO-PATCH GENERATION
+# ============================================================================
+
+def generate_patch(skill_name: str, issue_type: str, issue_line: int) -> Dict:
+    """Generate a code patch to fix a specific issue."""
+    path = SKILLS_DIR / f"{skill_name}.py"
+    if not path.exists():
+        path = CORE_SKILLS_DIR / f"{skill_name}.py"
+        if not path.exists():
+            return {"error": f"Skill '{skill_name}' not found"}
+    
+    try:
+        lines = path.read_text(encoding='utf-8').split('\n')
+    except (IOError, OSError) as e:
+        return {"error": f"Could not read {skill_name}.py: {e}"}
+    
+    if issue_line < 1 or issue_line > len(lines):
+        return {"error": f"Invalid line number: {issue_line} (file has {len(lines)} lines)"}
+    
+    original_line = lines[issue_line - 1]
+    fix_applied = ""
+    
+    if issue_type == "bare_except":
+        indent = len(original_line) - len(original_line.lstrip())
+        fix_applied = ' ' * indent + "except Exception as e:"
+        
+    elif issue_type == "missing_docstring":
+        func_name_match = re.search(r'def\s+(\w+)', original_line)
+        if func_name_match:
+            func_name = func_name_match.group(1)
+            indent = len(original_line) - len(original_line.lstrip())
+            fix_applied = '\n'.join([
+                ' ' * indent + '"""',
+                ' ' * indent + f"TODO: Add description for {func_name}",
+                ' ' * indent + '"""',
+                original_line
+            ])
+        else:
+            return {"error": f"Could not parse function name on line {issue_line}"}
+            
+    elif issue_type == "missing_timeout":
+        if 'requests.' in original_line and 'timeout' not in original_line:
+            if original_line.rstrip().endswith(')'):
+                fix_applied = original_line.rstrip()[:-1] + ', timeout=30)'
+            else:
+                fix_applied = original_line + ', timeout=30'
+    
+    elif issue_type == "hardcoded_path":
+        # FIX: Extract expression to avoid backslash in f-string (Python 3.12+)
+        clean_path = original_line.strip().strip("'\"")
+        fix_applied = f"# Consider: from pathlib import Path\n# Path('{clean_path}')"
+    
+    if not fix_applied:
+        return {
+            "note": "No auto-fix available for this issue type",
+            "manual_review_required": True,
+            "original_line": original_line.strip()
+        }
+    
+    return {
+        "skill": skill_name,
+        "issue_type": issue_type,
+        "line": issue_line,
+        "original": original_line.strip(),
+        "proposed_fix": fix_applied.strip(),
+        "diff": f"--- {skill_name}.py:{issue_line}\n+++ {skill_name}.py:{issue_line}\n-{original_line.strip()}\n+{fix_applied.strip()}",
+        "safe_to_apply": issue_type in ["bare_except", "missing_timeout"],
+        "requires_review": issue_type not in ["bare_except", "missing_timeout"]
+    }
+
+def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
+    """Apply a generated patch to the skill file."""
+    if patch.get("error"):
+        return patch
+    
+    path = SKILLS_DIR / f"{skill_name}.py"
+    if not path.exists():
+        path = CORE_SKILLS_DIR / f"{skill_name}.py"
+        if not path.exists():
+            return {"error": f"Skill '{skill_name}' not found"}
+    
+    backup_path = None
+    
+    if backup:
+        try:
+            backup_path = path.with_suffix(path.suffix + f".backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            backup_path.write_text(path.read_text(encoding='utf-8'), encoding='utf-8')
+        except (IOError, OSError):
+            pass
+    
+    try:
+        lines = path.read_text(encoding='utf-8').split('\n')
+    except (IOError, OSError) as e:
+        return {"error": f"Could not read {skill_name}.py: {e}"}
+    
+    line_idx = patch["line"] - 1
+    
+    if line_idx < 0 or line_idx >= len(lines):
+        return {"error": "Invalid line number in patch"}
+    
+    if patch.get("proposed_fix"):
+        if '\n' in patch["proposed_fix"]:
+            indent = len(lines[line_idx]) - len(lines[line_idx].lstrip())
+            fix_lines = [l if l.startswith(' ') else ' ' * indent + l for l in patch["proposed_fix"].split('\n')]
+            lines[line_idx:line_idx+1] = fix_lines
+        else:
+            lines[line_idx] = patch["proposed_fix"]
+    
+    try:
+        path.write_text('\n'.join(lines), encoding='utf-8')
+    except (IOError, OSError) as e:
+        return {"error": f"Could not write to {skill_name}.py: {e}"}
+    
+    record_mistake(
+        skill_name=skill_name,
+        error_type=patch["issue_type"],
+        error_msg=patch.get("original", ""),
+        fix_applied=patch.get("proposed_fix", "")
+    )
+    
+    return {
+        "success": True,
+        "skill": skill_name,
+        "patch_applied": patch["issue_type"],
+        "backup_created": backup_path.name if backup_path else None,
+        "message": f"✅ Applied fix for {patch['issue_type']} in {skill_name}"
+    }
+
+# ============================================================================
+# PATTERN LEARNING
+# ============================================================================
+
+def get_skill_health_report(skill_name: str) -> str:
+    """Generate a human-readable health report for a skill"""
+    result = analyze_skill_code(skill_name)
+    
+    if result.get("error"):
+        return f"❌ {result['error']}"
+    
+    lines = [
+        f"📊 Health Report: {skill_name}",
+        "=" * 50,
+        f"Health Score: {result['health_score']}/100",
+        f"Issues Found: {result['issues_found']}",
+        f"Critical: {result['critical_count']}",
+        ""
+    ]
+    
+    if result["issues"]:
+        lines.append("🔍 Issues:")
+        for i, issue in enumerate(result["issues"], 1):
+            learned = " ✅ (fix learned!)" if issue.get("learned_fix") else ""
+            lines.append(f"  {i}. [{issue['severity'].upper()}] Line {issue['line']}: {issue['message']}{learned}")
+            if issue.get("suggestion"):
+                lines.append(f"     💡 {issue['suggestion']}")
+    else:
+        lines.append("✅ No issues detected! Code looks clean.")
+    
+    return "\n".join(lines)
+
+def suggest_tests(skill_name: str) -> str:
+    """Suggest test cases based on the skill's functions."""
+    path = SKILLS_DIR / f"{skill_name}.py"
+    if not path.exists():
+        path = CORE_SKILLS_DIR / f"{skill_name}.py"
+        if not path.exists():
+            return f"❌ Skill '{skill_name}' not found"
+    
+    try:
+        source = path.read_text(encoding='utf-8')
+        tree = ast.parse(source)
+    except (IOError, OSError, SyntaxError) as e:
+        return f"❌ Cannot parse skill for test suggestions: {e}"
+    
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and not node.name.startswith('_')]
+    
+    if not functions:
+        return "No public functions found to test"
+    
+    tests = [f"🧪 Suggested Tests for {skill_name}:", "=" * 50]
+    
+    for func in functions:
+        args = [arg.arg for arg in func.args.args if arg.arg not in ('self', 'cls')]
+        try:
+            returns = ast.unparse(func.returns) if func.returns else "Any"
+        except AttributeError:
+            returns = "Any"
+        
+        tests.append(f"\nFunction: {func.name}({', '.join(args)}) -> {returns}")
+        tests.append(f"  Test 1: Happy path with valid inputs")
+        tests.append(f"  Test 2: Edge case: empty/None inputs")
+        tests.append(f"  Test 3: Error handling: invalid inputs")
+        
+        func_lower = func.name.lower()
+        if any(kw in func_lower for kw in ['fetch', 'request', 'get', 'post']):
+            tests.append(f"  Test 4: Timeout handling (mock slow response)")
+            tests.append(f"  Test 5: HTTP error codes (404, 500, 429)")
+        elif any(kw in func_lower for kw in ['parse', 'extract', 'load']):
+            tests.append(f"  Test 4: Malformed input handling")
+            tests.append(f"  Test 5: Unicode/special character handling")
+    
+    # FIX: Extract variable to avoid backslash in f-string
+    test_file_hint = f"test_{skill_name}.py"
+    tests.append(f"\n💡 Pro tip: Save tests in /app/skills/tests/{test_file_hint}")
+    
+    return "\n".join(tests)
+
+def learn_from_feedback(skill_name: str, feedback: str, was_helpful: bool) -> str:
+    """Learn from user feedback on suggestions."""
+    lesson = {
+        "timestamp": datetime.now().isoformat(),
+        "skill": skill_name,
+        "feedback": feedback[:500],
+        "was_helpful": was_helpful,
+        "type": "user_feedback"
+    }
+    saved = _save_lesson(lesson)
+    
+    status = "✅ Thank you! Feedback recorded." if was_helpful and saved else "📝 Feedback noted for improvement."
+    return f"{status} Future suggestions will be refined."
+
+# ============================================================================
+# MAIN SKILL FUNCTIONS (User-facing - MUST be at module level)
+# ============================================================================
+
+def audit(skill_name: str) -> str:
+    """Analyze a skill and return health report."""
+    return get_skill_health_report(skill_name)
+
+def _fix_all(skill_name: str, issue_type: str) -> str:
+    """Fix every occurrence of issue_type in a skill (reverse-order so line numbers stay valid)."""
+    analysis = analyze_skill_code(skill_name)
+    if analysis.get("error"):
+        return f"❌ {analysis['error']}"
+
+    matching = [i for i in analysis["issues"] if i["type"] == issue_type]
+    if not matching:
+        return f"✅ No '{issue_type}' issues found in {skill_name}"
+
+    results = []
+    skipped = []
+    # Reverse order: fix bottom lines first so upper line numbers don't shift
+    for issue in sorted(matching, key=lambda x: x["line"], reverse=True):
+        patch = generate_patch(skill_name, issue_type, issue["line"])
+        if patch.get("error"):
+            skipped.append(f"  Line {issue['line']}: {patch['error']}")
+        elif patch.get("safe_to_apply"):
+            r = apply_patch(skill_name, patch)
+            results.append(f"  Line {issue['line']}: {r.get('message', '⚠️ applied')}")
+        else:
+            skipped.append(f"  Line {issue['line']}: requires manual review — {patch.get('note', '')}")
+
+    summary = f"🔧 Fixed {len(results)}/{len(matching)} '{issue_type}' issues in {skill_name}:"
+    if results:
+        summary += "\n" + "\n".join(results)
+    if skipped:
+        summary += "\n⚠️ Skipped:\n" + "\n".join(skipped)
+    return summary
+
+
+def fix(skill_name: str, issue_type: str, line_number: str) -> str:
+    """Auto-fix a specific issue in a skill. Pass line_number='all' to fix every occurrence."""
+    if str(line_number).strip().lower() == "all":
+        return _fix_all(skill_name, issue_type)
+
+    try:
+        line_num = int(line_number)
+    except (ValueError, TypeError):
+        return f"❌ Invalid line number: '{line_number}' (must be integer or 'all')"
+
+    patch = generate_patch(skill_name, issue_type, line_num)
+
+    if patch.get("error") or patch.get("requires_review"):
+        return f"⚠️ Manual review needed:\n{json.dumps(patch, indent=2)}"
+
+    result = apply_patch(skill_name, patch)
+    return result.get("message", json.dumps(result, indent=2))
+
+def prevent(skill_name: str, error_type: str) -> str:
+    """Check if we've learned a fix for this error type and apply it proactively."""
+    learned_fix = check_for_learned_fix(skill_name, error_type)
+    if learned_fix:
+        return f"✅ Prevention ready: '{learned_fix}'\nUse 'fix' to apply, or I can auto-apply on next error."
+    
+    patterns = _load_error_patterns()
+    if error_type in patterns:
+        return f"📚 Known pattern: {patterns[error_type]}\nFix will be learned after first occurrence."
+    
+    return f"❓ Unknown error type: '{error_type}'. Report this to improve the system."
+
+def report() -> str:
+    """Generate a system-wide improvement report."""
+    lessons = _load_lessons()
+    patterns = _load_error_patterns()
+    
+    issue_counts = {}
+    for lesson in lessons:
+        t = lesson.get("error_type", "unknown")
+        issue_counts[t] = issue_counts.get(t, 0) + 1
+    
+    lines = [
+        "🚀 Self-Improvement System Report",
+        "=" * 50,
+        f"Lessons Learned: {len(lessons)}",
+        f"Recognized Patterns: {len(patterns)}",
+        "",
+        "📈 Most Common Issues:",
+    ]
+    
+    for issue_type, count in sorted(issue_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
+        fix_hint = patterns.get(issue_type, {}).get("fix", "Manual fix required")
+        lines.append(f"  • {issue_type}: {count}x → {fix_hint}")
+    
+    lines.append(f"\n💡 Tip: Run 'audit' on skills with low health scores first")
+    
+    return "\n".join(lines)
+
+def daily_review(skill_name: str = "") -> str:
+    """
+    Daily learning cycle: audit skill(s), surface patterns from memory, suggest next actions.
+
+    Pass skill_name to review one skill, or leave blank to review ALL dynamic skills.
+    Reads lessons.jsonl to detect recurring failures so the agent gets smarter over time.
+    Recommends web searches for unknown patterns the system has not seen before.
+    """
+    from datetime import timedelta
+
+    # ── 1. Determine which skills to scan ──────────────────────────────────────
+    targets: List[str] = []
+    if skill_name:
+        targets = [skill_name]
+    else:
+        for p in sorted(SKILLS_DIR.glob("*.py")):
+            if not p.name.startswith("_"):
+                targets.append(p.stem)
+        if not targets:
+            # Fall back to core if dynamic dir is empty
+            for p in sorted(CORE_SKILLS_DIR.glob("*.py")):
+                if not p.name.startswith("_"):
+                    targets.append(p.stem)
+
+    if not targets:
+        return "⚠️ No skills found to review."
+
+    # ── 2. Audit each skill ────────────────────────────────────────────────────
+    audit_results: List[Dict] = []
+    for sn in targets:
+        result = analyze_skill_code(sn)
+        if not result.get("error"):
+            audit_results.append(result)
+
+    total_issues = sum(r["issues_found"] for r in audit_results)
+    avg_health = (
+        sum(r["health_score"] for r in audit_results) / len(audit_results)
+        if audit_results else 0
+    )
+
+    # ── 3. Load lessons from the last 7 days ──────────────────────────────────
+    lessons = _load_lessons()
+    cutoff = datetime.now() - timedelta(days=7)
+    recent_lessons = [
+        l for l in lessons
+        if l.get("timestamp") and datetime.fromisoformat(l["timestamp"]) >= cutoff
+    ]
+
+    # Count recurring error types in recent lessons
+    recurring: Dict[str, int] = {}
+    for l in recent_lessons:
+        et = l.get("error_type") or l.get("type") or "unknown"
+        recurring[et] = recurring.get(et, 0) + 1
+
+    top_recurring = sorted(recurring.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    # ── 4. Identify unknown patterns (seen in lessons but not in patterns db) ──
+    patterns = _load_error_patterns()
+    unknown_patterns = [et for et, _ in top_recurring if et not in patterns and et != "unknown"]
+
+    # ── 5. Find skills that need immediate attention ───────────────────────────
+    critical_skills = [r for r in audit_results if r["critical_count"] > 0 or r["health_score"] < 60]
+    auto_fixable = [
+        r for r in audit_results
+        if any(i["type"] in ("bare_except", "missing_timeout") for i in r["issues"])
+    ]
+
+    # ── 6. Build report ───────────────────────────────────────────────────────
+    lines = [
+        "🗓️  Daily Self-Improvement Review",
+        "=" * 52,
+        f"Skills scanned   : {len(audit_results)}",
+        f"Avg health score : {avg_health:.0f}/100",
+        f"Total issues     : {total_issues}",
+        f"Recent lessons   : {len(recent_lessons)} (last 7 days)",
+        "",
+    ]
+
+    if critical_skills:
+        lines.append("🚨 Needs immediate attention:")
+        for r in critical_skills:
+            lines.append(f"  • {r['skill']}  score={r['health_score']}  critical={r['critical_count']}")
+        lines.append("")
+
+    if auto_fixable:
+        lines.append("🔧 Auto-fixable right now (run fix(skill,'issue_type','all')):")
+        for r in auto_fixable:
+            types = list({i["type"] for i in r["issues"] if i["type"] in ("bare_except", "missing_timeout")})
+            lines.append(f"  • {r['skill']}: {', '.join(types)}")
+        lines.append("")
+
+    if top_recurring:
+        lines.append("📈 Recurring patterns (last 7 days):")
+        for et, cnt in top_recurring:
+            hint = patterns.get(et, {}).get("fix", "no fix recorded yet")
+            lines.append(f"  • {et}: {cnt}x  →  {hint}")
+        lines.append("")
+
+    if unknown_patterns:
+        lines.append("🔍 Unknown patterns — recommend web search:")
+        for et in unknown_patterns:
+            lines.append(f"  • web.search('Python {et} best practice fix')")
+        lines.append("")
+
+    if not critical_skills and not auto_fixable and not unknown_patterns:
+        lines.append("✅ All skills look healthy — no urgent action needed.")
+
+    lines.append("💡 Tip: run daily_review() each morning so the agent improves over time.")
+    return "\n".join(lines)
+
+
+def status() -> str:
+    """Return skill status and capabilities."""
+    lessons = _load_lessons()
+    patterns = _load_error_patterns()
+    
+    info = [
+        "🧠 Self-Improvement Skill Status",
+        f"✅ Loaded: {NAME}",
+        f"📚 Lessons learned: {len(lessons)}",
+        f"🔍 Recognized patterns: {len(patterns)}",
+        "",
+        "Available functions:",
+        "  • audit(skill_name)                          - Analyze code health",
+        "  • fix(skill_name, issue_type, line_number)   - Auto-apply fix (use 'all' to fix every occurrence)",
+        "  • daily_review(skill_name?)                  - Daily learning cycle: scan + surface recurring patterns",
+        "  • prevent(skill_name, error_type)            - Check for learned fixes",
+        "  • report()                                   - System-wide improvement summary",
+        "  • suggest_tests(skill_name)                  - Generate test cases",
+        "  • learn_from_feedback(skill_name, feedback, was_helpful) - Record user feedback",
+        "  • status()                                   - This help message",
+        "",
+        "Memory files:",
+        f"  • Lessons : {LESSONS_FILE}",
+        f"  • Patterns: {PATTERNS_FILE}",
+        "",
+        "💡 Tip: schedule daily_review() every morning so the agent improves over time."
+    ]
+    return "\n".join(info)
+
+# ============================================================================
+# BACKWARDS COMPATIBILITY ALIASES
+# ============================================================================
+
+analyze = audit
+improve = fix
+
+# ============================================================================
+# EXPORT LIST (Helps skill loader detect public functions)
+# ============================================================================
+
+__all__ = [
+    "NAME",
+    "DOC",
+    "audit",
+    "fix",
+    "daily_review",
+    "prevent",
+    "report",
+    "suggest_tests",
+    "learn_from_feedback",
+    "status",
+    "analyze",
+    "improve",
+]

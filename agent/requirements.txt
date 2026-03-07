@@ -1,0 +1,29 @@
+fastapi
+uvicorn
+requests
+chromadb
+docker
+litellm
+python-dotenv
+beautifulsoup4
+psutil
+pyyaml>=6.0
+requests
+beautifulsoup4
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+scikit-learn>=1.3  # Required for prediction + TF-IDF
+seaborn>=0.12      # Optional, for heatmap
+pdfplumber>=0.10   # PDF text + table extraction (document_parser)
+python-docx>=1.1   # DOCX/DOC parsing (document_parser)
+pypdf>=4.0         # PDF fallback if pdfplumber unavailable (document_parser)
+reportlab>=4.0     # PDF generation — create_pdf, create_pdf_from_markdown (document_parser)
+python-dateutil>=2.8  # Natural language date parsing for scheduler
+faster-whisper        # Local Whisper transcription (/transcribe endpoint, no API key needed)
+Pillow                # Image resizing before sending to vision API (avoids size-limit hallucinations)
+pytesseract           # OCR — extract text from images (requires tesseract-ocr system package)
+playwright            # Full browser automation (browser_* functions in web skill)
+google-api-python-client  # Google Calendar API
+google-auth-httplib2      # Google auth HTTP transport
+google-auth-oauthlib      # Google OAuth 2.0 flow
