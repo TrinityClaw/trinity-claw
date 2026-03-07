@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Venturic - Adventure Awaits</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="container nav-container">
+            <a href="#" class="logo">
+                <i class="fas fa-mountain"></i>
+                <span>Venturic</span>
+            </a>
+            <ul class="nav-links">
+                <li><a href="#destinations">Destinations</a></li>
+                <li><a href="#experiences">Experiences</a></li>
+                <li><a href="#about">About</a></li>
+                <li><a href="#journal">Journal</a></li>
+            </ul>
+            <div class="nav-actions">
+                <a href="#search" class="icon-btn"><i class="fas fa-search"></i></a>
+                <a href="#login" class="btn btn-outline">Sign In</a>
+                <a href="#book" class="btn btn-primary">Book Now</a>
+            </div>
+            <button class="mobile-menu-btn" aria-label="Toggle menu">
+                <i class="fas fa-bars"></i>
+            </button>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-bg">
+            <div class="hero-overlay"></div>
+        </div>
+        <div class="container hero-container">
+            <div class="hero-content">
+                <span class="hero-badge">
+                    <i class="fas fa-compass"></i>
+                    Explore the Unknown
+                </span>
+                <h1 class="hero-title">
+                    Discover Your Next
+                    <span class="gradient-text">Great Adventure</span>
+                </h1>
+                <p class="hero-subtitle">
+                    Journey through breathtaking landscapes, conquer mighty peaks, and create 
+                    unforgettable memories with our curated adventure experiences.
+                </p>
+                <div class="hero-stats">
+                    <div class="stat-item">
+                        <span class="stat-number">150+</span>
+                        <span class="stat-label">Destinations</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-number">50K+</span>
+                        <span class="stat-label">Adventurers</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-number">4.9</span>
+                        <span class="stat-label">Rating</span>
+                    </div>
+                </div>
+                <div class="hero-buttons">
+                    <a href="#explore" class="btn btn-primary btn-lg">
+                        <i class="fas fa-play"></i>
+                        Start Exploring
+                    </a>
+                    <a href="#video" class="btn btn-glass btn-lg">
+                        <i class="fas fa-play-circle"></i>
+                        Watch Film
+                    </a>
+                </div>
+            </div>
+        </div>
+        <div class="scroll-indicator">
+            <span>Scroll to explore</span>
+            <div class="scroll-line"></div>
+        </div>
+    </section>
+
+    <!-- Destinations Section -->
+    <section id="destinations" class="destinations">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-badge">Popular Destinations</span>
+                <h2 class="section-title">Where Will You Go?</h2>
+                <p class="section-subtitle">
+                    From snow-capped peaks to tropical paradises, discover your perfect adventure
+                </p>
+            </div>
+            <div class="destinations-grid">
+                <div class="destination-card featured">
+                    <div class="card-image">
+                        <img src="https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=800" alt="Mountains">
+                        <div class="card-badge">Most Popular</div>
+                    </div>
+                    <div class="card-content">
+                        <div class="card-location">
+                            <i class="fas fa-map-marker-alt"></i>
+                            <span>Swiss Alps, Switzerland</span>
+                        </div>
+                        <h3>Alpine Expedition</h3>
+                        <p>Conquer the majestic peaks of the Swiss Alps with expert guides.</p>
+                        <div class="card-meta">
+                            <div class="meta-item">
+                                <i class="fas fa-clock"></i>
+                                <span>7 Days</span>
+                            </div>
+                            <div class="meta-item">
+                                <i class="fas fa-user"></i>
+                                <span>Max 8</span>
+                            </div>
+                            <div class="meta-item">
+                                <i class="fas fa-star"></i>
+                                <span>4.9</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <span class="price">From $2,499</span>
+                            <a href="#" class="btn btn-sm btn-primary">Details</a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="destination-card">
+                    <div class="card-image">
+                        <img src="https://images.unsplash.com/photo-1501785888041-af3ef285b470?w=800" alt="Lake">
+                    </div>
+                    <div class="card-content">
+                        <div class="card-location">
+                            <i class="fas fa-map-marker-alt"></i>
+                            <span>Patagonia, Argentina</span>
+                        </div>
+                        <h3>Patagonia Trek</h3>
+                        <p>Explore pristine wilderness and glacial landscapes.</p>
+                        <div class="card-meta">
+                            <div class="meta-item">
+                                <i class="fas fa-clock"></i>
+                                <span>10 Days</span>
+                            </div>
+                            <div class="meta-item">
+                                <i class="fas fa-user"></i>
+                                <span>Max 6</span>
+                            </div>
+                            <div class="meta-item">
+                                <i class="fas fa-star"></i>
+                                <span>5.0</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <span class="price">From $3,299</span>
+                            <a href="#" class="btn btn-sm btn-primary">Details</a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="destination-card">
+                    <div class="card-image">
+                        <img src="https://images.unsplash.com/photo-1516483638261-f4dbaf036963?w=800" alt="Italy">
+                    </div>
+                    <div class="card-content">
+                        <div class="card-location">
+                            <i class="fas fa-map-marker-alt"></i>
+                            <span>Cinque Terre, Italy</span>
+                        </div>
+                        <h3>Coastal Hiking</h3>
+                        <p>Walk the scenic trails of Italy's stunning coastline.</p>
+                        <div class="card-meta">
+                            <div class="meta-item">
+                                <i class="fas fa-clock"></i>
+                                <span>5 Days</span>
+                            </div>
+                            <div class="meta-item">
+                                <i class="fas fa-user"></i>
+                                <span>Max 12</span>
+                            </div>
+                            <div class="meta-item">
+                                <i class="fas fa-star"></i>
+                                <span>4.8</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <span class="price">From $1,899</span>
+                            <a href="#" class="btn btn-sm btn-primary">Details</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="text-center mt-12">
+                <a href="#" class="btn btn-outline btn-lg">View All Destinations</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Experiences Section -->
+    <section id="experiences" class="experiences">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-badge">Experiences</span>
+                <h2 class="section-title">Adventure Activities</h2>
+                <p class="section-subtitle">
+                    Choose from our wide range of adrenaline-pumping activities
+                </p>
+            </div>
+            <div class="experiences-grid">
+                <div class="experience-card">
+                    <div class="experience-icon">
+                        <i class="fas fa-hiking"></i>
+                    </div>
+                    <h3>Mountain Hiking</h3>
+                    <p>Trek through challenging terrain and reach new heights.</p>
+                    <a href="#" class="experience-link">
+                        Learn more <i class="fas fa-arrow-right"></i>
+                    </a>
+                </div>
+
+                <div class="experience-card">
+                    <div class="experience-icon">
+                        <i class="fas fa-water"></i>
+                    </div>
+                    <h3>Water Sports</h3>
+                    <p>Kayak, surf, and dive in crystal-clear waters.</p>
+                    <a href="#" class="experience-link">
+                        Learn more <i class="fas fa-arrow-right"></i>
+                    </a>
+                </div>
+
+                <div class="experience-card">
+                    <div class="experience-icon">
+                        <i class="fas fa-parachute-box"></i>
+                    </div>
+                    <h3>Extreme Sports</h3>
+                    <p>Push your limits with skydiving and bungee jumping.</p>
+                    <a href="#" class="experience-link">
+                        Learn more <i class="fas fa-arrow-right"></i>
+                    </a>
+                </div>
+
+                <div class="experience-card">
+                    <div class="experience-icon">
+                        <i class="fas fa-campground"></i>
+                    </div>
+                    <h3>Camping</h3>
+                    <p>Sleep under the stars in remote wilderness locations.</p>
+                    <a href="#" class="experience-link">
+                        Learn more <i class="fas fa-arrow-right"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- CTA Section -->
+    <section class="cta">
+        <div class="cta-bg">
+            <div class="cta-overlay"></div>
+        </div>
+        <div class="container cta-container">
+            <h2>Ready for Your Next Adventure?</h2>
+            <p>Join thousands of explorers who trust Venturic for their journey.</p>
+            <div class="cta-buttons">
+                <a href="#" class="btn btn-primary btn-lg">Book Your Trip</a>
+                <a href="#" class="btn btn-outline-white btn-lg">Download Guide</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-grid">
+                <div class="footer-brand">
+                    <a href="#" class="logo">
+                        <i class="fas fa-mountain"></i>
+                        <span>Venturic</span>
+                    </a>
+                    <p>Creating unforgettable adventure experiences since 2015.</p>
+                    <div class="social-links">
+                        <a href="#"><i class="fab fa-instagram"></i></a>
+                        <a href="#"><i class="fab fa-facebook"></i></a>
+                        <a href="#"><i class="fab fa-twitter"></i></a>
+                        <a href="#"><i class="fab fa-youtube"></i></a>
+                    </div>
+                </div>
+                <div class="footer-links">
+                    <h4>Company</h4>
+                    <ul>
+                        <li><a href="#">About Us</a></li>
+                        <li><a href="#">Careers</a></li>
+                        <li><a href="#">Press</a></li>
+                        <li><a href="#">Blog</a></li>
+                    </ul>
+                </div>
+                <div class="footer-links">
+                    <h4>Support</h4>
+                    <ul>
+                        <li><a href="#">Help Center</a></li>
+                        <li><a href="#">Safety</a></li>
+                        <li><a href="#">Cancellation Options</a></li>
+                        <li><a href="#">Contact Us</a></li>
+                    </ul>
+                </div>
+                <div class="footer-links">
+                    <h4>Legal</h4>
+                    <ul>
+                        <li><a href="#">Privacy Policy</a></li>
+                        <li><a href="#">Terms of Service</a></li>
+                        <li><a href="#">Cookie Policy</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2024 Venturic Adventures. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Custom JS -->
+    <script src="script.js"></script>
+</body>
+</html>

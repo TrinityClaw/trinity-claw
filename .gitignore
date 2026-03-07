@@ -2,9 +2,31 @@
 .env
 .env.*
 *.env
+gcal_credentials.json
 
-# ── Memory data — personal, credentials & can get large ───────────────────────
-memory/
+# ── Memory data — keep folder structure, ignore sensitive contents ─────────────
+memory/session_logs.jsonl
+memory/session_logs_archive.jsonl
+memory/lessons.jsonl
+memory/todos.json
+memory/notes.json
+memory/pending_skills.json
+memory/email_drafts.json
+memory/email_monitor_state.json
+memory/email_config.env
+memory/url_monitor.db
+memory/url_monitor.log
+memory/gcal_credentials.json
+memory/gcal_token.json
+memory/gdrive_token.json
+memory/gmail_token.json
+memory/youtube_token.json
+memory/chroma_data/
+memory/whisper_models/
+memory/email_attachments/
+memory/app/
+memory/images/
+memory/websites/
 
 # ── Dynamic skills created locally ────────────────────────────────────────────
 # Remove this line if you want to share your custom skills on GitHub
@@ -21,4 +43,3 @@ __pycache__/
 .DS_Store
 Thumbs.db
 desktop.ini
-gcal_credentials.json
