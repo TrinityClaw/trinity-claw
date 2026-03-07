@@ -80,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/insta
 
 During installation you will be asked to choose:
 - **Cloud** — use a remote provider (OpenAI, NVIDIA, Anthropic, etc.) — requires API key
-- **Local** — use Ollama with `llama3.2-vision` running on your machine — no API key needed
+- **Local** — use Ollama with `qwen3.5:9b` running on your machine — no API key needed
 
 ### Manual Install
 
