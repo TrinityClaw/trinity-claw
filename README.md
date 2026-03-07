@@ -119,7 +119,7 @@ Choose your model source during installation:
 
 #### Option B — Local Model via Ollama (no API key needed)
 
-- Model: `llama3.2-vision` (~11GB download on first start)
+- Model: `qwen3.5:9b` (~6GB download on first start)
 - Requires: 8GB+ VRAM (GPU) or 16GB+ RAM (CPU-only, slower)
 - Pulled automatically by `ollama-entrypoint.sh` on first startup
 - Start command: `docker compose --profile local up -d`
@@ -140,7 +140,7 @@ docker logs trinity-claw-ollama-1 -f
 | OpenAI | `openai/gpt-4o` | `https://api.openai.com/v1` |
 | Anthropic | `anthropic/claude-3-5-sonnet-20241022` | `https://api.anthropic.com/v1` |
 | Moonshot | `openai/moonshot-v1-8k` | `https://api.moonshot.cn/v1` |
-| Local (Ollama) | `ollama/llama3.2-vision` | `http://localhost:11434` |
+| Local (Ollama) | `ollama/qwen3.5:9b` | `http://localhost:11434` |
 
 ### Configuration Files
 
