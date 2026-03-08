@@ -25,17 +25,28 @@ echo -e "\033[33m[1/5] Checking prerequisites...\033[0m"
 if ! command -v docker &> /dev/null; then
     echo -e "   ❌ Docker not found. Attempting to install..."
     if [[ "$(uname)" == "Darwin" ]]; then
-        if command -v brew &> /dev/null; then
-            brew install --cask docker
-            open /Applications/Docker.app
-            echo -e "   ⏳ Waiting for Docker Desktop to start (up to 60s)..."
-            t=0
-            while [ $t -lt 60 ] && ! docker info &>/dev/null; do
-                sleep 2
-                t=$((t + 2))
-            done
-        else
-            echo -e "   ❌ Homebrew not found. Install Docker Desktop manually: https://docs.docker.com/desktop/mac/install/"
+        if ! command -v brew &> /dev/null; then
+            echo -e "   📥 Homebrew not found. Installing Homebrew..."
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            # Add brew to PATH for Apple Silicon
+            if [ -f /opt/homebrew/bin/brew ]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            fi
+        fi
+        echo -e "   ✅ Homebrew ready"
+        echo -e "   📥 Installing Docker Desktop via Homebrew..."
+        brew install --cask docker
+        echo -e "   🚀 Launching Docker Desktop..."
+        open /Applications/Docker.app
+        echo -e "   ⏳ Waiting for Docker to start (up to 90s)..."
+        t=0
+        while [ $t -lt 90 ] && ! docker info &>/dev/null; do
+            sleep 3
+            t=$((t + 3))
+        done
+        if ! docker info &>/dev/null; then
+            echo -e "   ⚠️  Docker is still starting. Wait for the Docker Desktop icon to appear,"
+            echo -e "      then re-run this script."
             exit 1
         fi
     elif grep -qi microsoft /proc/version 2>/dev/null; then
@@ -102,8 +113,11 @@ if [ "$model_source" = "local" ]; then
         if ! command -v ollama &> /dev/null; then
             echo -e "   📥 Installing Ollama via Homebrew..."
             if ! command -v brew &> /dev/null; then
-                echo -e "   ❌ Homebrew not found. Install it first: https://brew.sh"
-                exit 1
+                echo -e "   📥 Homebrew not found. Installing Homebrew first..."
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                if [ -f /opt/homebrew/bin/brew ]; then
+                    eval "$(/opt/homebrew/bin/brew shellenv)"
+                fi
             fi
             brew install ollama
         else
