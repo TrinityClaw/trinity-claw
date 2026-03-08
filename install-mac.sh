@@ -15,10 +15,11 @@ if xcode-select -p &>/dev/null; then
     echo "   ✅ Xcode Command Line Tools already installed"
 else
     echo "   📥 Installing Xcode Command Line Tools..."
-    echo "   👉 A popup will appear — click INSTALL and wait for it to finish."
+    echo "   👉 A dialog box will appear on screen — click INSTALL"
+    echo "   ⏳ Waiting for you to complete the installation..."
     echo ""
     xcode-select --install 2>/dev/null || true
-    echo "   ⏳ Waiting for Xcode CLT to finish (this takes a few minutes)..."
+    # Wait until CLT is installed
     until xcode-select -p &>/dev/null; do
         sleep 5
         printf "."
@@ -37,8 +38,9 @@ fi
 if command -v brew &>/dev/null; then
     echo "   ✅ Homebrew already installed"
 else
-    echo "   📥 Installing Homebrew (you may be asked for your Mac password)..."
+    echo "   📥 Installing Homebrew (you will be asked for your Mac password)..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # Reload PATH after install
     if [ -f /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
     elif [ -f /usr/local/bin/brew ]; then
@@ -47,9 +49,8 @@ else
     if ! command -v brew &>/dev/null; then
         echo ""
         echo "   ❌ Homebrew install failed."
-        echo "   👉 Open a new terminal and run this manually:"
+        echo "   👉 Run this manually in a new terminal, then re-run this script:"
         echo "      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-        echo "   Then run this script again."
         exit 1
     fi
     echo "   ✅ Homebrew installed"
