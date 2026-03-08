@@ -70,7 +70,14 @@ This project follows responsible AI agent design practices, but **no system is u
 
 **Windows (PowerShell):**
 ```powershell
-iwr -useb https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.ps1 | iex
+ # 1. Clone the repository
+git clone https://github.com/TrinityClaw/trinity-claw.git
+
+# 2. Go into the folder
+cd trinity-claw
+
+# 3. Run the installer
+.\install.ps1
 ```
 
 **Linux:**
@@ -89,7 +96,7 @@ bash install-mac.sh && bash install.sh
 
 During installation you will be asked to choose:
 - **Cloud** — use a remote provider (OpenAI, NVIDIA, Anthropic, etc.) — requires API key
-- **Local** — use Ollama with `llama3.2-vision` running on your machine — no API key needed
+- **Local** — use Ollama with `qwen3.5:9b` running on your machine — no API key needed
 
 ### Manual Install
 
