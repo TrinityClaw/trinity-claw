@@ -503,7 +503,7 @@ def search(query: str, engine: str = "auto", num: str = "5") -> str:
     if not query or not query.strip():
         return "❌ Query cannot be empty"
 
-    n = min(int(num) if str(num).isdigit() else 5, 10)
+    n = min(int(num) if str(num).isdigit() else 10, 15)
     query = query.strip()
     eng = engine.lower()
 
@@ -567,7 +567,7 @@ def _search_tavily(query: str, n: int) -> str:
             "query": query,
             "max_results": n,
             "include_answer": True,
-            "search_depth": "advanced" if live else "basic",
+            "search_depth": "advanced",
         }
         if live:
             payload["topic"] = "news"
@@ -601,7 +601,7 @@ def _search_tavily(query: str, n: int) -> str:
             content = r.get("content", "")
             results.append(f"\n{i}. {title}")
             if content:
-                results.append(f"   {content[:200]}...")
+                results.append(f"   {content[:600]}...")
             if url:
                 results.append(f"   🔗 {url}")
 
