@@ -1,10 +1,7 @@
 #!/bin/bash
-# Auto-fix Windows CRLF line endings — safe to run from any upload method
+# Auto-fix Windows CRLF line endings
 if LC_ALL=C grep -q $'\r' "$0"; then
-    tmp=$(mktemp)
-    tr -d '\r' < "$0" > "$tmp"
-    chmod +x "$tmp"
-    exec bash "$tmp" "$@"
+    tmp=$(mktemp); tr -d '\r' < "$0" > "$tmp"; chmod +x "$tmp"; exec bash "$tmp" "$@"
 fi
 
 # install.sh - TrinityClaw Installation Wizard (Linux/Mac)
@@ -16,36 +13,13 @@ echo -e "╚══════════════════════�
 echo ""
 
 # ─────────────────────────────────────────────────────────
-# Helper: set up Homebrew (installs CLT + brew if needed)
+# Detect platform
 # ─────────────────────────────────────────────────────────
-setup_brew() {
-    # Step 1: Xcode Command Line Tools (required by Homebrew)
-    if ! xcode-select -p &>/dev/null; then
-        echo -e "   📥 Installing Xcode Command Line Tools (required)..."
-        # Non-interactive install via softwareupdate
-        touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-        CLT=$(softwareupdate -l 2>/dev/null | grep "Label: Command Line Tools" | sort -V | tail -n1 | sed 's/^.*Label: //')
-        if [ -n "$CLT" ]; then
-            softwareupdate -i "$CLT" --agree-to-license 2>/dev/null || true
-        fi
-        rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-        # Fallback: prompt user if still missing
-        if ! xcode-select -p &>/dev/null; then
-            echo -e "   📥 A dialog may appear — click Install to continue..."
-            xcode-select --install 2>/dev/null || true
-            echo -e "   ⏳ Waiting for Xcode CLT to finish..."
-            until xcode-select -p &>/dev/null; do sleep 5; done
-        fi
-        echo -e "   ✅ Xcode Command Line Tools installed"
-    fi
-
-    # Step 2: Homebrew
-    if ! command -v brew &>/dev/null; then
-        echo -e "   📥 Installing Homebrew..."
-        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
-    fi
-
-    # Step 3: Add brew to PATH
+IS_MAC=false
+if [[ "$(uname)" == "Darwin" ]]; then
+    IS_MAC=true
+    echo -e "   \033[36m🍎 macOS detected\033[0m"
+    # Ensure brew bins are in PATH (set up by install-mac.sh)
     if [ -f /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
     elif [ -f /usr/local/bin/brew ]; then
@@ -53,23 +27,6 @@ setup_brew() {
     fi
     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
     hash -r
-
-    if ! command -v brew &>/dev/null; then
-        echo -e "   ❌ Homebrew not found after install attempt."
-        echo -e "   👉 Run this manually, then re-run install.sh:"
-        echo -e "      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-        exit 1
-    fi
-    echo -e "   ✅ Homebrew ready"
-}
-
-# ─────────────────────────────────────────────────────────
-# Detect platform
-# ─────────────────────────────────────────────────────────
-IS_MAC=false
-if [[ "$(uname)" == "Darwin" ]]; then
-    IS_MAC=true
-    echo -e "   \033[36m🍎 macOS detected\033[0m"
 fi
 
 # ─────────────────────────────────────────────────────────
@@ -77,54 +34,45 @@ fi
 # ─────────────────────────────────────────────────────────
 echo -e "\033[33m[1/5] Checking prerequisites...\033[0m"
 
+# On Mac: remind user to run install-mac.sh first if Docker missing
 if [ "$IS_MAC" = true ]; then
-    setup_brew
-
-    if ! command -v docker &>/dev/null || ! command -v colima &>/dev/null; then
-        echo -e "   📥 Installing Colima + Docker CLI..."
-        brew install colima docker docker-compose
-        export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-        hash -r
-    fi
-
-    if ! command -v colima &>/dev/null; then
-        echo -e "   ❌ colima not found after install. PATH: $PATH"
-        exit 1
-    fi
-
-    if ! docker info &>/dev/null 2>&1; then
-        echo -e "   🚀 Starting Colima..."
+    # Start Colima if installed but not running
+    if command -v colima &>/dev/null && ! docker info &>/dev/null 2>&1; then
+        echo "   🚀 Starting Colima..."
         colima start --cpu 2 --memory 4
     fi
-
     if ! docker info &>/dev/null 2>&1; then
-        echo -e "   ❌ Docker is not responding. Try: colima start"
+        echo ""
+        echo "   ❌ Docker is not running."
+        echo "   👉 Run this first: bash install-mac.sh"
+        echo ""
         exit 1
     fi
-    echo "   ✅ Docker installed"
 
+# On Windows (Git Bash)
 elif grep -qi microsoft /proc/version 2>/dev/null; then
     if ! command -v docker &>/dev/null; then
-        echo -e "   ❌ Docker Desktop is not installed."
-        echo -e "   👉 Download from: https://www.docker.com/products/docker-desktop/"
-        echo -e "   Then restart Git Bash and re-run this script."
+        echo "   ❌ Docker Desktop is not installed."
+        echo "   👉 Download from: https://www.docker.com/products/docker-desktop/"
+        echo "   Then restart Git Bash and re-run this script."
         exit 1
     fi
-    echo "   ✅ Docker installed"
 
+# On Linux
 else
     if ! command -v docker &>/dev/null; then
-        echo -e "   📥 Installing Docker Engine (Linux)..."
+        echo "   📥 Installing Docker Engine..."
         curl -fsSL https://get.docker.com | sh
         sudo systemctl enable --now docker
         sudo usermod -aG docker "$USER"
         newgrp docker
     fi
-    echo "   ✅ Docker installed"
 fi
 
+echo "   ✅ Docker installed"
+
 if ! docker compose version &>/dev/null; then
-    echo -e "   ❌ Docker Compose not found."
+    echo "   ❌ Docker Compose not found."
     exit 1
 fi
 echo "   ✅ Docker Compose installed"
@@ -161,7 +109,7 @@ if [ "$model_source" = "local" ]; then
         echo ""
 
         if ! command -v ollama &>/dev/null; then
-            echo -e "   📥 Installing Ollama..."
+            echo "   📥 Installing Ollama..."
             brew install ollama
             export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
             hash -r
@@ -169,11 +117,11 @@ if [ "$model_source" = "local" ]; then
             echo "   ✅ Ollama already installed"
         fi
 
-        echo -e "   📥 Pulling qwen3.5:9b (~6.6GB, this may take several minutes)..."
+        echo "   📥 Pulling qwen3.5:9b (~6.6GB, this may take several minutes)..."
         ollama pull qwen3.5:9b
 
         if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
-            echo -e "   🚀 Starting Ollama service..."
+            echo "   🚀 Starting Ollama service..."
             ollama serve &>/dev/null &
             sleep 3
         else
