@@ -36,17 +36,26 @@ echo -e "\033[33m[1/5] Checking prerequisites...\033[0m"
 
 # On Mac: remind user to run install-mac.sh first if Docker missing
 if [ "$IS_MAC" = true ]; then
-    # Start Colima if installed but not running
-    if command -v colima &>/dev/null && ! docker info &>/dev/null 2>&1; then
-        echo "   🚀 Starting Colima..."
-        colima start --cpu 2 --memory 4
-    fi
     if ! docker info &>/dev/null 2>&1; then
-        echo ""
-        echo "   ❌ Docker is not running."
-        echo "   👉 Run this first: bash install-mac.sh"
-        echo ""
-        exit 1
+        # Try to start Docker Desktop if the app is installed
+        if [ -d "/Applications/Docker.app" ]; then
+            echo "   🚀 Starting Docker Desktop..."
+            open /Applications/Docker.app
+            echo "   ⏳ Waiting for Docker to start..."
+            for i in $(seq 1 30); do
+                sleep 2
+                docker info &>/dev/null 2>&1 && break
+                printf "."
+            done
+            echo ""
+        fi
+        if ! docker info &>/dev/null 2>&1; then
+            echo ""
+            echo "   ❌ Docker Desktop is not running."
+            echo "   👉 Run this first: bash install-mac.sh"
+            echo ""
+            exit 1
+        fi
     fi
 
 # On Windows (Git Bash)
@@ -125,8 +134,8 @@ model_source=$(echo "$model_source" | tr '[:upper:]' '[:lower:]' | xargs)
 echo ""
 echo -e "\033[33m[3/5] Configuring environment...\033[0m"
 
-two_key=$(cat /dev/urandom 2>/dev/null | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1 || \
-    python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+two_key=$(python3 -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null)
+[ -z "$two_key" ] && two_key=$(LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32)
 
 if [ "$model_source" = "local" ]; then
 
@@ -279,11 +288,17 @@ echo "   🌐 Web UI:  http://localhost:8080"
 echo "   🔌 API:     http://localhost:8001"
 echo "   📖 Docs:    http://localhost:8001/docs"
 echo ""
-echo -e "   \033[33m─────────────────────────────────────────────────────\033[0m"
-echo -e "   \033[33m🔑 Your Agent API Key (save this!):\033[0m"
-echo -e "   \033[93m${two_key}\033[0m"
-echo    "   Enter it in: Settings ⚙️ → Agent Security → Agent API Key"
-echo -e "   \033[33m─────────────────────────────────────────────────────\033[0m"
+# Save the key to a plain text file so it is never lost
+echo "${two_key}" > trinity-key.txt
+
+echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "   🔑  AGENT API KEY — copy and save this:"
+echo ""
+echo "       ${two_key}"
+echo ""
+echo "   Enter it in: Settings ⚙️ → Agent Security → Agent API Key"
+echo "   (also saved to trinity-key.txt in this folder)"
+echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
 if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
@@ -293,12 +308,14 @@ if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
 fi
 
 if [ "$IS_MAC" = true ]; then
-    echo -e "   \033[36m🍎 Mac: Docker runs via Colima — no menu bar icon is normal.\033[0m"
+    echo -e "   \033[36m🍎 Mac: Your agent runs inside Docker Desktop.\033[0m"
+    echo -e "   \033[36m       The whale 🐳 icon in the menu bar = Docker is running.\033[0m"
     if [ "$LOCAL_MODE" = true ]; then
-        echo -e "   \033[36m       Keep Ollama running: brew services start ollama\033[0m"
-        echo -e "   \033[36m       After reboot to restart: colima start && docker compose -f docker-compose.mac.yml up -d\033[0m"
+        echo -e "   \033[36m       After reboot: open Docker Desktop, then run:\033[0m"
+        echo -e "   \033[36m         docker compose -f docker-compose.mac.yml up -d\033[0m"
     else
-        echo -e "   \033[36m       After reboot to restart: colima start && docker compose up -d\033[0m"
+        echo -e "   \033[36m       After reboot: open Docker Desktop, then run:\033[0m"
+        echo -e "   \033[36m         docker compose up -d\033[0m"
     fi
     echo ""
 fi

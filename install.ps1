@@ -82,11 +82,6 @@ general_settings:
 
   Write-Host "   ✅ Local configuration created!" -ForegroundColor Green
   Write-Host ""
-  Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
-  Write-Host "   ⚠️  To start TrinityClaw with local Ollama model, run:" -ForegroundColor Yellow
-  Write-Host "       docker compose --profile local up -d" -ForegroundColor White
-  Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
-
 }
 else {
 
@@ -161,28 +156,50 @@ general_settings:
 
   Write-Host ""
   Write-Host "   ✅ Cloud configuration created!" -ForegroundColor Green
-  Write-Host ""
-  Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
-  Write-Host "   To start TrinityClaw, run:" -ForegroundColor Gray
-  Write-Host "       docker compose up -d" -ForegroundColor White
-  Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
 }
 
+# ─────────────────────────────────────────────
+# Build and start containers
+# ─────────────────────────────────────────────
 Write-Host ""
-Write-Host "   🎤 Voice messages: Whisper model (~150MB) downloads on first voice message." -ForegroundColor Yellow
-Write-Host "   📸 Image vision:   uses the trinity-vision model in litellm_config.yaml." -ForegroundColor Yellow
-Write-Host "      NVIDIA users: set trinity-vision to openai/meta/llama-3.2-90b-vision-instruct" -ForegroundColor DarkGray
-Write-Host "   🌐 Browser automation: Playwright + Chromium (~300MB) installed automatically" -ForegroundColor Yellow
-Write-Host "      inside the container during build. No action needed." -ForegroundColor DarkGray
-Write-Host "      Use browser_* functions in the web skill (browser_goto, browser_click, etc.)" -ForegroundColor DarkGray
+Write-Host "   Building containers (this may take a few minutes on first run)..." -ForegroundColor Yellow
+if ($modelSource -eq "local") {
+    & docker compose --profile local up -d --build
+} else {
+    & docker compose up -d --build
+}
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "   ❌ Docker failed to start containers." -ForegroundColor Red
+    Write-Host "      Make sure Docker Desktop is running (whale icon in taskbar)," -ForegroundColor Gray
+    Write-Host "      then run: docker compose up -d" -ForegroundColor Gray
+} else {
+    Write-Host "   ✅ Containers started!" -ForegroundColor Green
+}
+
+# ─────────────────────────────────────────────
+# Save key to file and display it clearly
+# ─────────────────────────────────────────────
+$trinityKey | Out-File -FilePath "trinity-key.txt" -Encoding utf8
+
+Write-Host ""
+Write-Host "   ✅ TrinityClaw Installed!" -ForegroundColor Green
 Write-Host ""
 Write-Host "   🌐 Web UI:  http://localhost:8080" -ForegroundColor Cyan
 Write-Host "   🔌 API:     http://localhost:8001" -ForegroundColor Cyan
 Write-Host "   📖 Docs:    http://localhost:8001/docs" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host "   🔑 Your Agent API Key (save this!)" -ForegroundColor Yellow
-Write-Host "   $trinityKey" -ForegroundColor Yellow
-Write-Host "   Enter it in: Settings ⚙️ → Agent Security → Agent API Key" -ForegroundColor Gray
-Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+Write-Host "   🔑  AGENT API KEY — copy and save this:" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "       $trinityKey" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "   Enter it in: Settings -> Agent Security -> Agent API Key" -ForegroundColor Gray
+Write-Host "   (also saved to trinity-key.txt in this folder)" -ForegroundColor Gray
+Write-Host "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+Write-Host ""
+Write-Host "   🎤 Voice: Whisper (~150MB) downloads on first voice message." -ForegroundColor Yellow
+Write-Host "   📸 Vision: uses trinity-vision model in litellm_config.yaml." -ForegroundColor Yellow
+Write-Host "   🌐 Browser: Playwright + Chromium installed automatically." -ForegroundColor Yellow
 Write-Host ""

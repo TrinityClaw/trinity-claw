@@ -1,103 +1,100 @@
 #!/bin/bash
-# Auto-fix Windows CRLF
+# Auto-fix Windows CRLF line endings
 if LC_ALL=C grep -q $'\r' "$0"; then
     tmp=$(mktemp); tr -d '\r' < "$0" > "$tmp"; chmod +x "$tmp"; exec bash "$tmp" "$@"
 fi
 
 echo ""
-echo -e "\033[32m╔══════════════════════════════════════════════════════╗"
-echo -e "║     TrinityClaw — Mac Prerequisites Setup            ║"
-echo -e "╚══════════════════════════════════════════════════════╝\033[0m"
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║     TrinityClaw — Mac Setup (Step 1 of 2)           ║"
+echo "╚══════════════════════════════════════════════════════╝"
+echo ""
+echo "   This script installs Docker Desktop — the only"
+echo "   prerequisite for running TrinityClaw."
 echo ""
 
-# ── Step 1: Xcode Command Line Tools ─────────────────────
-if xcode-select -p &>/dev/null; then
-    echo "   ✅ Xcode Command Line Tools already installed"
-else
-    echo "   📥 Installing Xcode Command Line Tools..."
-    echo "   👉 A dialog box will appear on screen — click INSTALL"
-    echo "   ⏳ Waiting for you to complete the installation..."
+# ─────────────────────────────────────────────────────────
+# Check if Docker is already running
+# ─────────────────────────────────────────────────────────
+if docker info &>/dev/null 2>&1; then
+    echo "   ✅ Docker Desktop is already installed and running."
     echo ""
-    xcode-select --install 2>/dev/null || true
-    # Wait until CLT is installed
-    until xcode-select -p &>/dev/null; do
-        sleep 5
-        printf "."
+    echo "════════════════════════════════════════════════════════"
+    echo "   ✅ Ready! Now run Step 2:"
+    echo ""
+    echo "      bash install.sh"
+    echo ""
+    echo "════════════════════════════════════════════════════════"
+    echo ""
+    exit 0
+fi
+
+# ─────────────────────────────────────────────────────────
+# Docker Desktop is installed but not running — start it
+# ─────────────────────────────────────────────────────────
+if [ -d "/Applications/Docker.app" ]; then
+    echo "   ✅ Docker Desktop is installed but not running."
+    echo "   🚀 Starting Docker Desktop..."
+    open /Applications/Docker.app
+
+    echo ""
+    echo "   ⏳ Waiting for Docker to start (up to 90 seconds)..."
+    echo "      Watch for the whale 🐳 icon to appear in your Mac menu bar."
+    echo ""
+
+    for i in $(seq 1 45); do
+        sleep 2
+        if docker info &>/dev/null 2>&1; then
+            echo "   ✅ Docker Desktop is running!"
+            break
+        fi
+        printf "   [%02d/45] still starting...\r" "$i"
     done
     echo ""
-    echo "   ✅ Xcode Command Line Tools installed"
-fi
 
-# ── Step 2: Homebrew ─────────────────────────────────────
-if [ -f /opt/homebrew/bin/brew ]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-elif [ -f /usr/local/bin/brew ]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-fi
-
-if command -v brew &>/dev/null; then
-    echo "   ✅ Homebrew already installed"
-else
-    echo "   📥 Installing Homebrew (you will be asked for your Mac password)..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    # Reload PATH after install
-    if [ -f /opt/homebrew/bin/brew ]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-    elif [ -f /usr/local/bin/brew ]; then
-        eval "$(/usr/local/bin/brew shellenv)"
-    fi
-    if ! command -v brew &>/dev/null; then
-        echo ""
-        echo "   ❌ Homebrew install failed."
-        echo "   👉 Run this manually in a new terminal, then re-run this script:"
-        echo "      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-        exit 1
-    fi
-    echo "   ✅ Homebrew installed"
-fi
-
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-hash -r
-
-# ── Step 3: Colima + Docker CLI ───────────────────────────
-if command -v colima &>/dev/null && command -v docker &>/dev/null; then
-    echo "   ✅ Colima + Docker already installed"
-else
-    echo "   📥 Installing Colima + Docker CLI..."
-    brew install colima docker docker-compose
-    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-    hash -r
-    echo "   ✅ Colima + Docker installed"
-fi
-
-# ── Link docker-compose as Docker CLI plugin ──────────────
-if ! docker compose version &>/dev/null 2>&1; then
-    echo "   🔗 Linking docker-compose as Docker plugin..."
-    mkdir -p ~/.docker/cli-plugins
-    COMPOSE_BIN="$(brew --prefix)/bin/docker-compose"
-    if [ -f "$COMPOSE_BIN" ]; then
-        ln -sfn "$COMPOSE_BIN" ~/.docker/cli-plugins/docker-compose
-        echo "   ✅ docker compose plugin linked"
-    fi
-fi
-
-# ── Step 4: Start Colima ──────────────────────────────────
-if docker info &>/dev/null 2>&1; then
-    echo "   ✅ Docker is already running"
-else
-    echo "   🚀 Starting Colima (Docker runtime)..."
-    colima start --cpu 2 --memory 4
     if ! docker info &>/dev/null 2>&1; then
-        echo "   ❌ Colima failed to start. Try: colima start"
+        echo ""
+        echo "   ❌ Docker did not start in time."
+        echo "   👉 Open Docker Desktop manually from your Applications folder."
+        echo "      Wait for the whale 🐳 icon in the menu bar, then run:"
+        echo ""
+        echo "      bash install.sh"
+        echo ""
         exit 1
     fi
-    echo "   ✅ Docker is running"
+
+    echo ""
+    echo "════════════════════════════════════════════════════════"
+    echo "   ✅ Ready! Now run Step 2:"
+    echo ""
+    echo "      bash install.sh"
+    echo ""
+    echo "════════════════════════════════════════════════════════"
+    echo ""
+    exit 0
 fi
 
-# ── Done ──────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# Docker Desktop is NOT installed — guide the user
+# ─────────────────────────────────────────────────────────
+echo "   ❌ Docker Desktop is not installed."
 echo ""
-echo -e "\033[32m✅ Mac prerequisites ready!\033[0m"
+echo "════════════════════════════════════════════════════════"
+echo "   📥  INSTALL DOCKER DESKTOP (it's free)"
 echo ""
-echo "   Now run the main installer:"
-echo "   bash install.sh"
+echo "   1. Go to:  https://www.docker.com/products/docker-desktop/"
+echo "   2. Click 'Download for Mac'"
+echo "   3. Open the .dmg file → drag Docker to Applications"
+echo "   4. Open Docker Desktop from Applications"
+echo "   5. Wait for the whale 🐳 icon in your menu bar"
+echo "   6. Come back here and run:"
 echo ""
+echo "         bash install-mac.sh"
+echo ""
+echo "════════════════════════════════════════════════════════"
+echo ""
+
+# Try to open the download page automatically
+open "https://www.docker.com/products/docker-desktop/" 2>/dev/null || true
+
+exit 1
