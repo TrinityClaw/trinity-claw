@@ -182,7 +182,7 @@ Write-Host "   📖 Docs:    http://localhost:8001/docs" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
 Write-Host "   🔑 Your Agent API Key (save this!)" -ForegroundColor Yellow
-Write-Host "   $trinityKey" -ForegroundColor White
+Write-Host "   $trinityKey" -ForegroundColor Yellow
 Write-Host "   Enter it in: Settings ⚙️ → Agent Security → Agent API Key" -ForegroundColor Gray
 Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
 Write-Host ""

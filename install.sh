@@ -281,7 +281,7 @@ echo "   📖 Docs:    http://localhost:8001/docs"
 echo ""
 echo -e "   \033[33m─────────────────────────────────────────────────────\033[0m"
 echo -e "   \033[33m🔑 Your Agent API Key (save this!):\033[0m"
-echo -e "   \033[97m${two_key}\033[0m"
+echo -e "   \033[93m${two_key}\033[0m"
 echo    "   Enter it in: Settings ⚙️ → Agent Security → Agent API Key"
 echo -e "   \033[33m─────────────────────────────────────────────────────\033[0m"
 echo ""
@@ -292,8 +292,14 @@ if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
     echo ""
 fi
 
-if [ "$IS_MAC" = true ] && [ "$LOCAL_MODE" = true ]; then
-    echo -e "   \033[36m🍎 Mac: keep Ollama running after reboot with: brew services start ollama\033[0m"
+if [ "$IS_MAC" = true ]; then
+    echo -e "   \033[36m🍎 Mac: Docker runs via Colima — no menu bar icon is normal.\033[0m"
+    if [ "$LOCAL_MODE" = true ]; then
+        echo -e "   \033[36m       Keep Ollama running: brew services start ollama\033[0m"
+        echo -e "   \033[36m       After reboot to restart: colima start && docker compose -f docker-compose.mac.yml up -d\033[0m"
+    else
+        echo -e "   \033[36m       After reboot to restart: colima start && docker compose up -d\033[0m"
+    fi
     echo ""
 fi
 
