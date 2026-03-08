@@ -71,20 +71,40 @@ fi
 
 echo "   ✅ Docker installed"
 
-# Support both "docker compose" (plugin) and "docker-compose" (standalone)
+# Find docker-compose — check plugin, standalone, and known brew paths
+DC=""
 if docker compose version &>/dev/null 2>&1; then
     DC="docker compose"
 elif command -v docker-compose &>/dev/null; then
     DC="docker-compose"
-    # Try to link it as a plugin for future runs
-    mkdir -p ~/.docker/cli-plugins
-    ln -sfn "$(command -v docker-compose)" ~/.docker/cli-plugins/docker-compose 2>/dev/null || true
-else
+elif [ -f /opt/homebrew/bin/docker-compose ]; then
+    DC="/opt/homebrew/bin/docker-compose"
+elif [ -f /usr/local/bin/docker-compose ]; then
+    DC="/usr/local/bin/docker-compose"
+fi
+
+# On Mac: install if still not found, then link as plugin
+if [ -z "$DC" ] && [ "$IS_MAC" = true ]; then
+    echo "   📥 Installing docker-compose..."
+    brew install docker-compose
+    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+    hash -r
+    DC="/opt/homebrew/bin/docker-compose"
+fi
+
+if [ -z "$DC" ]; then
     echo "   ❌ Docker Compose not found."
-    echo "   👉 On Mac run: brew install docker-compose"
     exit 1
 fi
-echo "   ✅ Docker Compose installed ($DC)"
+
+# Link as Docker CLI plugin if not already working
+if ! docker compose version &>/dev/null 2>&1; then
+    mkdir -p ~/.docker/cli-plugins
+    COMPOSE_PATH="${DC##* }"  # get binary path (strip "docker " if present)
+    [ -f "$COMPOSE_PATH" ] && ln -sfn "$COMPOSE_PATH" ~/.docker/cli-plugins/docker-compose 2>/dev/null || true
+fi
+
+echo "   ✅ Docker Compose ready"
 
 # ─────────────────────────────────────────────────────────
 # [2/5] Choose model source
