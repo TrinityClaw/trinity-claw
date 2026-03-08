@@ -1,6 +1,6 @@
 #!/bin/bash
-# Auto-fix Windows CRLF line endings
-if LC_ALL=C grep -q $'\r' "$0"; then
+# Auto-fix Windows CRLF line endings (skip when piped via curl)
+if [ -f "$0" ] && LC_ALL=C grep -q $'\r' "$0"; then
     tmp=$(mktemp); tr -d '\r' < "$0" > "$tmp"; chmod +x "$tmp"; exec bash "$tmp" "$@"
 fi
 
