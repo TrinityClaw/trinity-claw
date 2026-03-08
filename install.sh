@@ -41,21 +41,11 @@ if ! command -v docker &> /dev/null; then
             fi
         fi
         echo -e "   ✅ Homebrew ready"
-        echo -e "   📥 Installing Docker Desktop via Homebrew..."
-        brew install --cask docker
-        echo -e "   🚀 Launching Docker Desktop..."
-        open /Applications/Docker.app
-        echo -e "   ⏳ Waiting for Docker to start (up to 90s)..."
-        t=0
-        while [ $t -lt 90 ] && ! docker info &>/dev/null; do
-            sleep 3
-            t=$((t + 3))
-        done
-        if ! docker info &>/dev/null; then
-            echo -e "   ⚠️  Docker is still starting. Wait for the Docker Desktop icon to appear,"
-            echo -e "      then re-run this script."
-            exit 1
-        fi
+        echo -e "   📥 Installing Colima + Docker CLI (no popups, fully automatic)..."
+        brew install colima docker docker-compose
+        echo -e "   🚀 Starting Colima (Docker runtime)..."
+        colima start --cpu 2 --memory 4
+        echo -e "   ✅ Docker is ready"
     elif grep -qi microsoft /proc/version 2>/dev/null; then
         echo -e "   ℹ️  Windows detected."
         echo -e "   ❌ Docker Desktop is not installed."
@@ -74,6 +64,11 @@ fi
 if ! command -v docker &> /dev/null; then
     echo -e "   ❌ Docker install failed. Visit: https://docs.docker.com/get-docker/"
     exit 1
+fi
+# If Colima is installed but not running, start it
+if command -v colima &>/dev/null && ! docker info &>/dev/null; then
+    echo -e "   🚀 Starting Colima..."
+    colima start --cpu 2 --memory 4
 fi
 echo "   ✅ Docker installed"
 
