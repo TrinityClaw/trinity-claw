@@ -38,10 +38,11 @@ if ! command -v docker &> /dev/null; then
             exit 1
         fi
     elif grep -qi microsoft /proc/version 2>/dev/null; then
-        echo -e "   ℹ️  Windows detected. Installing Docker Desktop via winget..."
-        winget install Docker.DockerDesktop -e --silent
-        echo -e "   ✅ Docker Desktop installed. Please restart your terminal and re-run this script."
-        exit 0
+        echo -e "   ℹ️  Windows detected."
+        echo -e "   ❌ Docker Desktop is not installed."
+        echo -e "   👉 Download and install it from: https://www.docker.com/products/docker-desktop/"
+        echo -e "   Then restart Git Bash and re-run this script."
+        exit 1
     else
         echo -e "   📥 Installing Docker Engine (Linux)..."
         curl -fsSL https://get.docker.com | sh
