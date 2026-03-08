@@ -16,17 +16,36 @@ echo -e "╚══════════════════════�
 echo ""
 
 # ─────────────────────────────────────────────────────────
-# Helper: ensure Homebrew is installed and in PATH
+# Helper: set up Homebrew (installs CLT + brew if needed)
 # ─────────────────────────────────────────────────────────
 setup_brew() {
+    # Step 1: Xcode Command Line Tools (required by Homebrew)
+    if ! xcode-select -p &>/dev/null; then
+        echo -e "   📥 Installing Xcode Command Line Tools (required)..."
+        # Non-interactive install via softwareupdate
+        touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+        CLT=$(softwareupdate -l 2>/dev/null | grep "Label: Command Line Tools" | sort -V | tail -n1 | sed 's/^.*Label: //')
+        if [ -n "$CLT" ]; then
+            softwareupdate -i "$CLT" --agree-to-license 2>/dev/null || true
+        fi
+        rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+        # Fallback: prompt user if still missing
+        if ! xcode-select -p &>/dev/null; then
+            echo -e "   📥 A dialog may appear — click Install to continue..."
+            xcode-select --install 2>/dev/null || true
+            echo -e "   ⏳ Waiting for Xcode CLT to finish..."
+            until xcode-select -p &>/dev/null; do sleep 5; done
+        fi
+        echo -e "   ✅ Xcode Command Line Tools installed"
+    fi
+
+    # Step 2: Homebrew
     if ! command -v brew &>/dev/null; then
         echo -e "   📥 Installing Homebrew..."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || {
-            echo -e "   ❌ Homebrew install failed. Install manually: https://brew.sh"
-            exit 1
-        }
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
     fi
-    # Add brew to PATH (Apple Silicon = /opt/homebrew, Intel = /usr/local)
+
+    # Step 3: Add brew to PATH
     if [ -f /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
     elif [ -f /usr/local/bin/brew ]; then
@@ -34,6 +53,14 @@ setup_brew() {
     fi
     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
     hash -r
+
+    if ! command -v brew &>/dev/null; then
+        echo -e "   ❌ Homebrew not found after install attempt."
+        echo -e "   👉 Run this manually, then re-run install.sh:"
+        echo -e "      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+        exit 1
+    fi
+    echo -e "   ✅ Homebrew ready"
 }
 
 # ─────────────────────────────────────────────────────────
@@ -51,34 +78,27 @@ fi
 echo -e "\033[33m[1/5] Checking prerequisites...\033[0m"
 
 if [ "$IS_MAC" = true ]; then
-    # Always set up brew PATH first, then check docker
     setup_brew
 
     if ! command -v docker &>/dev/null || ! command -v colima &>/dev/null; then
         echo -e "   📥 Installing Colima + Docker CLI..."
-        brew install colima docker docker-compose || {
-            echo -e "   ❌ brew install failed. Run: brew install colima docker docker-compose"
-            exit 1
-        }
+        brew install colima docker docker-compose
         export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
         hash -r
     fi
 
     if ! command -v colima &>/dev/null; then
-        echo -e "   ❌ colima not found even after install. PATH: $PATH"
+        echo -e "   ❌ colima not found after install. PATH: $PATH"
         exit 1
     fi
 
     if ! docker info &>/dev/null 2>&1; then
         echo -e "   🚀 Starting Colima..."
-        colima start --cpu 2 --memory 4 || {
-            echo -e "   ❌ Colima failed to start. Try running: colima start"
-            exit 1
-        }
+        colima start --cpu 2 --memory 4
     fi
 
     if ! docker info &>/dev/null 2>&1; then
-        echo -e "   ❌ Docker is not responding after Colima start."
+        echo -e "   ❌ Docker is not responding. Try: colima start"
         exit 1
     fi
     echo "   ✅ Docker installed"
@@ -95,7 +115,7 @@ elif grep -qi microsoft /proc/version 2>/dev/null; then
 else
     if ! command -v docker &>/dev/null; then
         echo -e "   📥 Installing Docker Engine (Linux)..."
-        curl -fsSL https://get.docker.com | sh || { echo "❌ Docker install failed"; exit 1; }
+        curl -fsSL https://get.docker.com | sh
         sudo systemctl enable --now docker
         sudo usermod -aG docker "$USER"
         newgrp docker
@@ -140,7 +160,6 @@ if [ "$model_source" = "local" ]; then
         echo -e "   \033[36mℹ️  On Mac, Ollama runs natively for full Metal GPU acceleration.\033[0m"
         echo ""
 
-        setup_brew
         if ! command -v ollama &>/dev/null; then
             echo -e "   📥 Installing Ollama..."
             brew install ollama
@@ -297,8 +316,7 @@ if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
 fi
 
 if [ "$IS_MAC" = true ] && [ "$LOCAL_MODE" = true ]; then
-    echo -e "   \033[36m🍎 Mac tip: keep Ollama running after reboot:\033[0m"
-    echo -e "   \033[36m   brew services start ollama\033[0m"
+    echo -e "   \033[36m🍎 Mac: keep Ollama running after reboot with: brew services start ollama\033[0m"
     echo ""
 fi
 
