@@ -7,6 +7,28 @@ Write-Host "   ╚════════════════════�
 Write-Host ""
 
 # ─────────────────────────────────────────────
+# Step 0: Check Docker
+# ─────────────────────────────────────────────
+Write-Host "   Checking prerequisites..." -ForegroundColor Yellow
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host "   ❌ Docker not found. Installing Docker Desktop via winget..." -ForegroundColor Red
+    winget install Docker.DockerDesktop -e --silent
+    Write-Host ""
+    Write-Host "   ✅ Docker Desktop installed." -ForegroundColor Green
+    Write-Host "   ⚠️  Please restart your terminal and re-run this script." -ForegroundColor Yellow
+    exit 0
+}
+Write-Host "   ✅ Docker installed" -ForegroundColor Green
+
+$composeOk = & docker compose version 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "   ❌ Docker Compose not found. Update Docker Desktop." -ForegroundColor Red
+    exit 1
+}
+Write-Host "   ✅ Docker Compose installed" -ForegroundColor Green
+Write-Host ""
+
+# ─────────────────────────────────────────────
 # Step 1: Choose model source
 # ─────────────────────────────────────────────
 Write-Host "   ┌─────────────────────────────────────────┐" -ForegroundColor Cyan

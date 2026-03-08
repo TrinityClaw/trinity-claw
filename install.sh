@@ -23,13 +23,42 @@ fi
 echo -e "\033[33m[1/5] Checking prerequisites...\033[0m"
 
 if ! command -v docker &> /dev/null; then
-    echo -e "   ❌ Docker not found. Install: https://docs.docker.com/get-docker/"
+    echo -e "   ❌ Docker not found. Attempting to install..."
+    if [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &> /dev/null; then
+            brew install --cask docker
+            open /Applications/Docker.app
+            echo -e "   ⏳ Waiting for Docker Desktop to start..."
+            for i in $(seq 1 30); do
+                if docker info &> /dev/null; then break; fi
+                sleep 2
+            done
+        else
+            echo -e "   ❌ Homebrew not found. Install Docker Desktop manually: https://docs.docker.com/desktop/mac/install/"
+            exit 1
+        fi
+    elif grep -qi microsoft /proc/version 2>/dev/null; then
+        echo -e "   ℹ️  Windows detected. Installing Docker Desktop via winget..."
+        winget install Docker.DockerDesktop -e --silent
+        echo -e "   ✅ Docker Desktop installed. Please restart your terminal and re-run this script."
+        exit 0
+    else
+        echo -e "   📥 Installing Docker Engine (Linux)..."
+        curl -fsSL https://get.docker.com | sh
+        sudo systemctl enable --now docker
+        sudo usermod -aG docker "$USER"
+        echo -e "   ✅ Docker installed. You may need to log out and back in for group changes."
+    fi
+fi
+
+if ! command -v docker &> /dev/null; then
+    echo -e "   ❌ Docker install failed. Visit: https://docs.docker.com/get-docker/"
     exit 1
 fi
 echo "   ✅ Docker installed"
 
 if ! docker compose version &> /dev/null; then
-    echo -e "   ❌ Docker Compose not found."
+    echo -e "   ❌ Docker Compose not found. Update Docker Desktop or install the plugin."
     exit 1
 fi
 echo "   ✅ Docker Compose installed"
