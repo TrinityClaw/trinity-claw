@@ -70,6 +70,17 @@ else
     echo "   ✅ Colima + Docker installed"
 fi
 
+# ── Link docker-compose as Docker CLI plugin ──────────────
+if ! docker compose version &>/dev/null 2>&1; then
+    echo "   🔗 Linking docker-compose as Docker plugin..."
+    mkdir -p ~/.docker/cli-plugins
+    COMPOSE_BIN="$(brew --prefix)/bin/docker-compose"
+    if [ -f "$COMPOSE_BIN" ]; then
+        ln -sfn "$COMPOSE_BIN" ~/.docker/cli-plugins/docker-compose
+        echo "   ✅ docker compose plugin linked"
+    fi
+fi
+
 # ── Step 4: Start Colima ──────────────────────────────────
 if docker info &>/dev/null 2>&1; then
     echo "   ✅ Docker is already running"

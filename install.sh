@@ -71,11 +71,20 @@ fi
 
 echo "   ✅ Docker installed"
 
-if ! docker compose version &>/dev/null; then
+# Support both "docker compose" (plugin) and "docker-compose" (standalone)
+if docker compose version &>/dev/null 2>&1; then
+    DC="docker compose"
+elif command -v docker-compose &>/dev/null; then
+    DC="docker-compose"
+    # Try to link it as a plugin for future runs
+    mkdir -p ~/.docker/cli-plugins
+    ln -sfn "$(command -v docker-compose)" ~/.docker/cli-plugins/docker-compose 2>/dev/null || true
+else
     echo "   ❌ Docker Compose not found."
+    echo "   👉 On Mac run: brew install docker-compose"
     exit 1
 fi
-echo "   ✅ Docker Compose installed"
+echo "   ✅ Docker Compose installed ($DC)"
 
 # ─────────────────────────────────────────────────────────
 # [2/5] Choose model source
@@ -226,7 +235,7 @@ fi
 # ─────────────────────────────────────────────────────────
 echo ""
 echo -e "\033[33m[4/5] Building containers...\033[0m"
-docker compose -f "$COMPOSE_FILE" build
+$DC -f "$COMPOSE_FILE" build
 
 # ─────────────────────────────────────────────────────────
 # [5/5] Starting services
@@ -235,9 +244,9 @@ echo ""
 echo -e "\033[33m[5/5] Starting services...\033[0m"
 
 if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
-    docker compose -f "$COMPOSE_FILE" --profile local up -d
+    $DC -f "$COMPOSE_FILE" --profile local up -d
 else
-    docker compose -f "$COMPOSE_FILE" up -d
+    $DC -f "$COMPOSE_FILE" up -d
 fi
 
 # ─────────────────────────────────────────────────────────
