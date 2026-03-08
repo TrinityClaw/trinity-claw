@@ -278,6 +278,37 @@ EOF
     COMPOSE_FILE="docker-compose.yml"
 fi
 
+# ── Append optional integrations template to .env (both modes) ───────────────
+cat >> .env << 'OPTIONAL_KEYS'
+
+# ── Optional integrations (uncomment and fill in to enable) ──────────────────
+
+# Web search — Tavily (best results, free tier: 1000 searches/month)
+# Get key at: https://tavily.com → Dashboard → API Keys
+# Without this, search falls back to DuckDuckGo → Bing (may be rate-limited)
+# TAVILY_API_KEY=tvly-xxxxx
+
+# Telegram — chat with your agent via text, voice, and photos
+# 1. Create bot: Telegram → @BotFather → /newbot → copy token
+# 2. Get your Chat ID: Telegram → @userinfobot → send any message
+# TELEGRAM_BOT_TOKEN=xxxxxx:xxxxxxxxxxxxxxxxxxxxxxxxx
+# TELEGRAM_CHAT_ID=123456789
+
+# Email sending — Gmail SMTP (needs an App Password, not your regular password)
+# Enable 2FA at myaccount.google.com/security, then:
+# Generate App Password at myaccount.google.com/apppasswords
+# EMAIL_PROVIDER=smtp
+# EMAIL_FROM=you@gmail.com
+# SMTP_HOST=smtp.gmail.com
+# SMTP_PORT=587
+# SMTP_USER=you@gmail.com
+# SMTP_PASSWORD=xxxx xxxx xxxx xxxx
+
+# ─────────────────────────────────────────────────────────────────────────────
+OPTIONAL_KEYS
+echo "   ✅ .env created at $(pwd)/.env"
+echo "      → Add Tavily, Telegram, SMTP and other optional keys there anytime."
+
 # ─────────────────────────────────────────────────────────
 # [4/5] Building containers
 # ─────────────────────────────────────────────────────────
@@ -425,6 +456,10 @@ LAUNCHER_END
     echo -e "   \033[32m🎉 After every Mac restart, TrinityClaw starts AUTOMATICALLY!\033[0m"
     echo -e "   \033[36m   Docker Desktop starts → containers start → ready in ~30 sec\033[0m"
     echo -e "   \033[36m   Need a manual restart? Double-click 'Start TrinityClaw' on your Desktop.\033[0m"
+    echo ""
+    echo -e "   \033[33m⚙️  To add Tavily, Telegram, email or other optional integrations:\033[0m"
+    echo -e "   \033[33m   Edit: ${INSTALL_PATH}/.env\033[0m"
+    echo -e "   \033[33m   Then restart: docker compose -f ${COMPOSE_FILE} restart\033[0m"
     echo ""
 fi
 

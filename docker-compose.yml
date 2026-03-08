@@ -3,6 +3,7 @@ version: '3.8'
 services:
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
+    restart: unless-stopped
     ports:
       - "4000:4000"
     env_file: .env
@@ -14,6 +15,7 @@ services:
 
   chroma:
     image: chromadb/chroma
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
@@ -21,6 +23,7 @@ services:
 
   db:
     image: postgres:13
+    restart: unless-stopped
     environment:
       POSTGRES_USER: llmuser
       POSTGRES_PASSWORD: llmpassword
@@ -30,6 +33,7 @@ services:
 
   ollama:
     image: ollama/ollama:latest
+    restart: unless-stopped
     ports:
       - "11434:11434"
     environment:
@@ -51,6 +55,7 @@ services:
 
   web:
     image: nginx:alpine
+    restart: unless-stopped
     ports:
       - "8080:80"
     volumes:
@@ -60,6 +65,7 @@ services:
 
   trinity-agent:
     build: ./agent
+    restart: unless-stopped
     ports:
       - "8001:8001"
       - "8090:8090"  # web_builder preview server
