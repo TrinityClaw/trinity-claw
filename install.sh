@@ -1,4 +1,11 @@
 #!/bin/bash
+# Auto-fix Windows CRLF line endings — safe to run from any upload method
+if LC_ALL=C grep -q $'\r' "$0"; then
+    tmp=$(mktemp)
+    tr -d '\r' < "$0" > "$tmp"
+    chmod +x "$tmp"
+    exec bash "$tmp" "$@"
+fi
 
 # install.sh - TrinityClaw Installation Wizard (Linux/Mac)
 
