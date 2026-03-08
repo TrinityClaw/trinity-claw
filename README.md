@@ -60,7 +60,7 @@ This project follows responsible AI agent design practices, but **no system is u
 
 ### Prerequisites
 
-- Docker Desktop installed
+- Docker Desktop installed - Recomended to install Docker desktop before starting TrinityClaw installation for the smooth process; https://docs.docker.com/get-started/get-docker/
 - 8GB+ RAM recommended
 - 20GB free disk space (50GB+ for local model)
 
