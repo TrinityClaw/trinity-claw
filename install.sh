@@ -28,10 +28,11 @@ if ! command -v docker &> /dev/null; then
         if command -v brew &> /dev/null; then
             brew install --cask docker
             open /Applications/Docker.app
-            echo -e "   ⏳ Waiting for Docker Desktop to start..."
-            for i in $(seq 1 30); do
-                if docker info &> /dev/null; then break; fi
+            echo -e "   ⏳ Waiting for Docker Desktop to start (up to 60s)..."
+            t=0
+            while [ $t -lt 60 ] && ! docker info &>/dev/null; do
                 sleep 2
+                t=$((t + 2))
             done
         else
             echo -e "   ❌ Homebrew not found. Install Docker Desktop manually: https://docs.docker.com/desktop/mac/install/"
