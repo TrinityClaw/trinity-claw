@@ -18,19 +18,22 @@ echo ""
 # ─────────────────────────────────────────────────────────
 # Helper: ensure Homebrew is installed and in PATH
 # ─────────────────────────────────────────────────────────
-ensure_brew() {
+setup_brew() {
     if ! command -v brew &>/dev/null; then
         echo -e "   📥 Installing Homebrew..."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || {
+            echo -e "   ❌ Homebrew install failed. Install manually: https://brew.sh"
+            exit 1
+        }
     fi
-    # Add to PATH for Apple Silicon AND Intel
+    # Add brew to PATH (Apple Silicon = /opt/homebrew, Intel = /usr/local)
     if [ -f /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
-        export PATH="/opt/homebrew/bin:$PATH"
     elif [ -f /usr/local/bin/brew ]; then
         eval "$(/usr/local/bin/brew shellenv)"
-        export PATH="/usr/local/bin:$PATH"
     fi
+    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+    hash -r
 }
 
 # ─────────────────────────────────────────────────────────
@@ -47,54 +50,61 @@ fi
 # ─────────────────────────────────────────────────────────
 echo -e "\033[33m[1/5] Checking prerequisites...\033[0m"
 
-if ! command -v docker &>/dev/null; then
-    echo -e "   Docker not found. Installing..."
+if [ "$IS_MAC" = true ]; then
+    # Always set up brew PATH first, then check docker
+    setup_brew
 
-    if [ "$IS_MAC" = true ]; then
-        ensure_brew
+    if ! command -v docker &>/dev/null || ! command -v colima &>/dev/null; then
         echo -e "   📥 Installing Colima + Docker CLI..."
-        brew install colima docker docker-compose
-        # Refresh PATH so docker is found immediately
+        brew install colima docker docker-compose || {
+            echo -e "   ❌ brew install failed. Run: brew install colima docker docker-compose"
+            exit 1
+        }
         export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-        echo -e "   🚀 Starting Colima..."
-        colima start --cpu 2 --memory 4
-        echo -e "   ✅ Docker ready"
+        hash -r
+    fi
 
-    elif grep -qi microsoft /proc/version 2>/dev/null; then
-        echo -e "   ℹ️  Windows detected."
+    if ! command -v colima &>/dev/null; then
+        echo -e "   ❌ colima not found even after install. PATH: $PATH"
+        exit 1
+    fi
+
+    if ! docker info &>/dev/null 2>&1; then
+        echo -e "   🚀 Starting Colima..."
+        colima start --cpu 2 --memory 4 || {
+            echo -e "   ❌ Colima failed to start. Try running: colima start"
+            exit 1
+        }
+    fi
+
+    if ! docker info &>/dev/null 2>&1; then
+        echo -e "   ❌ Docker is not responding after Colima start."
+        exit 1
+    fi
+    echo "   ✅ Docker installed"
+
+elif grep -qi microsoft /proc/version 2>/dev/null; then
+    if ! command -v docker &>/dev/null; then
         echo -e "   ❌ Docker Desktop is not installed."
         echo -e "   👉 Download from: https://www.docker.com/products/docker-desktop/"
         echo -e "   Then restart Git Bash and re-run this script."
         exit 1
+    fi
+    echo "   ✅ Docker installed"
 
-    else
+else
+    if ! command -v docker &>/dev/null; then
         echo -e "   📥 Installing Docker Engine (Linux)..."
-        curl -fsSL https://get.docker.com | sh
+        curl -fsSL https://get.docker.com | sh || { echo "❌ Docker install failed"; exit 1; }
         sudo systemctl enable --now docker
         sudo usermod -aG docker "$USER"
         newgrp docker
     fi
+    echo "   ✅ Docker installed"
 fi
-
-# Ensure PATH includes brew bins even if docker was already installed
-if [ "$IS_MAC" = true ]; then
-    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-fi
-
-# Start Colima if installed but not running
-if command -v colima &>/dev/null && ! docker info &>/dev/null 2>&1; then
-    echo -e "   🚀 Starting Colima..."
-    colima start --cpu 2 --memory 4
-fi
-
-if ! command -v docker &>/dev/null; then
-    echo -e "   ❌ Docker install failed. Visit: https://docs.docker.com/get-docker/"
-    exit 1
-fi
-echo "   ✅ Docker installed"
 
 if ! docker compose version &>/dev/null; then
-    echo -e "   ❌ Docker Compose not found. Update Docker Desktop or install the plugin."
+    echo -e "   ❌ Docker Compose not found."
     exit 1
 fi
 echo "   ✅ Docker Compose installed"
@@ -118,13 +128,11 @@ model_source=$(echo "$model_source" | tr '[:upper:]' '[:lower:]' | xargs)
 echo ""
 echo -e "\033[33m[3/5] Configuring environment...\033[0m"
 
-# Generate a secure random agent API key
 two_key=$(cat /dev/urandom 2>/dev/null | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1 || \
     python3 -c "import secrets; print(secrets.token_urlsafe(24))")
 
 if [ "$model_source" = "local" ]; then
 
-    # ── LOCAL (Ollama) path ──────────────────────────────
     echo ""
     echo -e "   \033[32m✅ Local mode selected — Ollama will be used.\033[0m"
 
@@ -132,11 +140,12 @@ if [ "$model_source" = "local" ]; then
         echo -e "   \033[36mℹ️  On Mac, Ollama runs natively for full Metal GPU acceleration.\033[0m"
         echo ""
 
-        ensure_brew
+        setup_brew
         if ! command -v ollama &>/dev/null; then
             echo -e "   📥 Installing Ollama..."
             brew install ollama
             export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+            hash -r
         else
             echo "   ✅ Ollama already installed"
         fi
@@ -185,7 +194,6 @@ EOF
 
 else
 
-    # ── CLOUD path ───────────────────────────────────────
     echo ""
     echo -e "   \033[36mCloud API Configuration\033[0m"
     echo ""
@@ -260,7 +268,6 @@ echo ""
 echo -e "\033[33m[5/5] Starting services...\033[0m"
 
 if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
-    echo "   Starting with Ollama local model profile (Linux)..."
     docker compose -f "$COMPOSE_FILE" --profile local up -d
 else
     docker compose -f "$COMPOSE_FILE" up -d
@@ -284,18 +291,18 @@ echo -e "   \033[33m────────────────────
 echo ""
 
 if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
-    echo -e "   \033[33m⚠️  Note: First startup will download qwen3.5:9b (~6.6GB).\033[0m"
+    echo -e "   \033[33m⚠️  First startup downloads qwen3.5:9b (~6.6GB).\033[0m"
     echo -e "   \033[33m   Monitor: docker logs trinity-claw-ollama-1 -f\033[0m"
     echo ""
 fi
 
 if [ "$IS_MAC" = true ] && [ "$LOCAL_MODE" = true ]; then
-    echo -e "   \033[36m🍎 Mac tip: To keep Ollama running after reboot:\033[0m"
+    echo -e "   \033[36m🍎 Mac tip: keep Ollama running after reboot:\033[0m"
     echo -e "   \033[36m   brew services start ollama\033[0m"
     echo ""
 fi
 
-echo -e "   \033[33m🎤 Voice messages: Whisper (~150MB) downloads on first voice message.\033[0m"
-echo -e "   \033[33m📸 Image vision: uses trinity-vision model in litellm_config.yaml.\033[0m"
-echo -e "   \033[33m🌐 Browser automation: Playwright + Chromium installed automatically.\033[0m"
+echo -e "   \033[33m🎤 Voice: Whisper (~150MB) downloads on first voice message.\033[0m"
+echo -e "   \033[33m📸 Vision: uses trinity-vision model in litellm_config.yaml.\033[0m"
+echo -e "   \033[33m🌐 Browser: Playwright + Chromium installed automatically.\033[0m"
 echo ""
