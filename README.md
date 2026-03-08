@@ -73,14 +73,23 @@ This project follows responsible AI agent design practices, but **no system is u
 iwr -useb https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.ps1 | iex
 ```
 
-**Linux/Mac:**
+**Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.sh | bash
 ```
 
+**macOS** (recommended — avoids curl pipe issues with Docker detection):
+```bash
+git clone https://github.com/TrinityClaw/trinity-claw.git ~/trinity-claw
+cd ~/trinity-claw
+bash install-mac.sh && bash install.sh
+```
+
+> `install-mac.sh` checks/starts Docker Desktop first. `install.sh` then runs the full setup wizard.
+
 During installation you will be asked to choose:
 - **Cloud** — use a remote provider (OpenAI, NVIDIA, Anthropic, etc.) — requires API key
-- **Local** — use Ollama with `qwen3.5:9b` running on your machine — no API key needed
+- **Local** — use Ollama with `llama3.2-vision` running on your machine — no API key needed
 
 ### Manual Install
 
@@ -119,17 +128,26 @@ Choose your model source during installation:
 
 #### Option B — Local Model via Ollama (no API key needed)
 
-- Model: `qwen3.5:9b` (~6GB download on first start)
+- Model: `qwen3.5:9b` (~6.6GB download on first start)
 - Requires: 8GB+ VRAM (GPU) or 16GB+ RAM (CPU-only, slower)
-- Pulled automatically by `ollama-entrypoint.sh` on first startup
-- Start command: `docker compose --profile local up -d`
+- On **Linux**: pulled automatically by `ollama-entrypoint.sh` inside Docker on first startup
+- On **Mac**: pulled during `install.sh` via native Ollama
+- Start command: `docker compose --profile local up -d` (Linux) / `docker compose -f docker-compose.mac.yml up -d` (Mac)
 
 ```bash
-# Start with local Ollama model
+# Linux — start with local Ollama model
 docker compose --profile local up -d
 
-# Monitor model download progress
+# Monitor model download progress (Linux)
 docker logs trinity-claw-ollama-1 -f
+
+# If the model was not pulled automatically, pull it manually:
+
+# Mac (native Ollama)
+ollama pull qwen3.5:9b
+
+# Linux (inside Docker container)
+docker exec trinity-claw-ollama-1 ollama pull qwen3.5:9b
 ```
 
 ### Supported Providers
@@ -140,7 +158,7 @@ docker logs trinity-claw-ollama-1 -f
 | OpenAI | `openai/gpt-4o` | `https://api.openai.com/v1` |
 | Anthropic | `anthropic/claude-3-5-sonnet-20241022` | `https://api.anthropic.com/v1` |
 | Moonshot | `openai/moonshot-v1-8k` | `https://api.moonshot.cn/v1` |
-| Local (Ollama) | `ollama/qwen3.5:9b` | `http://localhost:11434` |
+| Local (Ollama) | `ollama/llama3.2-vision` | `http://localhost:11434` |
 
 ### Configuration Files
 
@@ -883,6 +901,7 @@ docker-compose up -d
 | **Google Calendar invalid_grant** | Each code is single-use and expires in 10 min. Call `authorize()` again for a fresh URL |
 | **Google Calendar token expired** | Revoke at myaccount.google.com/permissions, then call `authorize()` again |
 | **Google Calendar Access blocked** | Add your Gmail to Test Users: Google Cloud Console → APIs & Services → OAuth consent screen → Audience → Test users |
+| **Ollama model not pulled / missing** | Mac: run `ollama pull qwen3.5:9b`. Linux: run `docker exec trinity-claw-ollama-1 ollama pull qwen3.5:9b`. On Linux the pull happens inside Docker on first startup (~6.6GB) — check progress with `docker logs trinity-claw-ollama-1 -f` |
 | **Voice not transcribed** | First use downloads Whisper model — wait up to 2 min. Check logs: `docker logs trinity-claw-trinity-agent-1 \| grep -i whisper` |
 | **Image described incorrectly** | Ensure `trinity-vision` in `litellm_config.yaml` points to a vision-capable model, then `docker compose restart litellm` |
 | **Browser skill not working** | Rebuild the container: `docker-compose build --no-cache trinity-agent && docker-compose up -d`. Chromium installs during build. |
@@ -940,4 +959,4 @@ MIT License - see LICENSE file for details.
 ---
 
 **Version**: TrinityClaw v1.3.0
-**Last Updated**: 2026-03-07
+**Last Updated**: 2026-03-08
