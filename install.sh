@@ -327,15 +327,104 @@ if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
 fi
 
 if [ "$IS_MAC" = true ]; then
-    echo -e "   \033[36m🍎 Mac: Your agent runs inside Docker Desktop.\033[0m"
-    echo -e "   \033[36m       The whale 🐳 icon in the menu bar = Docker is running.\033[0m"
+    INSTALL_PATH="$(pwd)"
+
+    # ── 1. Auto-start Ollama on boot ──────────────────────────────────────────
     if [ "$LOCAL_MODE" = true ]; then
-        echo -e "   \033[36m       After reboot: open Docker Desktop, then run:\033[0m"
-        echo -e "   \033[36m         docker compose -f docker-compose.mac.yml up -d\033[0m"
-    else
-        echo -e "   \033[36m       After reboot: open Docker Desktop, then run:\033[0m"
-        echo -e "   \033[36m         docker compose up -d\033[0m"
+        echo "   🔄 Configuring Ollama to start automatically on boot..."
+        brew services start ollama &>/dev/null && \
+            echo "   ✅ Ollama will start automatically after every reboot" || true
     fi
+
+    # ── 2. Enable Docker Desktop start at login ───────────────────────────────
+    echo "   🔄 Enabling Docker Desktop auto-start at login..."
+    defaults write com.docker.docker autoStart -bool true 2>/dev/null || true
+    for settings_path in \
+        "$HOME/Library/Group Containers/group.com.docker/settings-store.json" \
+        "$HOME/Library/Group Containers/group.com.docker/settings.json"; do
+        if [ -f "$settings_path" ]; then
+            python3 -c "
+import json, sys
+path = sys.argv[1]
+with open(path) as f: s = json.load(f)
+s['autoStart'] = True
+with open(path, 'w') as f: json.dump(s, f, indent=2)
+" "$settings_path" 2>/dev/null && echo "   ✅ Docker Desktop set to start at login" || true
+            break
+        fi
+    done
+
+    # ── 3. Create startup.sh (called by LaunchAgent on every login) ───────────
+    cat > "$INSTALL_PATH/startup.sh" << 'STARTUP_SCRIPT'
+#!/bin/bash
+# Wait for Docker Desktop to be ready (up to 2.5 minutes)
+for i in $(seq 1 30); do
+    docker info &>/dev/null 2>&1 && break
+    sleep 5
+done
+STARTUP_SCRIPT
+    echo "cd \"$INSTALL_PATH\" && docker compose -f \"$COMPOSE_FILE\" up -d" \
+        >> "$INSTALL_PATH/startup.sh"
+    chmod +x "$INSTALL_PATH/startup.sh"
+
+    # ── 4. Install LaunchAgent (auto-runs startup.sh on every login) ──────────
+    PLIST_DIR="$HOME/Library/LaunchAgents"
+    mkdir -p "$PLIST_DIR"
+    cat > "$PLIST_DIR/com.trinityclaw.autostart.plist" << PLIST_END
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trinityclaw.autostart</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${INSTALL_PATH}/startup.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/trinityclaw-startup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/trinityclaw-error.log</string>
+</dict>
+</plist>
+PLIST_END
+    launchctl load "$PLIST_DIR/com.trinityclaw.autostart.plist" 2>/dev/null || true
+    echo "   ✅ LaunchAgent installed — containers auto-start after every login"
+
+    # ── 5. Create double-clickable Desktop launcher (manual backup) ───────────
+    LAUNCHER="$HOME/Desktop/Start TrinityClaw.command"
+    cat > "$LAUNCHER" << LAUNCHER_END
+#!/bin/bash
+echo "🚀 Starting TrinityClaw..."
+if ! docker info &>/dev/null 2>&1; then
+    echo "   Opening Docker Desktop — please wait..."
+    open /Applications/Docker.app
+    echo "   Waiting for Docker to be ready..."
+    for i in \$(seq 1 45); do
+        sleep 2
+        docker info &>/dev/null 2>&1 && break
+        printf "."
+    done
+    echo ""
+fi
+cd "${INSTALL_PATH}"
+docker compose -f "${COMPOSE_FILE}" up -d
+echo ""
+echo "✅ TrinityClaw is running!"
+echo "   Opening http://localhost:8080 ..."
+sleep 2
+open http://localhost:8080
+LAUNCHER_END
+    chmod +x "$LAUNCHER"
+    echo "   ✅ Desktop launcher created: ~/Desktop/Start TrinityClaw.command"
+
+    echo ""
+    echo -e "   \033[32m🎉 After every Mac restart, TrinityClaw starts AUTOMATICALLY!\033[0m"
+    echo -e "   \033[36m   Docker Desktop starts → containers start → ready in ~30 sec\033[0m"
+    echo -e "   \033[36m   Need a manual restart? Double-click 'Start TrinityClaw' on your Desktop.\033[0m"
     echo ""
 fi
 
