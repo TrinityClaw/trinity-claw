@@ -133,6 +133,7 @@ Choose your model source during installation:
 - On **Linux**: pulled automatically by `ollama-entrypoint.sh` inside Docker on first startup
 - On **Mac**: pulled during `install.sh` via native Ollama
 - Start command: `docker compose --profile local up -d` (Linux) / `docker compose -f docker-compose.mac.yml up -d` (Mac)
+- **Mac auto-start**: after running `install.sh`, TrinityClaw starts automatically on every login — no terminal needed. A `Start TrinityClaw.command` shortcut is placed on your Desktop as a manual backup.
 
 ```bash
 # Linux — start with local Ollama model
