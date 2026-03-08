@@ -116,6 +116,25 @@ fi
 echo "   ✅ Docker Compose ready"
 
 # ─────────────────────────────────────────────────────────
+# [1b/5] Download repository if not already present
+# ─────────────────────────────────────────────────────────
+if [ ! -f "./docker-compose.yml" ] && [ ! -f "./docker-compose.mac.yml" ]; then
+    INSTALL_DIR="$HOME/trinity-claw"
+    echo ""
+    echo "   📥 Downloading TrinityClaw files to $INSTALL_DIR..."
+    mkdir -p "$INSTALL_DIR"
+    if curl -fsSL https://github.com/TrinityClaw/trinity-claw/archive/refs/heads/main.tar.gz \
+        | tar -xz -C "$INSTALL_DIR" --strip-components=1; then
+        echo "   ✅ Files ready at $INSTALL_DIR"
+    else
+        echo "   ❌ Download failed. Check your internet and try again."
+        exit 1
+    fi
+    cd "$INSTALL_DIR"
+    echo "   ✅ Working in $INSTALL_DIR"
+fi
+
+# ─────────────────────────────────────────────────────────
 # [2/5] Choose model source
 # ─────────────────────────────────────────────────────────
 echo ""
