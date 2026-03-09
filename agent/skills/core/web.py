@@ -11,6 +11,8 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urljoin
 
+SKILL_TIMEOUT = 90  # seconds — browser ops need room beyond the default 30s
+
 NAME = "web"
 DOC = (
     "Web operations: fetch, search (multiple engines), scrape, download binary files, "
@@ -104,6 +106,10 @@ _bw_browser = None
 _bw_context = None
 _bw_page = None
 _bw_lock = threading.Lock()
+
+# Hard cap: reset by browser_goto() each navigation, enforced in browser_screenshot()
+_bw_screenshot_count = 0
+_SCREENSHOT_LIMIT = 3
 
 
 def _bw_ensure_loop() -> asyncio.AbstractEventLoop:
@@ -1208,31 +1214,61 @@ def browser_launch(headless: bool = True, slow_mo: int = 0) -> Dict:
     return _bw_run(_bw_async_launch(headless=headless, slow_mo=slow_mo))
 
 
-def browser_goto(url: str, wait_until: str = "networkidle", timeout: int = 30000) -> Dict:
+def browser_goto(url: str, wait_until: str = "domcontentloaded", timeout: int = 30000) -> Dict:
     """
     Navigate to a URL. Auto-launches browser on first call.
-    wait_until: 'networkidle' | 'load' | 'domcontentloaded' | 'commit'
+    MUST be called before browser_screenshot() or any other browser action.
+    wait_until: 'domcontentloaded' (recommended) | 'load' | 'networkidle' | 'commit'
+    timeout: milliseconds to wait (default: 30000 = 30 seconds). Do not pass values under 5000.
     Returns: {ok, url, title, status}
     """
     try:
         timeout = int(timeout)
     except (ValueError, TypeError):
         timeout = 30000
+    if timeout < 5000:
+        timeout = timeout * 1000  # auto-scale: LLM passed seconds instead of ms
     _valid_wait = {"networkidle", "load", "domcontentloaded", "commit"}
     if wait_until not in _valid_wait:
         wait_until = "domcontentloaded"
+    global _bw_screenshot_count
+    _bw_screenshot_count = 0  # reset cap on each new navigation
     return _bw_run(_bw_async_goto(url, wait_until=wait_until, timeout=timeout), timeout=timeout // 1000 + 5)
 
 
 def browser_screenshot(path: str = "", full_page: bool = False) -> Dict:
     """
-    Screenshot the current page. Returns base64 PNG + optionally saves to path.
-    full_page=True captures entire scrollable height.
-    Returns: {ok, base64, saved_to, size_kb}
+    Screenshot the current page. Requires browser_goto() to have been called first.
+    Saves to /app/memory/screenshots/<timestamp>.png by default — do NOT pass a path
+    inside /app/memory/ directly (that folder is for JSON data files, not images).
+    full_page=True captures the ENTIRE scrollable page in ONE call — no need to scroll
+    and call this multiple times. Limit: 3 screenshots per navigation maximum.
+    Returns: {ok, saved_to, size_kb} — base64 is omitted to keep output concise.
     """
+    global _bw_screenshot_count
+    if _bw_screenshot_count >= _SCREENSHOT_LIMIT:
+        return {
+            "ok": False,
+            "error": (
+                f"Screenshot limit ({_SCREENSHOT_LIMIT}) reached for this page. "
+                "Use full_page=True in a single call to capture the whole page, "
+                "or call browser_goto() to navigate before taking more screenshots."
+            ),
+        }
     if isinstance(full_page, str):
         full_page = full_page.lower() in ("true", "1", "yes")
-    return _bw_run(_bw_async_screenshot(path=path, full_page=full_page))
+    if not path:
+        from datetime import datetime as _dt
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        path = f"/app/memory/screenshots/screenshot_{ts}.png"
+    result = _bw_run(_bw_async_screenshot(path=path, full_page=full_page))
+    if isinstance(result, dict) and result.get("ok"):
+        _bw_screenshot_count += 1
+    # Strip base64 blob — it's hundreds of KB and the LLM cannot use raw base64.
+    # The saved file path is all that's needed.
+    if isinstance(result, dict):
+        result.pop("base64", None)
+    return result
 
 
 def browser_text() -> Dict:
