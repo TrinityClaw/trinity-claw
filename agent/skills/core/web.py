@@ -1214,7 +1214,13 @@ def browser_goto(url: str, wait_until: str = "networkidle", timeout: int = 30000
     wait_until: 'networkidle' | 'load' | 'domcontentloaded' | 'commit'
     Returns: {ok, url, title, status}
     """
-    timeout = int(timeout)
+    try:
+        timeout = int(timeout)
+    except (ValueError, TypeError):
+        timeout = 30000
+    _valid_wait = {"networkidle", "load", "domcontentloaded", "commit"}
+    if wait_until not in _valid_wait:
+        wait_until = "domcontentloaded"
     return _bw_run(_bw_async_goto(url, wait_until=wait_until, timeout=timeout), timeout=timeout // 1000 + 5)
 
 
@@ -1224,6 +1230,8 @@ def browser_screenshot(path: str = "", full_page: bool = False) -> Dict:
     full_page=True captures entire scrollable height.
     Returns: {ok, base64, saved_to, size_kb}
     """
+    if isinstance(full_page, str):
+        full_page = full_page.lower() in ("true", "1", "yes")
     return _bw_run(_bw_async_screenshot(path=path, full_page=full_page))
 
 
