@@ -1214,6 +1214,7 @@ def browser_goto(url: str, wait_until: str = "networkidle", timeout: int = 30000
     wait_until: 'networkidle' | 'load' | 'domcontentloaded' | 'commit'
     Returns: {ok, url, title, status}
     """
+    timeout = int(timeout)
     return _bw_run(_bw_async_goto(url, wait_until=wait_until, timeout=timeout), timeout=timeout // 1000 + 5)
 
 
