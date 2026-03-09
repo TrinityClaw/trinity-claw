@@ -1400,8 +1400,17 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
 
         result = call_skill_improved(skill_name, func_name, **arguments)
 
-        if result["success"]:
-            content = str(result["result"])
+        # Treat skill-level ok:False as an error even if no exception was raised
+        inner = result.get("result") if result["success"] else None
+        skill_ok = not (isinstance(inner, dict) and inner.get("ok") is False)
+
+        if result["success"] and skill_ok:
+            # Strip base64 blobs before echoing back to the LLM — they are hundreds of
+            # KB, the model cannot render them as images from a tool result string, and
+            # they cause the context to balloon and the model to loop unnecessarily.
+            if isinstance(inner, dict) and "base64" in inner:
+                inner = {k: v for k, v in inner.items() if k != "base64"}
+            content = str(inner)
             log_entry = {
                 "skill":    skill_name,
                 "function": func_name,
@@ -1409,8 +1418,11 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
                 "result":   content,
             }
         else:
-            err = result.get("error", "Unknown error")
-            content = f"Error: {err}"
+            if not result["success"]:
+                err = result.get("error", "Unknown error")
+            else:
+                err = inner.get("error", str(inner))
+            content = f"Error in {skill_name}.{func_name}: {err}"
             log_entry = {
                 "skill":    skill_name,
                 "function": func_name,
@@ -1996,7 +2008,8 @@ No arguments needed: <skill:dashboard.status></skill:dashboard.status>"""
 6. The ONLY skills that exist are those listed in "YOUR TOOLS" above. If a skill is not listed there, it does NOT exist — tell the user it doesn't exist yet instead of pretending it does. EXCEPTION: web.search always exists and can answer real-time questions.
 7. After creating a skill: it is saved to /app/skills/dynamic/ and immediately usable.
 8. For multi-step tasks, write a brief numbered plan before your first skill call.
-9. VERBATIM OUTPUT RULE: When a skill result contains a URL, authorization code, token, or any exact string the user must copy — reproduce it word-for-word in your reply."""
+9. VERBATIM OUTPUT RULE: When a skill result contains a URL, authorization code, token, or any exact string the user must copy — reproduce it word-for-word in your reply.
+10. BROWSER SCREENSHOTS: Call web.browser_screenshot AT MOST TWICE per task (once with full_page=True captures the entire page — no scrolling and re-shooting). Report the saved_to path from the result."""
 
         _read_skill_example = "  <skill:files.cat>/app/skills/core/skillname.py</skill:files.cat>"
 
@@ -2026,7 +2039,8 @@ NEVER claim you completed an action until the tool result confirms it."""
 3. The only skills that exist are those in YOUR TOOLS above. If something isn't listed, say so.
 4. After creating a skill (create_skill__create_new_skill), tell the user it's in /app/skills/dynamic/ to inspect.
 5. For multi-step tasks, state your plan briefly before calling the first tool.
-6. VERBATIM OUTPUT RULE: When a tool result contains a URL, authorization code, token, or any exact string the user must copy — reproduce it word-for-word in your reply."""
+6. VERBATIM OUTPUT RULE: When a tool result contains a URL, authorization code, token, or any exact string the user must copy — reproduce it word-for-word in your reply.
+7. BROWSER SCREENSHOTS: Call web__browser_screenshot AT MOST TWICE per task (once with full_page=True captures the entire page — no scrolling and re-shooting). Report the saved_to path from the result."""
 
         _read_skill_example = "  Call files__cat with path='/app/skills/core/skillname.py'"
 
