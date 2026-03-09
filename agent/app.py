@@ -15,6 +15,7 @@ import json
 import re
 import time
 import hashlib
+import hmac
 import uuid
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Depends, Security, status
@@ -66,7 +67,7 @@ def verify_api_key(api_key: str = Security(_api_key_header)):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Agent is not configured: TRINITY_API_KEY is not set"
         )
-    if api_key != expected:
+    if not hmac.compare_digest(api_key or "", expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-API-Key header"
