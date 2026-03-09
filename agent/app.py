@@ -228,6 +228,8 @@ def _build_tools_schema() -> list:
             except (ValueError, TypeError):
                 continue
 
+            _ANNOTATION_TYPE_MAP = {int: "integer", float: "number", bool: "boolean", str: "string"}
+
             properties: Dict[str, Any] = {}
             required: List[str] = []
             for pname, param in sig.parameters.items():
@@ -235,7 +237,9 @@ def _build_tools_schema() -> list:
                     continue
                 if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
                     continue  # skip *args / **kwargs — not representable in JSON Schema
-                prop: Dict[str, Any] = {"type": "string"}
+                ann = param.annotation
+                json_type = _ANNOTATION_TYPE_MAP.get(ann, "string") if ann is not inspect.Parameter.empty else "string"
+                prop: Dict[str, Any] = {"type": json_type}
                 if pname in arg_descs:
                     prop["description"] = arg_descs[pname]
                 if param.default is inspect.Parameter.empty:
