@@ -27,3 +27,4 @@ playwright            # Full browser automation (browser_* functions in web skil
 google-api-python-client  # Google Calendar API
 google-auth-httplib2      # Google auth HTTP transport
 google-auth-oauthlib      # Google OAuth 2.0 flow
+youtube-transcript-api    # Transcript/captions fetch for get_transcript() — no API quota used
