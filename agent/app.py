@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 app = FastAPI()
 
-# Enable CORS
+# Enable CORS — open for local use only (agent runs on localhost, not exposed to internet)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -58,9 +58,10 @@ app.add_middleware(
 # ── API Key Security ─────────────────────────────────────────────────────────
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-def verify_api_key(api_key: str = Security(_api_key_header)):
+def verify_api_key(api_key: str = Security(_api_key_header)) -> str:
     """Require X-API-Key header on sensitive endpoints.
-    Fails closed — if TRINITY_API_KEY is not set, all requests are denied."""
+    Fails closed — if TRINITY_API_KEY is not set, all requests are denied.
+    Returns the validated API key so callers can use it for rate-limit keying."""
     expected = os.getenv("TRINITY_API_KEY", "")
     if not expected:
         raise HTTPException(
@@ -72,6 +73,7 @@ def verify_api_key(api_key: str = Security(_api_key_header)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-API-Key header"
         )
+    return api_key
 
 # Global skills registry
 skills: Dict[str, Any] = {}
@@ -85,15 +87,17 @@ JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds th
 session_store: Dict[str, Dict] = {}
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
-RATE_LIMIT_RPM = int(os.getenv("CHAT_RATE_LIMIT_RPM", "20"))  # requests per minute per session
-_rate_timestamps: Dict[str, list] = {}  # session_id -> list of request timestamps
+RATE_LIMIT_RPM = int(os.getenv("CHAT_RATE_LIMIT_RPM", "20"))  # requests per minute per API key
+_rate_timestamps: Dict[str, list] = {}  # key_id -> list of request timestamps
 
-def _check_rate_limit(session_id: str):
-    """Raise HTTP 429 if session exceeds RATE_LIMIT_RPM requests in the last 60 seconds."""
+def _check_rate_limit(api_key: str):
+    """Raise HTTP 429 if the API key exceeds RATE_LIMIT_RPM requests in the last 60 seconds.
+    Keyed on a short hash of the API key — not session_id — to prevent bypass via fake session IDs."""
     import time
+    key_id = hashlib.sha256(api_key.encode()).hexdigest()[:16]
     now = time.time()
     window = 60.0
-    timestamps = _rate_timestamps.get(session_id, [])
+    timestamps = _rate_timestamps.get(key_id, [])
     # Drop entries outside the window
     timestamps = [t for t in timestamps if now - t < window]
     if len(timestamps) >= RATE_LIMIT_RPM:
@@ -105,7 +109,7 @@ def _check_rate_limit(session_id: str):
             headers={"Retry-After": str(retry_after)},
         )
     timestamps.append(now)
-    _rate_timestamps[session_id] = timestamps
+    _rate_timestamps[key_id] = timestamps
 
 def load_skills_improved():
     """
@@ -536,18 +540,29 @@ def _update_config_fallback(req: ConfigUpdateRequest):
 def update_api_key(req: ConfigUpdateRequest):
     """
     Update actual API key value in .env file.
-    
+
     Expects:
     - skill: API key variable name (e.g., "MOONSHOT_API_KEY")
     - args: ["actual_key_value"]
     """
+    # Only these keys may be updated via the API — prevents overwriting auth credentials
+    _ALLOWED_ENV_KEYS = frozenset({
+        "MOONSHOT_API_KEY", "NVIDIA_API_KEY", "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "OLLAMA_MODEL",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+        "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "EMAIL_FROM",
+        "WHISPER_MODEL", "CHAT_RATE_LIMIT_RPM",
+    })
     try:
         env_path = "/app/.env"
         api_key_name = req.skill
         api_key_value = (req.args or [None])[0]
-        
+
         if not api_key_value:
             raise ValueError("No API key value provided")
+
+        if api_key_name not in _ALLOWED_ENV_KEYS:
+            raise ValueError(f"'{api_key_name}' is not an allowed key. Permitted keys: {sorted(_ALLOWED_ENV_KEYS)}")
         
         if os.path.exists(env_path):
             with open(env_path, 'r', encoding='utf-8') as f:
@@ -581,7 +596,7 @@ def update_api_key(req: ConfigUpdateRequest):
 # 🔧 TELEGRAM CONFIG ENDPOINTS
 # ============================================================================
 
-@app.get("/config/telegram/get")
+@app.get("/config/telegram/get", dependencies=[Depends(verify_api_key)])
 def get_telegram_config():
     """
     Get Telegram bot configuration from telegram_bot.py
@@ -695,7 +710,7 @@ def update_telegram_config(req: TelegramConfigRequest):
 class ModelSourceRequest(BaseModel):
     source: str  # "local" or "cloud"
 
-@app.get("/config/model-source/get")
+@app.get("/config/model-source/get", dependencies=[Depends(verify_api_key)])
 def get_model_source():
     """Get current model source (local Ollama or cloud API)."""
     current_source = os.getenv("MODEL_SOURCE", "cloud")
@@ -759,7 +774,7 @@ def set_model_source(req: ModelSourceRequest):
 class OllamaModelRequest(BaseModel):
     model: str
 
-@app.get("/config/ollama/get")
+@app.get("/config/ollama/get", dependencies=[Depends(verify_api_key)])
 def get_ollama_config():
     """Return the currently configured local Ollama model name."""
     return {
@@ -768,7 +783,7 @@ def get_ollama_config():
         "base": os.getenv("OLLAMA_API_BASE", "http://ollama:11434"),
     }
 
-@app.get("/config/ollama/models")
+@app.get("/config/ollama/models", dependencies=[Depends(verify_api_key)])
 def list_ollama_models():
     """Return models currently pulled in Ollama (calls /api/tags)."""
     try:
@@ -1481,7 +1496,7 @@ def version():
         sha = "unknown"
     return {"version": VERSION, "sha": sha}
 
-@app.get("/skills")
+@app.get("/skills", dependencies=[Depends(verify_api_key)])
 def get_skills():
     """List available skills with detailed metadata."""
     return {
@@ -1490,7 +1505,7 @@ def get_skills():
         "reload_endpoint": "/skills/reload"
     }
 
-@app.get("/scheduler/list")
+@app.get("/scheduler/list", dependencies=[Depends(verify_api_key)])
 def list_scheduled_tasks():
     """Return all scheduled tasks as structured JSON for the command center UI."""
     tasks_file = Path("/app/memory/scheduled_tasks.json")
@@ -1564,7 +1579,7 @@ def clear_session(session_id: str):
         return {"success": True, "message": f"Session cleared — next message starts fresh"}
     return {"success": True, "message": "Session not found (already empty)"}
 
-@app.get("/session/info")
+@app.get("/session/info", dependencies=[Depends(verify_api_key)])
 def session_info(session_id: str):
     """Show turn count and last active time for a session."""
     entry = session_store.get(session_id)
@@ -1783,9 +1798,9 @@ def transcribe(req: TranscribeRequest):
 
 # ============================================================================
 
-@app.post("/chat", dependencies=[Depends(verify_api_key)])
-def chat(req: PromptRequest):
-    _check_rate_limit(req.session_id or "anonymous")
+@app.post("/chat")
+def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
+    _check_rate_limit(api_key)
     # 1. Retrieve Memory from multiple sources
     # Skip ChromaDB for short/conversational messages — embedding "hi" or "thanks"
     # wastes ~500ms and injects irrelevant context that confuses small models.
@@ -2601,11 +2616,15 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
 
 
 
-@app.get("/download/{filename}")
+@app.get("/download/{filename}", dependencies=[Depends(verify_api_key)])
 def download_file(filename: str):
     """Serve a file from /app/memory/knowledge/ with appropriate MIME type."""
     safe_name = Path(filename).name  # strip any path traversal
-    file_path = Path("/app/memory/knowledge") / safe_name
+    knowledge_root = Path("/app/memory/knowledge").resolve()
+    file_path = (knowledge_root / safe_name).resolve()
+    # Guard against symlink traversal — resolved path must stay inside knowledge root
+    if not file_path.is_relative_to(knowledge_root):
+        raise HTTPException(status_code=403, detail="Access denied")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {safe_name}")
     _mime_map = {
