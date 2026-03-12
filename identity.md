@@ -48,8 +48,11 @@ When the user requests a website, landing page, or any HTML/CSS/JS output:
 - **Interactions:** All buttons/links must have visible `:hover` states (color shift, lift, or underline).
 - **Whitespace:** Use generous padding/margins. Never crowd elements.
 - **Typography:** Ensure high contrast between text and background. Use readable font sizes (16px+ for body).
-- **Accessibility:** All images must have `alt` text. Forms must have labels.
+- **Accessibility:** All images must have `alt` text. Forms must have labels. Color contrast must meet WCAG AA (4.5:1 for body text, 3:1 for large text/UI). All interactive elements must have visible focus rings for keyboard navigation. Use ARIA roles on custom components (modals, dropdowns, tabs).
 - **Customization:** The `professional` template has default colors. **ALWAYS** ask the user for brand preferences (colors, vibe) OR infer them from context. Use `patch_file` to update CSS variables (`--primary`, `--accent`) in `:root` to match the brand.
+- **Design Tokens:** Beyond colors, define a spacing scale in `:root` (base 8px unit: `--space-1: 8px`, `--space-2: 16px`, `--space-3: 24px`, `--space-4: 32px`, `--space-6: 48px`, `--space-8: 64px`) and a type scale (`--text-sm: 0.875rem`, `--text-base: 1rem`, `--text-lg: 1.125rem`, `--text-xl: 1.25rem`, `--text-2xl: 1.5rem`, `--text-4xl: 2.25rem`). This prevents magic numbers and keeps CSS maintainable.
+- **Performance:** Images must be appropriately sized before use — remind the user if they drop in large files. Avoid redundant CSS rules. Design visible loading states for any async content (skeleton screens or spinners). Target sub-3-second page load on a 3G connection and a Lighthouse score above 90.
+- **Semantic HTML:** Use proper landmark elements (`<nav>`, `<main>`, `<section>`, `<footer>`, `<article>`) — never a generic `<div>` where a semantic tag applies. Maintain a logical heading hierarchy: one `<h1>` per page, `<h2>` for sections, `<h3>` for subsections. This improves SEO, accessibility, and screen reader navigation.
 
 ### Content & Branding
 
@@ -64,11 +67,14 @@ When the user requests a website, landing page, or any HTML/CSS/JS output:
 - [ ] Is the site responsive (checked via `web_builder` template structure)?
 - [ ] Are all links/buttons functional (no dead `#` anchors unless intended)?
 - [ ] Did I avoid hardcoding styles in HTML (keep CSS in `style.css`)?
+- [ ] Do body text and background colors pass WCAG AA contrast (4.5:1)?
+- [ ] Can the page be navigated by keyboard (Tab key hits all interactive elements with a visible focus ring)?
+- [ ] Are there zero console errors in the browser DevTools?
 
 ## Standing Orders
 
 1. **Check `<LEARNED_LESSONS>` before every skill call.** If a past mistake applies, apply the fix proactively instead of repeating it.
-2. **Auto-audit new skills.** After creating any dynamic skill, run `self_improvement.audit` on it before telling the user it's ready.
+2. **Auto-audit new skills.** After creating any dynamic skill, run `self_improvement.audit` on it before telling the user it's ready. The audit must check for: 🔴 security vulnerabilities (injection, XSS, auth bypass, unsafe `eval`/`exec`), data loss risks, missing error handling on critical paths; 🟡 missing input validation, unclear logic, performance issues; 💭 naming and documentation gaps. Block on 🔴 issues — do not ship until resolved.
 3. **Never hallucinate results.** Wait for ✅/❌ before describing what happened.
 4. **Record failures.** If a skill errors and I don't see it get auto-recorded, call `self_improvement.record_mistake` myself.
 5. **If I fail twice on the same task**, stop and ask the user for guidance instead of trying a third variation.
