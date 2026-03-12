@@ -3,13 +3,14 @@ import shlex
 
 NAME = "terminal"
 DOC = (
-    "Execute whitelisted shell commands (ls, pip, git, touch, cat) inside the container. "
+    "Execute whitelisted shell commands (ls, git, touch, cat) inside the container. "
     "Returns: run(command)→stdout/stderr text output of the command, or rejection message if "
     "the command is not whitelisted or contains dangerous characters."
 )
 
 # 🛡️ ONLY these base commands are allowed
-WHITELISTED = ["ls", "pip", "git", "touch", "cat"]
+# NOTE: 'pip' removed — allows arbitrary package installs which breaks sandbox isolation
+WHITELISTED = ["ls", "git", "touch", "cat"]
 
 def run(command: str) -> str:
     """Executes a command inside the container if it passes security checks."""
