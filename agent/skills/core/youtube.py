@@ -8,10 +8,12 @@ logger = logging.getLogger(__name__)
 
 NAME = "youtube"
 DOC = (
-    "YouTube Data API: search for videos and channels with metrics. "
+    "YouTube Data API: search, analyze videos and channels. "
     "Setup: gcal_credentials.json + authorize() or activate(api_key). "
     "Functions: authorize(code?), activate(api_key), status(), "
-    "search_videos(query, max_results='5'), search_channels(query, max_results='5')."
+    "search_videos(query, max_results='5'), search_channels(query, max_results='5'), "
+    "get_video(url_or_id), get_channel_videos(url_or_id, max_results='10'), "
+    "get_transcript(url_or_id)."
 )
 
 # Robust Path Resolution (mirroring Senior Developer patterns)
@@ -287,4 +289,232 @@ def search_channels(query: str, max_results: str = "5") -> str:
     except Exception as e:
         return f"❌ YouTube search failed: {e}"
 
-__all__ = ["NAME", "DOC", "activate", "authorize", "status", "search_videos", "search_channels"]
+def get_video(url_or_id: str) -> str:
+    """Get full stats for a specific YouTube video by URL or video ID."""
+    import re
+    # Extract video ID from URL if needed
+    video_id = url_or_id.strip()
+    patterns = [
+        r"(?:v=|youtu\.be/|/embed/|/shorts/)([A-Za-z0-9_-]{11})",
+    ]
+    for p in patterns:
+        m = re.search(p, video_id)
+        if m:
+            video_id = m.group(1)
+            break
+
+    if len(video_id) != 11:
+        return f"❌ Could not extract a valid video ID from: {url_or_id}"
+
+    try:
+        youtube = _get_service()
+        resp = youtube.videos().list(
+            id=video_id,
+            part="snippet,statistics,contentDetails"
+        ).execute()
+
+        items = resp.get("items", [])
+        if not items:
+            return f"❌ No video found for ID: {video_id}"
+
+        item = items[0]
+        snippet = item["snippet"]
+        stats = item["statistics"]
+        details = item["contentDetails"]
+
+        title = snippet.get("title", "Unknown")
+        channel = snippet.get("channelTitle", "Unknown")
+        published = snippet.get("publishedAt", "")[:10]
+        description = snippet.get("description", "").replace("\n", " ")[:200]
+        tags = ", ".join(snippet.get("tags", [])[:10]) or "None"
+
+        views = int(stats.get("viewCount", 0))
+        likes = int(stats.get("likeCount", 0))
+        comments = int(stats.get("commentCount", 0))
+
+        # Parse ISO 8601 duration (e.g. PT4M13S)
+        duration_raw = details.get("duration", "")
+        dur_match = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration_raw)
+        if dur_match:
+            h, m, s = (int(x or 0) for x in dur_match.groups())
+            duration = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
+        else:
+            duration = duration_raw
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        return (
+            f"📹 Video: {title}\n"
+            f"   Channel:     {channel}\n"
+            f"   Published:   {published}\n"
+            f"   Duration:    {duration}\n"
+            f"   Views:       {views:,}\n"
+            f"   Likes:       {likes:,}\n"
+            f"   Comments:    {comments:,}\n"
+            f"   Tags:        {tags}\n"
+            f"   Description: {description}{'...' if len(snippet.get('description','')) > 200 else ''}\n"
+            f"   URL:         {url}"
+        )
+
+    except (PermissionError, FileNotFoundError) as e:
+        return f"❌ YouTube NOT setup. Call authorize() first. Error: {e}"
+    except Exception as e:
+        return f"❌ get_video failed: {e}"
+
+
+def get_channel_videos(url_or_id: str, max_results: str = "10") -> str:
+    """List recent uploads from a specific channel by URL, handle (@name), or channel ID."""
+    import re
+    try:
+        max_res = int(max_results)
+    except ValueError:
+        max_res = 10
+
+    raw = url_or_id.strip()
+
+    try:
+        youtube = _get_service()
+
+        # Resolve channel ID from URL / handle / bare ID
+        channel_id = None
+
+        # Direct channel ID (UC...)
+        if re.match(r"^UC[A-Za-z0-9_-]{22}$", raw):
+            channel_id = raw
+        else:
+            # Try forUsername (legacy)
+            username_match = re.search(r"/user/([^/?]+)", raw)
+            handle_match = re.search(r"/@([^/?]+)", raw) or (re.match(r"^@(.+)$", raw))
+
+            if username_match:
+                resp = youtube.channels().list(
+                    forUsername=username_match.group(1), part="id"
+                ).execute()
+                items = resp.get("items", [])
+                if items:
+                    channel_id = items[0]["id"]
+
+            if not channel_id and handle_match:
+                handle = handle_match.group(1)
+                resp = youtube.search().list(
+                    q=handle, type="channel", part="id", maxResults=1
+                ).execute()
+                items = resp.get("items", [])
+                if items:
+                    channel_id = items[0]["id"]["channelId"]
+
+            # /channel/UC... in URL
+            if not channel_id:
+                ch_match = re.search(r"/channel/(UC[A-Za-z0-9_-]{22})", raw)
+                if ch_match:
+                    channel_id = ch_match.group(1)
+
+        if not channel_id:
+            return f"❌ Could not resolve a channel ID from: {url_or_id}"
+
+        # Get channel name
+        ch_resp = youtube.channels().list(id=channel_id, part="snippet").execute()
+        ch_name = ch_resp["items"][0]["snippet"]["title"] if ch_resp.get("items") else channel_id
+
+        # Fetch recent uploads
+        search_resp = youtube.search().list(
+            channelId=channel_id,
+            part="id,snippet",
+            maxResults=max_res,
+            order="date",
+            type="video"
+        ).execute()
+
+        video_ids = [item["id"]["videoId"] for item in search_resp.get("items", [])]
+        if not video_ids:
+            return f"No recent videos found for channel: {ch_name}"
+
+        stats_resp = youtube.videos().list(
+            id=",".join(video_ids),
+            part="snippet,statistics"
+        ).execute()
+
+        lines = [f"📺 Recent videos from '{ch_name}' (latest {max_res}):\n"]
+        for item in stats_resp.get("items", []):
+            snippet = item["snippet"]
+            stats = item["statistics"]
+            title = snippet.get("title", "Unknown")
+            published = snippet.get("publishedAt", "")[:10]
+            views = int(stats.get("viewCount", 0))
+            likes = int(stats.get("likeCount", 0))
+            vid_url = f"https://www.youtube.com/watch?v={item['id']}"
+            lines.append(
+                f"- {title}\n"
+                f"  Published: {published} | Views: {views:,} | Likes: {likes:,}\n"
+                f"  URL: {vid_url}\n"
+            )
+
+        return "\n".join(lines)
+
+    except (PermissionError, FileNotFoundError) as e:
+        return f"❌ YouTube NOT setup. Call authorize() first. Error: {e}"
+    except Exception as e:
+        return f"❌ get_channel_videos failed: {e}"
+
+
+def get_transcript(url_or_id: str) -> str:
+    """Fetch the full transcript/captions for a YouTube video. No API quota used."""
+    import re
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+    except ImportError:
+        return (
+            "❌ Missing package: youtube-transcript-api\n"
+            "Install it: pip install youtube-transcript-api"
+        )
+
+    # Extract video ID
+    video_id = url_or_id.strip()
+    m = re.search(r"(?:v=|youtu\.be/|/embed/|/shorts/)([A-Za-z0-9_-]{11})", video_id)
+    if m:
+        video_id = m.group(1)
+
+    if len(video_id) != 11:
+        return f"❌ Could not extract a valid video ID from: {url_or_id}"
+
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        # Prefer manual English, fall back to auto-generated, then any available
+        try:
+            transcript = transcript_list.find_manually_created_transcript(["en", "en-US", "en-GB"])
+        except NoTranscriptFound:
+            try:
+                transcript = transcript_list.find_generated_transcript(["en", "en-US", "en-GB"])
+            except NoTranscriptFound:
+                # Take whatever is available, translate if possible
+                transcript = next(iter(transcript_list))
+
+        entries = transcript.fetch()
+        full_text = " ".join(e["text"] for e in entries).strip()
+
+        word_count = len(full_text.split())
+        duration_s = entries[-1]["start"] + entries[-1].get("duration", 0) if entries else 0
+        duration_str = f"{int(duration_s // 60)}m {int(duration_s % 60)}s"
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        return (
+            f"📝 Transcript for {url}\n"
+            f"   Language: {transcript.language} ({'manual' if not transcript.is_generated else 'auto-generated'})\n"
+            f"   Duration: {duration_str} | Words: {word_count:,}\n\n"
+            f"{full_text}"
+        )
+
+    except TranscriptsDisabled:
+        return f"❌ Transcripts are disabled for video: {video_id}"
+    except NoTranscriptFound:
+        return f"❌ No transcript available for video: {video_id}"
+    except Exception as e:
+        return f"❌ get_transcript failed: {e}"
+
+
+__all__ = [
+    "NAME", "DOC", "activate", "authorize", "status",
+    "search_videos", "search_channels",
+    "get_video", "get_channel_videos", "get_transcript",
+]
