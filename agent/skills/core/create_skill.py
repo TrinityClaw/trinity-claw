@@ -33,13 +33,34 @@ def create_new_skill(skill_filename: str, code: str) -> str:
         if not str(file_path).startswith(str(SKILLS_DIR)):
             return "❌ ACCESS DENIED: Cannot write outside /app/skills/dynamic"
         
-        # 2. Structural Code Audit
+        # 2. Pre-sanitize common LLM Unicode artifacts that break Python syntax
+        _UNICODE_FIXES = [
+            ("\u2014", "-"),   # em dash — → -
+            ("\u2013", "-"),   # en dash – → -
+            ("\u2018", "'"),   # left single quote ' → '
+            ("\u2019", "'"),   # right single quote ' → '
+            ("\u201c", '"'),   # left double quote " → "
+            ("\u201d", '"'),   # right double quote " → "
+            ("\u2026", "..."), # ellipsis … → ...
+            ("\u00a0", " "),   # non-breaking space → regular space
+        ]
+        for bad_char, replacement in _UNICODE_FIXES:
+            code = code.replace(bad_char, replacement)
+
+        # 2b. Structural Code Audit
         try:
             print(f"🛠️ [DEBUG] create_skill.py: Parsing code (first 100 chars): {repr(code[:100])}")
             ast.parse(code)
         except SyntaxError as e:
             print(f"❌ [DEBUG] create_skill.py: SyntaxError: {e}")
-            return f"❌ SYNTAX ERROR: The code you wrote is invalid Python: {e}"
+            # Show the actual broken line to help the LLM self-correct
+            lines = code.splitlines()
+            bad_line = lines[e.lineno - 1].strip() if e.lineno and e.lineno <= len(lines) else "(unknown)"
+            return (
+                f"❌ SYNTAX ERROR on line {e.lineno}: {e.msg}\n"
+                f"   Offending line: {bad_line}\n"
+                f"   Fix this specific line and resubmit the corrected code."
+            )
 
         # 2b. Dangerous Import Blocklist
         _BLOCKED_IMPORTS = {
