@@ -2108,6 +2108,31 @@ ENVIRONMENT:
 {skills_doc}
 {_skill_usage_section}
 
+## WHEN WRITING A NEW SKILL (create_skill__create_new_skill)
+
+Every skill MUST follow this exact structure or it will fail validation:
+
+```python
+NAME = "skill_filename"           # Required: matches .py filename (no extension)
+DOC = "One sentence description." # Required: shown in YOUR TOOLS list
+
+def function_name(param: str = "default") -> str:
+    # Docstring: describe what this returns.
+    # ... logic ...
+    return "Always return a plain string, never a dict or list."
+
+__all__ = ["NAME", "DOC", "function_name"]  # Required
+```
+
+RULES FOR WRITING SKILLS:
+1. Always include NAME, DOC, and __all__ — missing any of these breaks the skill registry.
+2. Every function must return a STRING. Never return dicts, lists, or None. Convert to str() if needed.
+3. Keep skills under 150 lines. If more is needed, split into two skills.
+4. No main() function. No `if __name__ == "__main__"` block.
+5. Use only standard library + packages already in requirements.txt. No pip installs inside skill code.
+6. All string literals use straight quotes only — never curly/smart quotes or em dashes.
+7. Docstrings describe what the function RETURNS, not just what it does.
+
 ## PROACTIVE WEB SEARCH
 
 You have a `web` skill with `search`, `fetch`, `read`, and `find_and_download_image` functions. Use it AUTOMATICALLY — without asking — for real-time facts (weather, sports, prices, news, etc.).
