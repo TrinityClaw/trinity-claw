@@ -18,11 +18,29 @@ DOC = (
 _APP        = Path("/app")
 _WRITE_ROOTS = (Path("/app/memory"), Path("/app/skills/dynamic"))
 
+# Files that must never be readable via the skill (credentials / tokens)
+_BLOCKED_READ_NAMES = frozenset({".env"})
+_BLOCKED_READ_SUFFIXES = frozenset({"_token.json", "_credentials.json"})
+
+
+def _is_sensitive(p: Path) -> bool:
+    """Return True if the resolved path is a credential/token file."""
+    name = p.name
+    if name in _BLOCKED_READ_NAMES:
+        return True
+    for suffix in _BLOCKED_READ_SUFFIXES:
+        if name.endswith(suffix):
+            return True
+    return False
+
 
 def _read_path(path: str) -> Path:
-    """Resolve path; reads are allowed anywhere inside the container."""
+    """Resolve path; reads are allowed anywhere inside the container except sensitive files."""
     p = Path(path) if Path(path).is_absolute() else _APP / path
-    return p.resolve()
+    resolved = p.resolve()
+    if _is_sensitive(resolved):
+        raise PermissionError(f"🔒 Access denied: '{resolved.name}' is a protected credential file.")
+    return resolved
 
 
 def _write_path(path: str) -> Path:
