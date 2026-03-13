@@ -1039,8 +1039,8 @@ docker compose up --build -d</div>
             btn.disabled = true;
             try {
                 const [modelsRes, currentRes] = await Promise.all([
-                    fetch(`${agentUrl}/config/ollama/models`),
-                    fetch(`${agentUrl}/config/ollama/get`),
+                    fetch(`${agentUrl}/config/ollama/models`, { headers: getAuthHeaders() }),
+                    fetch(`${agentUrl}/config/ollama/get`, { headers: getAuthHeaders() }),
                 ]);
                 const modelsData = await modelsRes.json();
                 const currentData = currentRes.ok ? await currentRes.json() : {};
@@ -1106,8 +1106,8 @@ docker compose up --build -d</div>
                 }
 
                 // Fetch Telegram config
-                const telegramRes = await fetch(`${agentUrl}/config/telegram/get`);
-                const sourceRes = await fetch(`${agentUrl}/config/model-source/get`);
+                const telegramRes = await fetch(`${agentUrl}/config/telegram/get`, { headers: getAuthHeaders() });
+                const sourceRes = await fetch(`${agentUrl}/config/model-source/get`, { headers: getAuthHeaders() });
                 if (sourceRes.ok) {
                     const source = await sourceRes.json();
                     if (source.success) {
@@ -1674,7 +1674,7 @@ docker compose up --build -d</div>
             const el = document.getElementById('skills-list');
             const cnt = document.getElementById('skills-count');
             try {
-                const res = await fetch(`${agentUrl}/skills`);
+                const res = await fetch(`${agentUrl}/skills`, { headers: getAuthHeaders() });
                 const data = await res.json();
                 const metadata = data.skills || {};
                 const modules = Object.entries(metadata);
@@ -1772,7 +1772,7 @@ docker compose up --build -d</div>
             const el = document.getElementById('crons-list');
             const cnt = document.getElementById('crons-count');
             try {
-                const res = await fetch(`${agentUrl}/scheduler/list`);
+                const res = await fetch(`${agentUrl}/scheduler/list`, { headers: getAuthHeaders() });
                 const data = await res.json();
                 const tasks = data.tasks || {};
                 const entries = Object.entries(tasks);
