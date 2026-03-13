@@ -24,7 +24,8 @@ DOC = (
     "Call it directly with just the subject name, e.g. find_and_download_image('Zeus') or "
     "find_and_download_image('sunset beach'). Do NOT search first — this function handles "
     "searching, finding a direct image URL, and downloading in one step. Returns the local path. "
-    "Rate limiting and URL validation built-in."
+    "Rate limiting and URL validation built-in. "
+    "parse_feed(url, limit) — fetch and parse an RSS/Atom feed, returns structured news items."
 )
 
 # Try to import BeautifulSoup
@@ -1408,3 +1409,94 @@ def browser_status() -> Dict:
     if not HAS_PLAYWRIGHT:
         return {"ok": False, "error": "Playwright not installed."}
     return _bw_run(_bw_async_bstatus())
+
+
+# ── RSS / ATOM FEED PARSER ────────────────────────────────────────────────────
+
+def parse_feed(url: str, limit: int = 10) -> str:
+    """
+    Fetch and parse an RSS or Atom feed. Returns the latest items as structured text.
+    Much faster than fetch() for news sites — no HTML rendering, pure XML.
+
+    url   — RSS/Atom feed URL, e.g. "https://feeds.bbci.co.uk/news/rss.xml"
+    limit — max items to return (default 10, max 50)
+
+    Example feeds:
+      BBC News:       https://feeds.bbci.co.uk/news/rss.xml
+      Reuters:        https://feeds.reuters.com/reuters/topNews
+      TechCrunch:     https://techcrunch.com/feed/
+      Hacker News:    https://news.ycombinator.com/rss
+      NASA:           https://www.nasa.gov/rss/dyn/breaking_news.rss
+    """
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
+    try:
+        limit = min(int(limit), 50)
+        if not _is_valid_url(url):
+            return f"❌ Invalid URL: {url}"
+
+        headers = {
+            "User-Agent": _get_random_user_agent(),
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+        }
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+
+        root = ET.fromstring(resp.content)
+
+        # Detect RSS vs Atom
+        is_atom = root.tag == "{http://www.w3.org/2005/Atom}feed" or "Atom" in root.tag
+
+        items = []
+
+        if is_atom:
+            feed_title = root.findtext("{http://www.w3.org/2005/Atom}title") or url
+            entries = root.findall("{http://www.w3.org/2005/Atom}entry")[:limit]
+            for e in entries:
+                title   = e.findtext("{http://www.w3.org/2005/Atom}title") or "(no title)"
+                summary = e.findtext("{http://www.w3.org/2005/Atom}summary") or \
+                          e.findtext("{http://www.w3.org/2005/Atom}content") or ""
+                pub     = e.findtext("{http://www.w3.org/2005/Atom}updated") or \
+                          e.findtext("{http://www.w3.org/2005/Atom}published") or ""
+                link_el = e.find("{http://www.w3.org/2005/Atom}link")
+                link    = link_el.get("href", "") if link_el is not None else ""
+                items.append((title.strip(), summary.strip()[:300], pub[:16], link))
+        else:
+            # RSS 2.0
+            channel = root.find("channel") or root
+            feed_title = channel.findtext("title") or url
+            for item in list(channel.iter("item"))[:limit]:
+                title   = item.findtext("title") or "(no title)"
+                summary = item.findtext("description") or ""
+                pub     = item.findtext("pubDate") or item.findtext("dc:date") or ""
+                link    = item.findtext("link") or ""
+                # Strip HTML tags from description
+                summary = re.sub(r"<[^>]+>", "", summary).strip()[:300]
+                # Shorten date
+                try:
+                    pub = parsedate_to_datetime(pub).strftime("%Y-%m-%d %H:%M") if pub else ""
+                except Exception:
+                    pub = pub[:16]
+                items.append((title.strip(), summary, pub, link.strip()))
+
+        if not items:
+            return f"📭 No items found in feed: {url}"
+
+        lines = [f"📰 {feed_title}  ({len(items)} items)\n"]
+        for i, (title, summary, pub, link) in enumerate(items, 1):
+            lines.append(f"{i}. {title}")
+            if pub:
+                lines.append(f"   📅 {pub}")
+            if summary:
+                lines.append(f"   {summary}{'…' if len(summary) == 300 else ''}")
+            if link:
+                lines.append(f"   🔗 {link}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    except ET.ParseError:
+        return f"❌ Could not parse feed — URL may not be a valid RSS/Atom feed: {url}"
+    except Exception as e:
+        return f"❌ Error fetching feed: {e}"
