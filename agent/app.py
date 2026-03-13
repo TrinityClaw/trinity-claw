@@ -1143,7 +1143,7 @@ def parse_skill_args(content: str, max_positional: int = None) -> tuple:
     args = []
     kwargs = {}
 
-    if max_positional and max_positional > 1:
+    if max_positional is not None and max_positional >= 1:
         raw_parts = content.split(',', max_positional - 1)
     else:
         raw_parts = content.split(',')
