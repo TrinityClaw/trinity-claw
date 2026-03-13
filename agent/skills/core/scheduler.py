@@ -177,7 +177,7 @@ def _dispatch(prompt: str, task_name: str) -> str:
     headers = {"X-API-Key": api_key} if api_key else {}
     try:
         resp = requests.post(
-            "http://localhost:8000/chat",
+            "http://localhost:8001/chat",
             json={"message": prompt, "session_id": f"sched_{task_name}"},
             headers=headers,
             timeout=120,
