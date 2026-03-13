@@ -1226,7 +1226,7 @@ def execute_skill_tags(response_text: str, auto_verify: bool = True, search_budg
             # Security: Only allow skills that are actually loaded
             if skill_name not in skills:
                 error_msg = f"[⚠️ Skill '{skill_name}' not found. Available: {list(skills.keys())[:5]}... Call /skills/reload if just created.]"
-                execution_log.append({"skill": skill_name, "status": "not_found", "error": error_msg})
+                execution_log.append({"skill": skill_name, "function": func_name, "status": "not_found", "error": error_msg})
                 return error_msg
 
             # --- SMART PARSING FOR CREATE_SKILL ---
@@ -1250,7 +1250,7 @@ def execute_skill_tags(response_text: str, auto_verify: bool = True, search_budg
                     else:
                         print(f"🛠️ [DEBUG] create_skill call missing clear separator in content: {content[:100]}...")
                         error_msg = "[❌ create_skill.create_new_skill Error: Cannot parse filename — provide: filename.py,<code here>]"
-                        execution_log.append({"skill": skill_name, "status": "parse_error", "error": error_msg})
+                        execution_log.append({"skill": skill_name, "function": func_name, "status": "parse_error", "error": error_msg})
                         return error_msg
 
                 print(f"🛠️ [DEBUG] Final parsed filename: '{filename}', code length: {len(code)}")
@@ -1268,7 +1268,7 @@ def execute_skill_tags(response_text: str, auto_verify: bool = True, search_budg
                 if "{content}" in code and len(code) < 50:
                     print(f"⚠️ [DEBUG] Placeholder detected in code.")
                     error_msg = "[❌ Error: The model provided a placeholder instead of the actual skill code. This usually happens when the request is too large or the API times out. Try asking for a simpler version first.]"
-                    execution_log.append({"skill": skill_name, "status": "placeholder_error", "error": error_msg})
+                    execution_log.append({"skill": skill_name, "function": func_name, "status": "placeholder_error", "error": error_msg})
                     return error_msg
                     
                 args = [filename, code]
@@ -1347,7 +1347,7 @@ def execute_skill_tags(response_text: str, auto_verify: bool = True, search_budg
 
         except Exception as e:
             error_msg = f"[❌ Exception in {skill_name}.{func_name}: {str(e)}]"
-            execution_log.append({"skill": skill_name, "status": "exception", "error": str(e)})
+            execution_log.append({"skill": skill_name, "function": func_name, "status": "exception", "error": str(e)})
             # Auto-record unhandled exceptions as lessons
             if "self_improvement" in skills:
                 try:
@@ -2419,12 +2419,12 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                     )
                 else:
                     _success_steps = ", ".join(
-                        f"{l['skill']}.{l['function']}"
+                        f"{l['skill']}.{l.get('function', '')}"
                         for l in execution_log
                         if l.get("status") == "success"
                     )
                     _failed_steps = ", ".join(
-                        f"{l['skill']}.{l['function']}"
+                        f"{l['skill']}.{l.get('function', '')}"
                         for l in execution_log
                         if l.get("status") != "success"
                     )
@@ -2525,9 +2525,9 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                 # Keep a text summary as fallback ai_reply in case the loop exhausts
                 ai_reply = "\n".join(
                     (
-                        f"[✅ {l['skill']}.{l['function']} Result: {l.get('result', '')}]"
+                        f"[✅ {l['skill']}.{l.get('function', '')} Result: {l.get('result', '')}]"
                         if l["status"] == "success"
-                        else f"[❌ {l['skill']}.{l['function']} Error: {l.get('error', '')}]"
+                        else f"[❌ {l['skill']}.{l.get('function', '')} Error: {l.get('error', '')}]"
                     )
                     for l in execution_log
                 )
