@@ -1,4 +1,4 @@
-# install.ps1 - TrinityClaw Installation Wizard (Windows)
+﻿# install.ps1 - TrinityClaw Installation Wizard (Windows)
 
 Write-Host ""
 Write-Host "   ╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
@@ -60,16 +60,17 @@ if ($modelSource -eq "local") {
   $apiKeyPlain = "not-required"
 
   # Create .env
-  @"
+  $envContent = @"
 # TrinityClaw Secrets
 LITELLM_MASTER_KEY=sk-trinity-local-key
 MODEL_SOURCE=local
 OLLAMA_MODEL=qwen3.5:9b
 TRINITY_API_KEY=$trinityKey
-"@ | Out-File -FilePath ".env" -Encoding utf8
+"@
+  $envContent | Out-File -FilePath ".env" -Encoding utf8
 
   # Create litellm_config.yaml
-  @"
+  $litellmContent = @"
 model_list:
   - model_name: trinity-default
     litellm_params:
@@ -78,12 +79,12 @@ model_list:
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
-"@ | Out-File -FilePath "config\litellm_config.yaml" -Encoding utf8
+"@
+  $litellmContent | Out-File -FilePath "config\litellm_config.yaml" -Encoding utf8
 
   Write-Host "   ✅ Local configuration created!" -ForegroundColor Green
   Write-Host ""
-}
-else {
+} else {
 
   # ── CLOUD path ──────────────────────────────────────────────────────
   Write-Host ""
@@ -123,16 +124,17 @@ else {
   )
 
   # Create .env
-  @"
+  $envContent = @"
 # TrinityClaw Secrets
 LITELLM_MASTER_KEY=sk-trinity-local-key
 MODEL_SOURCE=cloud
 $apiKeyName=$apiKeyPlain
 TRINITY_API_KEY=$trinityKey
-"@ | Out-File -FilePath ".env" -Encoding utf8
+"@
+  $envContent | Out-File -FilePath ".env" -Encoding utf8
 
   # Create litellm_config.yaml
-  @"
+  $litellmContent = @"
 model_list:
   - model_name: trinity-default
     litellm_params:
@@ -152,7 +154,8 @@ model_list:
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
-"@ | Out-File -FilePath "config\litellm_config.yaml" -Encoding utf8
+"@
+  $litellmContent | Out-File -FilePath "config\litellm_config.yaml" -Encoding utf8
 
   Write-Host ""
   Write-Host "   ✅ Cloud configuration created!" -ForegroundColor Green
@@ -195,7 +198,7 @@ Write-Host ""
 # ─────────────────────────────────────────────
 # Build and start containers
 # ─────────────────────────────────────────────
-$composeArgs = if ($modelSource -eq "local") { @("--profile", "local") } else { @() }
+if ($modelSource -eq "local") { $composeArgs = @("--profile", "local") } else { $composeArgs = @() }
 
 Write-Host ""
 Write-Host "   Building containers (this may take a few minutes on first run)..." -ForegroundColor Yellow
@@ -234,7 +237,7 @@ if (Test-Path $dockerSettingsPath) {
 # ─────────────────────────────────────────────
 # Create Desktop launcher (.bat double-click)
 # ─────────────────────────────────────────────
-$composeFlag = if ($modelSource -eq "local") { "--profile local " } else { "" }
+if ($modelSource -eq "local") { $composeFlag = "--profile local " } else { $composeFlag = "" }
 $launcher = "$env:USERPROFILE\Desktop\Start TrinityClaw.bat"
 @"
 @echo off
