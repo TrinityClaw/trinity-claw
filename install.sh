@@ -19,7 +19,7 @@ IS_MAC=false
 if [[ "$(uname)" == "Darwin" ]]; then
     IS_MAC=true
     echo -e "   \033[36m🍎 macOS detected\033[0m"
-    # Ensure brew bins are in PATH (set up by install-mac.sh)
+    # Ensure brew bins are in PATH
     if [ -f /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
     elif [ -f /usr/local/bin/brew ]; then
@@ -34,25 +34,48 @@ fi
 # ─────────────────────────────────────────────────────────
 echo -e "\033[33m[1/5] Checking prerequisites...\033[0m"
 
-# On Mac: remind user to run install-mac.sh first if Docker missing
+# On Mac: start or install Docker Desktop if not running
 if [ "$IS_MAC" = true ]; then
     if ! docker info &>/dev/null 2>&1; then
         # Try to start Docker Desktop if the app is installed
         if [ -d "/Applications/Docker.app" ]; then
             echo "   🚀 Starting Docker Desktop..."
             open /Applications/Docker.app
-            echo "   ⏳ Waiting for Docker to start..."
-            for i in $(seq 1 30); do
+            echo "   ⏳ Waiting for Docker to start (up to 90 seconds)..."
+            echo "      Watch for the whale 🐳 icon in your Mac menu bar."
+            for i in $(seq 1 45); do
                 sleep 2
                 docker info &>/dev/null 2>&1 && break
-                printf "."
+                printf "   [%02d/45] still starting...\r" "$i"
             done
             echo ""
         fi
         if ! docker info &>/dev/null 2>&1; then
             echo ""
-            echo "   ❌ Docker Desktop is not running."
-            echo "   👉 Run this first: bash install-mac.sh"
+            if [ -d "/Applications/Docker.app" ]; then
+                echo "   ❌ Docker did not start in time."
+                echo "   👉 Open Docker Desktop manually from Applications,"
+                echo "      wait for the whale 🐳 icon in the menu bar, then run:"
+                echo ""
+                echo "      bash install.sh"
+            else
+                echo "   ❌ Docker Desktop is not installed."
+                echo ""
+                echo "════════════════════════════════════════════════════════"
+                echo "   📥  INSTALL DOCKER DESKTOP (it's free)"
+                echo ""
+                echo "   1. Go to:  https://www.docker.com/products/docker-desktop/"
+                echo "   2. Click 'Download for Mac'"
+                echo "   3. Open the .dmg file → drag Docker to Applications"
+                echo "   4. Open Docker Desktop from Applications"
+                echo "   5. Wait for the whale 🐳 icon in your menu bar"
+                echo "   6. Come back here and run:"
+                echo ""
+                echo "         bash install.sh"
+                echo ""
+                echo "════════════════════════════════════════════════════════"
+                open "https://www.docker.com/products/docker-desktop/" 2>/dev/null || true
+            fi
             echo ""
             exit 1
         fi
