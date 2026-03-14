@@ -60,77 +60,103 @@ This project follows responsible AI agent design practices, but **no system is u
 
 ### Prerequisites
 
-- **Docker Desktop** — install before running the TrinityClaw installer for the smoothest experience: https://docs.docker.com/get-started/get-docker/
-  - **Windows:** Docker Desktop requires WSL 2. On Windows 11 WSL is already built in — Docker Desktop's installer enables it automatically. No manual WSL setup needed.
-- **Git** — required to clone the repository. Windows does not include Git by default.
-  - Install via winget: `winget install Git.Git`
-  - Or download from: https://git-scm.com/download/win
-  - After installing, close and reopen PowerShell so `git` is available.
+- **Docker Desktop** (the only prerequisite — it's free): https://www.docker.com/products/docker-desktop/
+  - **Windows:** Docker Desktop requires WSL 2. On Windows 11, WSL is already built in — Docker Desktop's installer enables it automatically. No manual WSL setup needed.
+  - **Mac:** Download the `.dmg`, drag Docker to Applications, open it, and wait for the whale 🐳 icon in your menu bar.
 - 8GB+ RAM recommended
 - 20GB free disk space (50GB+ for local model)
 
+> **No Git required on Windows or Mac.** The installers download the repository automatically.
+>
 > **Browser automation** (Playwright + Chromium, ~300MB) is installed automatically inside the Docker container during build — no extra steps required.
 
-### One-Line Install
+---
 
-**Windows (PowerShell — run as Administrator):**
-```powershell
-# 1. Allow PowerShell scripts (required once per machine)
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+### Install — Windows
 
-# 2. Clone the repository
-git clone https://github.com/TrinityClaw/trinity-claw.git
+**Step 1 — Install Docker Desktop**
 
-# 3. Go into the folder
-cd trinity-claw
+1. Go to https://www.docker.com/products/docker-desktop/
+2. Click **Download for Windows**
+3. Run the installer (it enables WSL 2 automatically on Windows 11)
+4. Open **Docker Desktop** from the Start menu
+5. Wait for the **whale 🐳 icon** to appear in your taskbar — Docker is ready when you see it
 
-# 4. Unblock the installer (downloaded files are blocked by Windows by default)
-Unblock-File -Path .\install.ps1
+**Step 2 — Download `setup.bat`**
 
-# 5. Run the installer
-.\install.ps1
-```
+1. Open this link in your browser:
+   ```
+   https://github.com/TrinityClaw/trinity-claw/raw/main/setup.bat
+   ```
+2. The browser will prompt you to save a file — click **Save** (or **Keep** if Chrome warns you)
+3. Make sure the filename is **`setup.bat`** — not `setup.bat.txt`. If your browser adds `.txt`, rename the file after downloading.
 
-**Linux:**
+**Step 3 — Run the installer**
+
+1. Find `setup.bat` in your Downloads folder
+2. **Double-click** it
+3. If Windows shows a **"Windows protected your PC"** SmartScreen warning:
+   - Click **More info**
+   - Click **Run anyway**
+   - This warning appears for all downloaded scripts — it is normal
+4. A terminal window opens and walks you through setup automatically:
+   - If Docker isn't running yet, `setup.bat` starts it and waits
+   - If Docker isn't installed, it opens the download page for you
+   - Downloads the full TrinityClaw repo (no Git needed)
+   - Launches the installer wizard — choose **cloud** or **local** model
+5. At the end, your **Agent API Key** is printed — copy it and paste it in the Web UI under **Settings ⚙️ → Agent Security**
+
+> After install, TrinityClaw starts automatically every time Windows boots. A **"Start TrinityClaw"** shortcut is placed on your Desktop for manual restarts.
+
+---
+
+### Install — macOS
+
+**Step 1 — Install Docker Desktop**
+
+1. Go to https://www.docker.com/products/docker-desktop/
+2. Click **Download for Mac**
+3. Open the `.dmg` file → drag Docker to Applications
+4. Open **Docker Desktop** from Applications
+5. Wait for the **whale 🐳 icon** in your menu bar — Docker is ready when you see it
+
+**Step 2 — Run the installer**
+
+Open Terminal (press `⌘ Space`, type `Terminal`, press Enter) and paste:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.sh | bash
 ```
 
-**macOS** (recommended — avoids curl pipe issues with Docker detection):
+The installer will:
+- Start Docker Desktop automatically if it's installed but not running
+- Install `docker-compose` via Homebrew if needed (for local model mode)
+- Download the repo if you're running via `curl`
+- Walk you through choosing **cloud** or **local** model
+- Set up a LaunchAgent so TrinityClaw starts automatically on every login
+- Place a **"Start TrinityClaw.command"** shortcut on your Desktop
+
+At the end, copy your **Agent API Key** and enter it in the Web UI under **Settings ⚙️ → Agent Security**.
+
+> **Already have the repo cloned?** `cd` into it and run `bash install.sh` instead.
+
+---
+
+### Install — Linux
+
 ```bash
-git clone https://github.com/TrinityClaw/trinity-claw.git ~/trinity-claw
-cd ~/trinity-claw
-bash install-mac.sh && bash install.sh
+curl -fsSL https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.sh | bash
 ```
 
-> `install-mac.sh` checks/starts Docker Desktop first. `install.sh` then runs the full setup wizard.
+Docker Engine is installed automatically if not present. That's it.
+
+---
 
 During installation you will be asked to choose:
 - **Cloud** — use a remote provider (OpenAI, NVIDIA, Anthropic, etc.) — requires API key
-- **Local** — use Ollama with `qwen3.5:9b` running on your machine — no API key needed
+- **Local** — use Ollama with `qwen3.5:9b` running on your machine — no API key needed (~6.6 GB download)
 
-### Manual Install
-
-```powershell
-# 1. Clone repository
-git clone https://github.com/TrinityClaw/trinity-claw.git
-cd trinity-claw
-
-# 2. Run installer
-# Windows — allow scripts first (once per machine):
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-Unblock-File -Path .\install.ps1
-.\install.ps1
-
-# Linux/Mac:
-# ./install.sh
-
-# 3. Access TrinityClaw
-# Web UI:   http://localhost:8080
-# API:      http://localhost:8001
-# Docs:     http://localhost:8001/docs
-# Preview:  http://localhost:8090  (web_builder live preview)
-```
+After installation, open the Web UI at: **http://localhost:8080**
 
 ---
 
@@ -154,7 +180,7 @@ Choose your model source during installation:
 - Model: `qwen3.5:9b` (~6.6GB download on first start)
 - Requires: 8GB+ VRAM (GPU) or 16GB+ RAM (CPU-only, slower)
 - On **Linux**: pulled automatically by `ollama-entrypoint.sh` inside Docker on first startup
-- On **Mac**: pulled during `install.sh` via native Ollama
+- On **Mac**: pulled during `install.sh` via native Ollama (Homebrew)
 - Start command: `docker compose --profile local up -d` (Linux) / `docker compose -f docker-compose.mac.yml up -d` (Mac)
 - **Mac auto-start**: after running `install.sh`, TrinityClaw starts automatically on every login — no terminal needed. A `Start TrinityClaw.command` shortcut is placed on your Desktop as a manual backup.
 
@@ -815,7 +841,8 @@ curl -X POST http://localhost:8001/skill/call \
 ```
 trinity-claw/
 ├── docker-compose.yml          # Docker orchestration
-├── install.ps1                 # Windows installer
+├── setup.bat                   # Windows installer (double-click, no Git/admin needed)
+├── install.ps1                 # Windows installer core (called by setup.bat)
 ├── install.sh                  # Linux/Mac installer
 ├── .env                        # Secrets (not in git)
 ├── .env.example                # Secrets template
