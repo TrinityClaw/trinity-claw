@@ -2104,6 +2104,49 @@ NEVER claim you completed an action until the tool result confirms it."""
         pass
     _lessons_block = "\n".join(_lessons_lines) if _lessons_lines else "None yet."
 
+    # Load daily journal (last 3 days) and user model for system prompt injection
+    _daily_memory_block = ""
+    try:
+        from datetime import date as _date, timedelta as _timedelta
+        _journal_path = Path("/app/memory/daily_journal.jsonl")
+        _user_model_path = Path("/app/memory/user_model.json")
+        _today_str = _date.today().isoformat()
+        _cutoff_str = (_date.today() - _timedelta(days=3)).isoformat()
+        _journal_entries = {}
+        if _journal_path.exists():
+            for _jline in _journal_path.read_text(encoding="utf-8").splitlines():
+                _jline = _jline.strip()
+                if _jline:
+                    try:
+                        _je = json.loads(_jline)
+                        if _je.get("date", "") >= _cutoff_str:
+                            _journal_entries[_je["date"]] = _je
+                    except Exception:
+                        pass
+        _journal_lines = []
+        for _je in sorted(_journal_entries.values(), key=lambda x: x["date"], reverse=True):
+            _label = "TODAY" if _je["date"] == _today_str else _je["date"]
+            _journal_lines.append(f"[{_label}] {_je.get('summary', '')}")
+            if _je.get("learned"):
+                _journal_lines.append(f"  Learned: {_je['learned']}")
+            if _je.get("user_insights"):
+                _journal_lines.append(f"  User: {_je['user_insights']}")
+            if _je.get("next_steps"):
+                _journal_lines.append(f"  Next steps promised: {_je['next_steps']}")
+        _user_model_lines = []
+        if _user_model_path.exists():
+            _um = json.loads(_user_model_path.read_text(encoding="utf-8"))
+            for _ins in _um.get("insights", [])[-15:]:
+                _user_model_lines.append(f"- [{_ins['date']}] {_ins['insight']}")
+        _dm_parts = []
+        if _journal_lines:
+            _dm_parts.append("Recent Journal (last 3 days):\n" + "\n".join(_journal_lines))
+        if _user_model_lines:
+            _dm_parts.append("User Profile (accumulated):\n" + "\n".join(_user_model_lines))
+        _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
+    except Exception:
+        _daily_memory_block = "No journal entries yet."
+
     # IMPROVED SYSTEM PROMPT
     system_prompt = f"""{_identity_content + chr(10) + chr(10) if _identity_content else ""}You are TrinityClaw, an intelligent AI agent with persistent memory and skill execution capabilities.
 
@@ -2113,8 +2156,9 @@ ENVIRONMENT:
 - Dynamic skills: `/app/skills/dynamic/` (where you create new skills)
 - Memory Architecture:
   1. **Short-Term Context**: This current conversation session.
-  2. **Long-Term Chat History**: Old conversations are semantically indexed. When a user asks about the past, relevant old chats appear in the `<RETRIEVED_MEMORY>` block below automatically.
-  3. **Preferences**: `/app/memory/notes.json` (explicitly saved facts/preferences).
+  2. **Daily Journal**: Last 3 days of work summaries + user profile — always visible in `<DAILY_MEMORY>` below.
+  3. **Long-Term Chat History**: Old conversations are semantically indexed. When a user asks about the past, relevant old chats appear in the `<RETRIEVED_MEMORY>` block below automatically.
+  4. **Preferences**: `/app/memory/notes.json` (explicitly saved facts/preferences).
 
 ## YOUR TOOLS
 
@@ -2214,6 +2258,12 @@ When the user states or implies a preference (response length, tone, language, f
 </LEARNED_LESSONS>
 
 Before invoking any skill, scan this list. If a past mistake applies, apply the known fix proactively.
+
+## DAILY JOURNAL & USER PROFILE (What I know from recent days)
+
+<DAILY_MEMORY>
+{_daily_memory_block}
+</DAILY_MEMORY>
 
 ## LONG-TERM CHAT HISTORY (Past conversations retrieved via semantic search)
 
