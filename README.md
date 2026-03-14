@@ -60,7 +60,12 @@ This project follows responsible AI agent design practices, but **no system is u
 
 ### Prerequisites
 
-- Docker Desktop installed - Recomended to install Docker desktop before starting TrinityClaw installation for the smooth process; https://docs.docker.com/get-started/get-docker/
+- **Docker Desktop** — install before running the TrinityClaw installer for the smoothest experience: https://docs.docker.com/get-started/get-docker/
+  - **Windows:** Docker Desktop requires WSL 2. On Windows 11 WSL is already built in — Docker Desktop's installer enables it automatically. No manual WSL setup needed.
+- **Git** — required to clone the repository. Windows does not include Git by default.
+  - Install via winget: `winget install Git.Git`
+  - Or download from: https://git-scm.com/download/win
+  - After installing, close and reopen PowerShell so `git` is available.
 - 8GB+ RAM recommended
 - 20GB free disk space (50GB+ for local model)
 
@@ -68,15 +73,21 @@ This project follows responsible AI agent design practices, but **no system is u
 
 ### One-Line Install
 
-**Windows (PowerShell):**
+**Windows (PowerShell — run as Administrator):**
 ```powershell
- # 1. Clone the repository
+# 1. Allow PowerShell scripts (required once per machine)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# 2. Clone the repository
 git clone https://github.com/TrinityClaw/trinity-claw.git
 
-# 2. Go into the folder
+# 3. Go into the folder
 cd trinity-claw
 
-# 3. Run the installer
+# 4. Unblock the installer (downloaded files are blocked by Windows by default)
+Unblock-File -Path .\install.ps1
+
+# 5. Run the installer
 .\install.ps1
 ```
 
@@ -100,14 +111,19 @@ During installation you will be asked to choose:
 
 ### Manual Install
 
-```bash
+```powershell
 # 1. Clone repository
 git clone https://github.com/TrinityClaw/trinity-claw.git
 cd trinity-claw
 
 # 2. Run installer
-./install.ps1    # Windows
-./install.sh     # Linux/Mac
+# Windows — allow scripts first (once per machine):
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+Unblock-File -Path .\install.ps1
+.\install.ps1
+
+# Linux/Mac:
+# ./install.sh
 
 # 3. Access TrinityClaw
 # Web UI:   http://localhost:8080
@@ -975,4 +991,4 @@ MIT License - see LICENSE file for details.
 ---
 
 **Version**: TrinityClaw v1.3.0
-**Last Updated**: 2026-03-09
+**Last Updated**: 2026-03-14
