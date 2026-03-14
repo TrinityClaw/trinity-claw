@@ -352,8 +352,8 @@ echo "   ━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
-    echo -e "   \033[33m⚠️  First startup downloads qwen3.5:9b (~6.6GB).\033[0m"
-    echo -e "   \033[33m   Monitor: docker logs trinity-claw-ollama-1 -f\033[0m"
+    echo -e "   \033[33m⚠️  qwen3.5:9b (~6.6GB) is downloading in the background.\033[0m"
+    echo -e "   \033[33m   Monitor: docker logs trinity-claw-ollama-init-1 -f\033[0m"
     echo ""
 fi
 
