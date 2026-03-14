@@ -41,7 +41,6 @@ services:
       - OLLAMA_KEEP_ALIVE=5m
     volumes:
       - ollama_data:/root/.ollama
-      - ./agent/ollama-entrypoint.sh:/entrypoint.sh
     deploy:
       resources:
         reservations:
@@ -49,9 +48,26 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [ gpu ]
-    entrypoint: /entrypoint.sh
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
     profiles:
       - local # Only starts with: docker compose --profile local up -d
+
+  ollama-init:
+    image: ollama/ollama:latest
+    restart: "no"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["ollama", "pull", "qwen3.5:9b"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    profiles:
+      - local
 
   web:
     image: nginx:alpine
