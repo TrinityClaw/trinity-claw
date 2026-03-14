@@ -7,17 +7,65 @@ Write-Host "   +======================================================+" -Foregr
 Write-Host ""
 
 # ---------------------------------------------
-# Step 0: Check Docker
+# Step 0: Download repo if not already present
+# ---------------------------------------------
+if (-not (Test-Path "docker-compose.yml")) {
+    $installDir = "$env:USERPROFILE\trinity-claw"
+    Write-Host "   Downloading TrinityClaw to $installDir..." -ForegroundColor Yellow
+    if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir | Out-Null }
+    $zip = "$env:TEMP\trinity-claw.zip"
+    Invoke-WebRequest -Uri "https://github.com/TrinityClaw/trinity-claw/archive/refs/heads/main.zip" -OutFile $zip -UseBasicParsing
+    Expand-Archive -Path $zip -DestinationPath "$env:TEMP\tc-extract" -Force
+    Copy-Item -Path "$env:TEMP\tc-extract\trinity-claw-main\*" -Destination $installDir -Recurse -Force
+    Remove-Item "$env:TEMP\tc-extract" -Recurse -Force
+    Remove-Item $zip -Force
+    Write-Host "   [OK] Files ready at $installDir" -ForegroundColor Green
+    Set-Location $installDir
+}
+
+# ---------------------------------------------
+# Step 0b: Check Docker
 # ---------------------------------------------
 Write-Host "   Checking prerequisites..." -ForegroundColor Yellow
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    Write-Host "   [FAIL] Docker not found. Installing Docker Desktop via winget..." -ForegroundColor Red
-    winget install Docker.DockerDesktop -e --silent
+    Write-Host "   [FAIL] Docker Desktop is not installed." -ForegroundColor Red
     Write-Host ""
-    Write-Host "   [OK] Docker Desktop installed." -ForegroundColor Green
-    Write-Host "   [!]  Please restart your terminal and re-run this script." -ForegroundColor Yellow
-    exit 0
+    Write-Host "   +----------------------------------------------------+" -ForegroundColor Yellow
+    Write-Host "   |  INSTALL DOCKER DESKTOP (it's free)               |" -ForegroundColor Yellow
+    Write-Host "   |                                                    |" -ForegroundColor Yellow
+    Write-Host "   |  1. A browser window is opening now               |" -ForegroundColor Yellow
+    Write-Host "   |  2. Click 'Download for Windows'                  |" -ForegroundColor Yellow
+    Write-Host "   |  3. Run the installer                             |" -ForegroundColor Yellow
+    Write-Host "   |  4. Open Docker Desktop from the Start menu       |" -ForegroundColor Yellow
+    Write-Host "   |  5. Wait for the whale icon in your taskbar       |" -ForegroundColor Yellow
+    Write-Host "   |  6. Re-run this installer                         |" -ForegroundColor Yellow
+    Write-Host "   +----------------------------------------------------+" -ForegroundColor Yellow
+    Start-Process "https://www.docker.com/products/docker-desktop/"
+    Read-Host "`n   Press Enter to exit"
+    exit 1
 }
+
+& docker info 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "   Docker is installed but not running. Starting Docker Desktop..." -ForegroundColor Yellow
+    $dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    if (Test-Path $dockerExe) { Start-Process $dockerExe }
+    Write-Host "   Waiting for Docker to start (up to 90 seconds)..." -ForegroundColor Yellow
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 90) {
+        Start-Sleep -Seconds 3
+        & docker info 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { break }
+    }
+    & docker info 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "   [FAIL] Docker did not start in time." -ForegroundColor Red
+        Write-Host "   Open Docker Desktop manually, wait for the whale icon, then re-run the installer." -ForegroundColor Yellow
+        Read-Host "   Press Enter to exit"
+        exit 1
+    }
+}
+
 Write-Host "   [OK] Docker installed" -ForegroundColor Green
 
 & docker compose version 2>&1 | Out-Null
