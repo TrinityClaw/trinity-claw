@@ -6,21 +6,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TrinityClaw - AI Agent v.1.2</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
         :root {
-            --bg:            #0d0d0d;
-            --surface:       #161616;
-            --surface-2:     #1e1e1e;
-            --surface-3:     #262626;
-            --border:        rgba(255,255,255,0.08);
-            --border-strong: rgba(255,255,255,0.14);
-            --text:          #e8e8e8;
-            --text-muted:    #888;
-            --text-dim:      #555;
+            --bg:            #0a0a10;
+            --surface:       #111118;
+            --surface-2:     #18181f;
+            --surface-3:     #222230;
+            --border:        rgba(255,255,255,0.07);
+            --border-strong: rgba(255,255,255,0.12);
+            --text:          #ededf0;
+            --text-muted:    #7a7a8a;
+            --text-dim:      #4a4a5a;
             --accent:        #10a37f;
-            --accent-dim:    rgba(16,163,127,0.15);
-            --user-bubble:   #1e1e1e;
+            --accent-dim:    rgba(16,163,127,0.14);
+            --user-bubble:   #18181f;
             --red:           #e53e3e;
             --radius-sm:     8px;
             --radius-md:     12px;
@@ -30,8 +30,11 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             background: var(--bg);
+            background-image:
+                radial-gradient(ellipse 90% 55% at 50% -2%, rgba(88, 55, 200, 0.13) 0%, transparent 65%),
+                radial-gradient(ellipse 50% 30% at 80% 90%, rgba(16, 163, 127, 0.06) 0%, transparent 60%);
             color: var(--text);
             height: 100vh;
             display: flex;
@@ -314,9 +317,9 @@
             position: absolute;
             left: 50%;
             transform: translateX(-50%);
-            font-size: 0.95rem;
-            font-weight: 700;
-            letter-spacing: 0.5px;
+            font-size: 1rem;
+            font-weight: 800;
+            letter-spacing: 0.3px;
             color: var(--text);
             pointer-events: none;
             white-space: nowrap;
@@ -427,7 +430,7 @@
         .chat-box {
             flex: 1;
             overflow-y: auto;
-            padding: 28px 16px 160px;
+            padding: 28px calc(max(16px, 50% - 370px)) 170px;
             scroll-behavior: smooth;
         }
         .chat-box::-webkit-scrollbar { width: 5px; }
@@ -522,7 +525,7 @@
             position: absolute;
             bottom: 0;
             width: 100%;
-            padding: 16px 16px 20px;
+            padding: 16px calc(max(16px, 50% - 370px)) 20px;
             background: linear-gradient(to bottom, transparent, var(--bg) 28%);
         }
 
@@ -785,6 +788,68 @@
             white-space: normal;
             word-break: break-word;
         }
+
+        /* ── Welcome screen ── */
+        .welcome-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+            min-height: 340px;
+            padding: 60px 20px 20px;
+            text-align: center;
+            animation: msgIn 0.4s ease;
+        }
+        .welcome-title {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--text);
+            letter-spacing: -0.4px;
+            margin-bottom: 10px;
+            line-height: 1.2;
+        }
+        .welcome-title em {
+            font-style: normal;
+            color: var(--accent);
+        }
+        .welcome-sub {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        /* ── Quick-action buttons ── */
+        .quick-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: center;
+            padding: 10px 0 0;
+        }
+        .quick-actions.hidden { display: none; }
+        .quick-btn {
+            background: var(--surface-2);
+            border: 1px solid var(--border-strong);
+            color: var(--text-muted);
+            border-radius: var(--radius-md);
+            padding: 7px 14px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: background 0.15s, color 0.15s, border-color 0.15s;
+            white-space: nowrap;
+        }
+        .quick-btn:hover {
+            background: var(--surface-3);
+            color: var(--text);
+            border-color: rgba(255,255,255,0.18);
+        }
+        .quick-btn svg { flex-shrink: 0; opacity: 0.7; }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>
@@ -886,7 +951,10 @@ docker compose up --build -d</div>
         </div>
 
         <div class="chat-box" id="chatBox">
-            <div class="status" id="statusText">TrinityClaw Ready</div>
+            <div class="welcome-screen" id="welcomeScreen">
+                <div class="welcome-title">How can I help <em>today</em>?</div>
+                <div class="welcome-sub">Type a message or pick a shortcut below</div>
+            </div>
         </div>
         <div class="input-area">
             <div id="preview-box"></div>
@@ -901,6 +969,24 @@ docker compose up --build -d</div>
                 </button>
                 <button id="sendBtn" onclick="sendMessage()" title="Send message">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                </button>
+            </div>
+            <div class="quick-actions" id="quickActions">
+                <button class="quick-btn" onclick="quickSend('What did we work on recently? Show today\'s journal entry.')">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    Today's journal
+                </button>
+                <button class="quick-btn" onclick="quickSend('List all my current todos and scheduled tasks.')">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                    Tasks & todos
+                </button>
+                <button class="quick-btn" onclick="quickSend('Run a health check and show me agent system status.')">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                    System health
+                </button>
+                <button class="quick-btn" onclick="quickSend('Check my emails — summarize the inbox.')">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                    Check emails
                 </button>
             </div>
         </div>
@@ -1363,10 +1449,29 @@ docker compose up --build -d</div>
             return wrap;
         }
 
+        function _showWelcome() {
+            chatBox.innerHTML = `<div class="welcome-screen" id="welcomeScreen">
+                <div class="welcome-title">How can I help <em>today</em>?</div>
+                <div class="welcome-sub">Type a message or pick a shortcut below</div>
+            </div>`;
+            document.getElementById('quickActions').classList.remove('hidden');
+        }
+
+        function _hideWelcome() {
+            const ws = document.getElementById('welcomeScreen');
+            if (ws) ws.remove();
+            document.getElementById('quickActions').classList.add('hidden');
+        }
+
         function newChat() {
             sessionId = 'sess_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
             localStorage.setItem('trinity_session_id', sessionId);
-            chatBox.innerHTML = '<div class="status">New session started — say hello!</div>';
+            _showWelcome();
+        }
+
+        function quickSend(text) {
+            userInput.value = text;
+            sendMessage();
         }
 
         function addMessage(text, sender, image = null, executionLog = null, docName = null) {
@@ -1433,6 +1538,7 @@ docker compose up --build -d</div>
             if (_abortController) return; // request already in flight
             const message = userInput.value.trim();
             if (!message && !uploadedImageData && !uploadedDocData) return;
+            _hideWelcome();
             addMessage(message, 'user', uploadedImageData, null, uploadedDocName);
             const tempImg = uploadedImageData;
             const tempDoc = uploadedDocData;
