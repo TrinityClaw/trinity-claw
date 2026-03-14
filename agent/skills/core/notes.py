@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 NAME = "notes"
 
@@ -16,12 +16,19 @@ DOC = (
     "list_by_tag(tag)→filter notes by a specific tag; "
     "search(term)→notes matching keyword; "
     "delete(title)→remove note; "
-    "export_all()→JSON dump of all notes."
+    "export_all()→JSON dump of all notes; "
+    "write_daily_entry(summary, learned, user_insights?, next_steps?)→save today's learning journal; "
+    "get_journal(days?)→retrieve last N days of journal entries (default 7); "
+    "get_today()→get today's journal entry; "
+    "update_user_model(insight)→append a new insight about the user to the persistent profile; "
+    "get_user_model()→retrieve all accumulated user insights."
 )
 
 _LOGS_FILE = Path("/app/memory/session_logs.jsonl")
 
 NOTES_FILE = Path("/app/memory/notes.json")
+JOURNAL_FILE = Path("/app/memory/daily_journal.jsonl")
+USER_MODEL_FILE = Path("/app/memory/user_model.json")
 
 def _load_notes():
     """Load notes from file"""
@@ -184,3 +191,137 @@ def search_logs(keyword: str) -> str:
         return json.dumps(matches[-5:], indent=2)
     except Exception as e:
         return f"❌ Error searching logs: {e}"
+
+
+# ── Daily Journal ──────────────────────────────────────────────────────────────
+
+def _load_journal() -> dict:
+    entries = {}
+    if not JOURNAL_FILE.exists():
+        return entries
+    try:
+        for line in JOURNAL_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    e = json.loads(line)
+                    entries[e["date"]] = e
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.error(f"Failed to load journal: {exc}")
+    return entries
+
+
+def _save_journal(entries: dict) -> None:
+    JOURNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(e) for e in sorted(entries.values(), key=lambda x: x["date"])]
+    JOURNAL_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_daily_entry(summary: str, learned: str, user_insights: str = "", next_steps: str = "") -> str:
+    """Save or update today's journal entry. Appends to an existing entry if one exists for today."""
+    try:
+        today = date.today().isoformat()
+        entries = _load_journal()
+        if today in entries:
+            old = entries[today]
+            summary = (old.get("summary", "") + "\n\n[UPDATE] " + summary).strip()
+            learned = (old.get("learned", "") + ("\n" + learned if learned else "")).strip()
+            user_insights = (old.get("user_insights", "") + ("\n" + user_insights if user_insights else "")).strip()
+            next_steps = next_steps or old.get("next_steps", "")
+        entries[today] = {
+            "date": today,
+            "written_at": datetime.now().isoformat(),
+            "summary": summary,
+            "learned": learned,
+            "user_insights": user_insights,
+            "next_steps": next_steps,
+        }
+        _save_journal(entries)
+        return f"✅ Daily entry for {today} saved."
+    except Exception as e:
+        return f"❌ Error writing daily entry: {e}"
+
+
+def get_journal(days: int = 7) -> str:
+    """Return journal entries for the last N days, newest first."""
+    try:
+        days = int(days)
+        cutoff = (date.today() - timedelta(days=days)).isoformat()
+        entries = _load_journal()
+        recent = [e for e in entries.values() if e["date"] >= cutoff]
+        if not recent:
+            return f"No journal entries in the last {days} days."
+        result = []
+        for e in sorted(recent, key=lambda x: x["date"], reverse=True):
+            result.append(f"=== {e['date']} ===")
+            result.append(f"Summary: {e['summary']}")
+            if e.get("learned"):
+                result.append(f"Learned: {e['learned']}")
+            if e.get("user_insights"):
+                result.append(f"User insights: {e['user_insights']}")
+            if e.get("next_steps"):
+                result.append(f"Next steps: {e['next_steps']}")
+            result.append("")
+        return "\n".join(result).strip()
+    except Exception as e:
+        return f"❌ Error reading journal: {e}"
+
+
+def get_today() -> str:
+    """Return today's journal entry, or a message if none exists yet."""
+    try:
+        today = date.today().isoformat()
+        entries = _load_journal()
+        if today not in entries:
+            return f"No entry for today ({today}) yet."
+        e = entries[today]
+        parts = [f"Today ({today}):"]
+        parts.append(f"Summary: {e['summary']}")
+        if e.get("learned"):
+            parts.append(f"Learned: {e['learned']}")
+        if e.get("user_insights"):
+            parts.append(f"User insights: {e['user_insights']}")
+        if e.get("next_steps"):
+            parts.append(f"Next steps: {e['next_steps']}")
+        return "\n".join(parts)
+    except Exception as e:
+        return f"❌ Error reading today's entry: {e}"
+
+
+# ── User Model ─────────────────────────────────────────────────────────────────
+
+def update_user_model(insight: str) -> str:
+    """Append a new insight about the user to the persistent user model."""
+    try:
+        model = {}
+        if USER_MODEL_FILE.exists():
+            model = json.loads(USER_MODEL_FILE.read_text(encoding="utf-8"))
+        model.setdefault("insights", []).append({
+            "date": datetime.now().isoformat()[:10],
+            "insight": insight,
+        })
+        model["last_updated"] = datetime.now().isoformat()
+        USER_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        USER_MODEL_FILE.write_text(json.dumps(model, indent=2), encoding="utf-8")
+        return f"✅ User model updated: {insight[:80]}"
+    except Exception as e:
+        return f"❌ Error updating user model: {e}"
+
+
+def get_user_model() -> str:
+    """Return all accumulated insights about the user (last 30)."""
+    try:
+        if not USER_MODEL_FILE.exists():
+            return "No user model built yet."
+        model = json.loads(USER_MODEL_FILE.read_text(encoding="utf-8"))
+        insights = model.get("insights", [])
+        if not insights:
+            return "No user insights recorded yet."
+        result = [f"User Model ({len(insights)} total insights, showing last 30):"]
+        for item in insights[-30:]:
+            result.append(f"[{item['date']}] {item['insight']}")
+        return "\n".join(result)
+    except Exception as e:
+        return f"❌ Error reading user model: {e}"
