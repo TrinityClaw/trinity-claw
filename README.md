@@ -933,7 +933,7 @@ docker-compose up -d
 | **Google Calendar invalid_grant** | Each code is single-use and expires in 10 min. Call `authorize()` again for a fresh URL |
 | **Google Calendar token expired** | Revoke at myaccount.google.com/permissions, then call `authorize()` again |
 | **Google Calendar Access blocked** | Add your Gmail to Test Users: Google Cloud Console → APIs & Services → OAuth consent screen → Audience → Test users |
-| **Ollama model not pulled / missing** | Mac: run `ollama pull qwen3.5:9b`. Linux: run `docker exec trinity-claw-ollama-1 ollama pull qwen3.5:9b`. On Linux the pull happens inside Docker on first startup (~6.6GB) — check progress with `docker logs trinity-claw-ollama-1 -f` |
+| **Ollama model not pulled / missing** | Mac: run `ollama pull qwen3.5:9b`. Linux: the pull runs automatically in `ollama-init` on first startup (~6.6GB) — check progress with `docker logs trinity-claw-ollama-init-1 -f`. To pull manually: `docker exec trinity-claw-ollama-1 ollama pull qwen3.5:9b` |
 | **Voice not transcribed** | First use downloads Whisper model — wait up to 2 min. Check logs: `docker logs trinity-claw-trinity-agent-1 \| grep -i whisper` |
 | **Image described incorrectly** | Ensure `trinity-vision` in `litellm_config.yaml` points to a vision-capable model, then `docker compose restart litellm` |
 | **Browser skill not working** | Rebuild the container: `docker-compose build --no-cache trinity-agent && docker-compose up -d`. Chromium installs during build. |
