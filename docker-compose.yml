@@ -58,11 +58,13 @@ services:
       - local # Only starts with: docker compose --profile local up -d
 
   ollama-init:
-    image: ollama/ollama:latest
+    image: curlimages/curl:latest
     restart: "no"
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-    entrypoint: ["ollama", "pull", "qwen3.5:9b"]
+    entrypoint: ["curl", "-sf", "-X", "POST",
+                 "http://ollama:11434/api/pull",
+                 "-H", "Content-Type: application/json",
+                 "-d", "{\"name\":\"qwen3.5:9b\",\"stream\":false}",
+                 "--max-time", "0"]
     depends_on:
       ollama:
         condition: service_healthy
