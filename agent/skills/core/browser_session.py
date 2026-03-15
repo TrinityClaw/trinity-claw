@@ -239,16 +239,24 @@ def get_html(tab_index: int = 0, selector: str = "") -> str:
                 pass
 
 
-def click(target: str, tab_index: int = 0) -> str:
+def click(target: str = "", tab_index: int = 0, **kwargs) -> str:
     """Click an element in the browser.
 
     target examples:
       CSS selector  : '[data-testid=tweetButtonInline]'
-      Text match    : 'text=Sign in'
+      Text match    : 'text=Sign in'   ← pass as positional string, NOT as text= keyword arg
       Aria label    : '[aria-label="Tweet"]'
       Role          : 'button:has-text("Post")'
     Take a screenshot() first if you're unsure which selector to use.
     """
+    # Recover gracefully if LLM passes text= or selector= as keyword args
+    if not target:
+        if "text" in kwargs:
+            target = f"text={kwargs['text']}"
+        elif "selector" in kwargs:
+            target = kwargs["selector"]
+        else:
+            return "❌ click() requires a target selector as the first argument."
     pw = None
     try:
         pw, browser = _connect()
