@@ -6,12 +6,19 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 
 ## Twitter / X (x.com)
 
+> **Tab:** Twitter is typically open on tab 0. Do NOT navigate away from `x.com/home` to post —
+> use the compose button in the sidebar instead. If you must navigate, use `https://x.com/compose/post`
+> (NOT `x.com/i/compose` — that URL is invalid and returns a blank page).
+>
+> **Never call `get_html()` without a selector on Twitter** — the page is 3MB+ and will time out.
+> Always scope it: `get_html(selector="[data-testid='primaryColumn']", tab_index=0)`
+
 | Action | Selector |
 |--------|----------|
-| Open compose box | `[data-testid="SideNav_NewTweet_Button"]` |
+| Open compose box (sidebar) | `[data-testid="SideNav_NewTweet_Button"]` |
 | Tweet textarea | `[data-testid="tweetTextarea_0"]` |
-| Post button (home feed inline composer) | `[data-testid="tweetButtonInline"]` |
-| Post button (dedicated compose modal at x.com/compose/post) | `[data-testid="tweetButton"]` |
+| Post button (home feed inline) | `[data-testid="tweetButtonInline"]` |
+| Post button (compose/post page) | `[data-testid="tweetButton"]` |
 | Reply button (on a tweet) | `[data-testid="reply"]` |
 | Like button | `[data-testid="like"]` |
 | Retweet button | `[data-testid="retweet"]` |
@@ -21,24 +28,42 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 | DM reply input | `[data-testid="dmComposerTextInput"]` |
 | DM send button | `[data-testid="dmComposerSendButton"]` |
 
-### Post a Tweet (step-by-step)
+### Post a Tweet (step-by-step) — PREFERRED METHOD
 ```
-1. browser_session.screenshot()                                         — see current state
-2. browser_session.click('[data-testid="SideNav_NewTweet_Button"]')     — open compose
-3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "text") — type content
-4. browser_session.screenshot()                                         — verify before posting
-5. browser_session.click('[data-testid="tweetButtonInline"]')           — post
-6. browser_session.screenshot()                                         — confirm posted
+1. browser_session.goto("https://x.com/home", tab_index=0)             — ensure on home feed
+2. browser_session.screenshot(tab_index=0)                             — confirm home loaded
+3. browser_session.click('[data-testid="SideNav_NewTweet_Button"]', tab_index=0)  — open compose
+4. browser_session.screenshot(tab_index=0)                             — confirm compose opened
+5. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
+6. browser_session.screenshot(tab_index=0)                             — verify text before posting
+7. browser_session.click('[data-testid="tweetButtonInline"]', tab_index=0)  — post
+8. browser_session.screenshot(tab_index=0)                             — confirm posted
+```
+
+### Post a Tweet (alternate — dedicated compose page)
+```
+1. browser_session.goto("https://x.com/compose/post", tab_index=0)    — ✅ correct URL
+2. browser_session.screenshot(tab_index=0)
+3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
+4. browser_session.screenshot(tab_index=0)
+5. browser_session.click('[data-testid="tweetButton"]', tab_index=0)   — note: tweetButton not tweetButtonInline
+6. browser_session.screenshot(tab_index=0)
 ```
 
 ### Reply to a Tweet
 ```
-1. browser_session.goto("https://x.com/user/status/TWEET_ID")
-2. browser_session.click('[data-testid="reply"]')
-3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "reply text")
-4. browser_session.screenshot()
-5. browser_session.click('[data-testid="tweetButtonInline"]')
+1. browser_session.goto("https://x.com/user/status/TWEET_ID", tab_index=0)
+2. browser_session.click('[data-testid="reply"]', tab_index=0)
+3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "reply text", tab_index=0)
+4. browser_session.screenshot(tab_index=0)
+5. browser_session.click('[data-testid="tweetButtonInline"]', tab_index=0)
 ```
+
+### If Twitter selectors fail
+```
+browser_session.get_html(selector="[data-testid='primaryColumn']", tab_index=0)
+```
+Never call `get_html()` without a selector on Twitter — the full page HTML is 3MB+ and will time out.
 
 ---
 
