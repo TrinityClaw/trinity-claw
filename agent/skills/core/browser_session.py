@@ -83,6 +83,7 @@ def _connect():
 
 def _get_page(browser, tab_index: int = 0):
     """Get a specific tab by index from the connected browser."""
+    tab_index = int(tab_index)  # coerce string args from LLM function calling
     contexts = browser.contexts
     if not contexts:
         raise ValueError("No browser contexts found. Open Chrome and visit a page first.")
@@ -358,7 +359,7 @@ def wait_for(selector: str, tab_index: int = 0, timeout_ms: int = 10000) -> str:
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
-        page.locator(selector).first.wait_for(state="visible", timeout=timeout_ms)
+        page.locator(selector).first.wait_for(state="visible", timeout=int(timeout_ms))
         return f"✅ Element is visible: {selector}"
     except Exception as e:
         return f"❌ Element '{selector}' did not appear within {timeout_ms}ms: {e}"
