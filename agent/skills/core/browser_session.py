@@ -165,6 +165,8 @@ def goto(url: str, tab_index: int = 0) -> str:
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
+        if url and not url.startswith(("http://", "https://", "file://", "about:")):
+            url = "https://" + url
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
         return f"✅ Navigated to: {page.url}\nTitle: {page.title()}"
     except Exception as e:
