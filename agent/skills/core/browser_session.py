@@ -300,9 +300,10 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
         el.wait_for(state="visible", timeout=10000)
         el.click()  # focus the element first
         if clear_first:
-            # Works for both input fields and contenteditable divs
-            page.keyboard.press("Control+a")
-            page.keyboard.press("Delete")
+            # Use element-level press so keys go directly to the element,
+            # not the page — page.keyboard.press fires global shortcuts (e.g. Twitter theme toggle)
+            el.press("Control+a")
+            el.press("Delete")
         el.type(text, delay=50)  # 50ms delay simulates human typing
         return f"✅ Typed {len(text)} characters into: {target}"
     except Exception as e:
