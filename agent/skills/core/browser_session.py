@@ -23,7 +23,11 @@ DOC = (
     "new_tab(url?)→open a new tab, optionally navigate to URL; "
     "evaluate(js_code, tab_index?)→run JavaScript and return result; "
     "tweet(text)→POST A TWEET in one step — navigates to x.com, opens compose, types text, clicks Post. "
-    "USE THIS instead of chaining goto+click+type_text+click for Twitter posts."
+    "USE THIS instead of chaining goto+click+type_text+click for Twitter posts; "
+    "like_tweet(tweet_url)→LIKE a tweet — navigates to the tweet URL and clicks Like; "
+    "reply_tweet(tweet_url, text)→REPLY to a tweet — navigates to tweet, clicks Reply, types text, posts; "
+    "follow_user(username)→FOLLOW a Twitter user by username (with or without @). "
+    "Use tweet/like_tweet/reply_tweet/follow_user for ALL Twitter actions — never chain the steps manually."
 )
 
 _SCREENSHOT_DIR = Path("/app/memory/browser_screenshots")
@@ -512,6 +516,115 @@ def tweet(text: str) -> str:
         )
     except Exception as e:
         return f"❌ Could not post tweet: {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def like_tweet(tweet_url: str) -> str:
+    """Like a tweet — complete workflow in one call.
+
+    tweet_url: full URL of the tweet (https://x.com/user/status/ID).
+    Navigates to the tweet and clicks the Like button.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, 0)
+        if not tweet_url.startswith(("http://", "https://")):
+            tweet_url = "https://" + tweet_url
+        page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
+        like_btn = page.locator('[data-testid="like"]').first
+        like_btn.wait_for(state="visible", timeout=10000)
+        like_btn.click()
+        page.wait_for_timeout(1000)
+        return f"✅ Liked tweet: {tweet_url}"
+    except Exception as e:
+        return f"❌ Could not like tweet: {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def reply_tweet(tweet_url: str, text: str) -> str:
+    """Reply to a tweet — complete workflow in one call.
+
+    tweet_url: full URL of the tweet (https://x.com/user/status/ID).
+    text: the reply text to post.
+    Navigates to the tweet, clicks Reply, types the text, and posts.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, 0)
+        if not tweet_url.startswith(("http://", "https://")):
+            tweet_url = "https://" + tweet_url
+        page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
+
+        # Click the reply button
+        reply_btn = page.locator('[data-testid="reply"]').first
+        reply_btn.wait_for(state="visible", timeout=10000)
+        reply_btn.click()
+
+        # Type the reply text
+        textarea = page.locator('[data-testid="tweetTextarea_0"]').first
+        textarea.wait_for(state="visible", timeout=10000)
+        textarea.click()
+        page.wait_for_timeout(400)  # Let focus settle before typing
+        textarea.type(text, delay=50)
+
+        # Post the reply (inline reply box uses tweetButtonInline)
+        post_btn = page.locator('[data-testid="tweetButtonInline"]').first
+        post_btn.wait_for(state="visible", timeout=10000)
+        post_btn.click()
+        page.wait_for_timeout(2000)
+
+        return (
+            f"✅ Reply posted on: {tweet_url}\n"
+            f"Reply ({len(text)} chars): {text[:120]}{'...' if len(text) > 120 else ''}"
+        )
+    except Exception as e:
+        return f"❌ Could not reply to tweet: {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def follow_user(username: str) -> str:
+    """Follow a Twitter/X user — complete workflow in one call.
+
+    username: Twitter handle with or without @ (e.g. 'elonmusk' or '@elonmusk').
+    Navigates to their profile and clicks Follow. Skips if already following.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, 0)
+        username = username.strip().lstrip("@")
+        page.goto(f"https://x.com/{username}", wait_until="domcontentloaded", timeout=30000)
+
+        follow_btn = page.locator('[data-testid="placementTracking"]').first
+        follow_btn.wait_for(state="visible", timeout=10000)
+
+        # Check current state — avoid accidentally unfollowing
+        btn_text = follow_btn.inner_text().strip().lower()
+        if "following" in btn_text or "unfollow" in btn_text:
+            return f"ℹ️ Already following @{username} — no action taken."
+
+        follow_btn.click()
+        page.wait_for_timeout(1000)
+        return f"✅ Now following @{username} (https://x.com/{username})"
+    except Exception as e:
+        return f"❌ Could not follow @{username}: {e}"
     finally:
         if pw:
             try:
