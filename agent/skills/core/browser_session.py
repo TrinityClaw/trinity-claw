@@ -335,7 +335,19 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
                 el.press("Control+a")
                 el.press("Delete")
         el.type(text, delay=50)  # 50ms delay simulates human typing
-        return f"✅ Typed {len(text)} characters into: {target}"
+        # For tweet compose box: tell the agent exactly what to do next so it doesn't stop early
+        next_step = ""
+        if "tweetTextarea" in target:
+            post_btn = (
+                '[data-testid="tweetButton"]'
+                if "compose/post" in page.url
+                else '[data-testid="tweetButtonInline"]'
+            )
+            next_step = (
+                f"\n⚠️ Text entered but NOT posted yet — tweet is still a draft."
+                f"\nMANDATORY next step: click('{post_btn}') to publish."
+            )
+        return f"✅ Typed {len(text)} characters into: {target}{next_step}"
     except Exception as e:
         return f"❌ Could not type into '{target}': {e}"
     finally:
