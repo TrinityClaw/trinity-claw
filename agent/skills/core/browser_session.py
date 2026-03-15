@@ -217,7 +217,7 @@ def get_html(tab_index: int = 0, selector: str = "") -> str:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
         if selector.strip():
-            html = page.locator(selector.strip()).first.inner_html()
+            html = page.locator(selector.strip()).first.inner_html(timeout=20000)
         else:
             html = page.content()
         total = len(html)
@@ -275,13 +275,23 @@ def click(target: str = "", tab_index: int = 0, **kwargs) -> str:
                 pass
 
 
-def type_text(target: str, text: str, clear_first: bool = True, tab_index: int = 0) -> str:
+def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_index: int = 0, **kwargs) -> str:
     """Type text into any field — works for both <input> and contenteditable divs (Twitter, LinkedIn).
 
-    target: CSS selector of the field.
+    target: CSS selector of the field. Must be the first positional argument.
+    text: the string to type. Must be the second positional argument.
     clear_first: if True (default), clears existing content before typing.
     Uses a 50ms per-character delay to simulate natural human typing speed.
     """
+    # Recover gracefully if LLM passes args as keyword arguments
+    if not target:
+        target = kwargs.get("selector", kwargs.get("css_selector", ""))
+    if not text:
+        text = kwargs.get("content", kwargs.get("value", kwargs.get("message", "")))
+    if not target:
+        return "❌ type_text() requires a target CSS selector as the first argument."
+    if not text:
+        return "❌ type_text() requires the text to type as the second argument."
     pw = None
     try:
         pw, browser = _connect()
