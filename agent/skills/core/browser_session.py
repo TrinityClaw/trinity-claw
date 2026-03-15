@@ -259,6 +259,13 @@ def click(target: str = "", tab_index: int = 0, **kwargs) -> str:
             target = kwargs["selector"]
         else:
             return "❌ click() requires a target selector as the first argument."
+    # Guard: reject bare integers — LLM sometimes passes tab index as target by mistake
+    if str(target).strip().lstrip("-").isdigit():
+        return (
+            f"❌ click() target '{target}' is a number, not a CSS selector. "
+            f"Provide a CSS selector like '[data-testid=\"SideNav_NewTweet_Button\"]'. "
+            f"To target a specific tab, use the tab_index parameter instead."
+        )
     pw = None
     try:
         pw, browser = _connect()
@@ -302,10 +309,24 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
         el.wait_for(state="visible", timeout=10000)
         el.click()  # focus the element first
         if clear_first:
-            # Use element-level press so keys go directly to the element,
-            # not the page — page.keyboard.press fires global shortcuts (e.g. Twitter theme toggle)
-            el.press("Control+a")
-            el.press("Delete")
+            # Use JavaScript editing commands — keyboard events (even element-level) still bubble
+            # up to document/window and trigger page shortcuts (e.g. Twitter theme toggle on Ctrl+A).
+            # execCommand('selectAll') + execCommand('delete') are editing commands, not keyboard events.
+            try:
+                el.evaluate("""(el) => {
+                    el.focus();
+                    if (el.isContentEditable) {
+                        document.execCommand('selectAll', false, null);
+                        document.execCommand('delete', false, null);
+                    } else {
+                        el.setRangeText('', 0, (el.value || '').length, 'end');
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                }""")
+            except Exception:
+                # Fallback if JS clear fails
+                el.press("Control+a")
+                el.press("Delete")
         el.type(text, delay=50)  # 50ms delay simulates human typing
         return f"✅ Typed {len(text)} characters into: {target}"
     except Exception as e:
