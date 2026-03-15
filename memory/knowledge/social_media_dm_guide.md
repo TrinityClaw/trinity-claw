@@ -15,9 +15,9 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 
 ## General Rules (Apply to All Platforms)
 
-1. **Always screenshot first.** Before touching any inbox, take a screenshot to confirm the right page is open.
+1. **Verify the page first.** Before touching any inbox, call `get_text()` to confirm the right page is open and read the current content.
 2. **Read before replying.** Use `get_text()` or `get_html()` to fully read the message thread before composing a response.
-3. **Screenshot before sending.** Always show or verify the drafted reply before clicking Send.
+3. **Verify before sending.** Always call `get_text()` on the current page to confirm your reply is typed correctly before clicking Send.
 4. **One message at a time.** Never batch-reply to multiple conversations in a single flow. Handle one thread completely, then move to the next.
 5. **When in doubt, escalate.** If a message is ambiguous, sensitive, urgent, or involves money/contracts — do NOT reply. Flag it to the user instead.
 6. **Log all sent replies.** After each reply is confirmed sent, call `notes.write("dm_log", ...)` with the platform, username, timestamp, and a short summary of the reply.
@@ -292,8 +292,8 @@ are more stable than class names.
 ```
 1. browser_session.click('[data-qa="search-input"]')
 2. browser_session.type_text('[data-qa="search-input"]', "Contact Name")
-3. browser_session.screenshot()
-   → See filtered results
+3. browser_session.get_text()
+   → Read filtered results to confirm correct contact
 4. browser_session.click('[data-qa="conversation-item"]:first-child')
    → Open their conversation
 ```
