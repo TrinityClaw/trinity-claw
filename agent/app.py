@@ -1292,6 +1292,31 @@ def execute_skill_tags(response_text: str, auto_verify: bool = True, search_budg
                         pass
                 args, kwargs = parse_skill_args(content, max_positional=_max_pos)
 
+                # Resolve positional/kwarg conflicts: if a plain positional arg lands on
+                # a param slot already filled by a named kwarg, reassign it to the next
+                # uncovered param instead. Prevents "got multiple values for argument X".
+                if args and kwargs and callable(_func):
+                    try:
+                        import inspect as _insp2
+                        _pnames = [
+                            p.name for p in _insp2.signature(_func).parameters.values()
+                            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+                        ]
+                        _used = set(kwargs.keys())
+                        _new_kw = dict(kwargs)
+                        _pi = 0
+                        for _a in args:
+                            while _pi < len(_pnames) and _pnames[_pi] in _used:
+                                _pi += 1
+                            if _pi < len(_pnames):
+                                _new_kw[_pnames[_pi]] = _a
+                                _used.add(_pnames[_pi])
+                                _pi += 1
+                        args = []
+                        kwargs = _new_kw
+                    except Exception:
+                        pass  # keep original args/kwargs if introspection fails
+
             # Execute the skill
             result = call_skill_improved(skill_name, func_name, *args, **kwargs)
 
