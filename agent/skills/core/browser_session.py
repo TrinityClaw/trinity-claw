@@ -83,7 +83,11 @@ def _connect():
 
 def _get_page(browser, tab_index: int = 0):
     """Get a specific tab by index from the connected browser."""
-    tab_index = int(tab_index)  # coerce string args from LLM function calling
+    # Coerce tab_index — LLM sometimes passes 'False'/'True'/'None' instead of 0
+    if isinstance(tab_index, str):
+        tab_index = 0 if tab_index.strip().lower() in ("false", "true", "none", "") else int(tab_index)
+    else:
+        tab_index = int(tab_index)
     contexts = browser.contexts
     if not contexts:
         raise ValueError("No browser contexts found. Open Chrome and visit a page first.")
@@ -301,6 +305,9 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
         return "❌ type_text() requires a target CSS selector as the first argument."
     if not text:
         return "❌ type_text() requires the text to type as the second argument."
+    # Coerce clear_first — LLM sometimes passes the string 'False' which is truthy
+    if isinstance(clear_first, str):
+        clear_first = clear_first.strip().lower() not in ("false", "0", "no")
     pw = None
     try:
         pw, browser = _connect()
