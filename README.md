@@ -45,6 +45,7 @@ This project follows responsible AI agent design practices, but **no system is u
 - **Dynamic Skills**: Core system skills + user-created skills
 - **Web Browsing**: Fetch and analyze web content, including JS-rendered pages
 - **Browser Automation**: Full Playwright-powered browser control — navigate, click, type, screenshot, evaluate JS, fill forms
+- **Live Browser Session**: Attach to your existing logged-in Chrome via CDP — post to Twitter/X, LinkedIn, Instagram, and any platform directly from the agent using your real sessions, no API keys required
 - **Scheduler**: Run automated tasks
 - **Telegram Integration**: Chat with your agent via text, voice messages, and photos
 - **Google Calendar**: Read, create, update, and delete calendar events — just ask naturally
@@ -82,29 +83,23 @@ This project follows responsible AI agent design practices, but **no system is u
 4. Open **Docker Desktop** from the Start menu
 5. Wait for the **whale 🐳 icon** to appear in your taskbar — Docker is ready when you see it
 
-**Step 2 — Download `setup.bat`**
+**Step 2 — Run the installer**
 
-1. Open this link in your browser:
-   ```
-   https://github.com/TrinityClaw/trinity-claw/raw/main/setup.bat
-   ```
-2. The browser will prompt you to save a file — click **Save** (or **Keep** if Chrome warns you)
-3. Make sure the filename is **`setup.bat`** — not `setup.bat.txt`. If your browser adds `.txt`, rename the file after downloading.
+Press **Win + R**, paste the command below, and hit **Enter**:
 
-**Step 3 — Run the installer**
+```
+powershell -Command "irm https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.ps1 | iex"
+```
 
-1. Find `setup.bat` in your Downloads folder
-2. **Double-click** it
-3. If Windows shows a **"Windows protected your PC"** SmartScreen warning:
-   - Click **More info**
-   - Click **Run anyway**
-   - This warning appears for all downloaded scripts — it is normal
-4. A terminal window opens and walks you through setup automatically:
-   - If Docker isn't running yet, `setup.bat` starts it and waits
-   - If Docker isn't installed, it opens the download page for you
-   - Downloads the full TrinityClaw repo (no Git needed)
-   - Launches the installer wizard — choose **cloud** or **local** model
-5. At the end, your **Agent API Key** is printed — copy it and paste it in the Web UI under **Settings ⚙️ → Agent Security**
+> No admin required. No Git required. No file to download.
+
+A terminal window opens and walks you through setup automatically:
+- If Docker isn't running yet, the installer starts it and waits
+- If Docker isn't installed, it opens the download page for you
+- Downloads the full TrinityClaw repo automatically
+- Launches the installer wizard — choose **cloud** or **local** model
+
+At the end, your **Agent API Key** is printed — copy it and paste it in the Web UI under **Settings ⚙️ → Agent Security**.
 
 > After install, TrinityClaw starts automatically every time Windows boots. A **"Start TrinityClaw"** shortcut is placed on your Desktop for manual restarts.
 
@@ -348,6 +343,84 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 | `google_drive` | Google Drive file management — list, search, upload, download, create folders, delete. Uses same `gcal_credentials.json` as Calendar. | `authorize`, `list_files`, `search_files`, `get_file_info`, `create_folder`, `upload_file`, `upload_to_folder`, `download_file`, `delete_file`, `status` |
 | `meeting_notes` | Extract structured information from meeting transcripts or documents (PDF, DOCX, TXT, MD, or raw text). Uses LLM to produce summary, decisions, action items, attendees, and topics. | `extract`, `save_meeting` |
 | `youtube` | YouTube Data API — search videos and channels with view/subscriber metrics. Supports both OAuth and simple API key auth. | `authorize`, `activate`, `status`, `search_videos`, `search_channels` |
+
+---
+
+## Live Browser Session
+
+The `browser_session` dynamic skill lets the agent attach to your **existing logged-in Chrome** via Chrome DevTools Protocol (CDP). Unlike the `web` skill which launches a fresh private browser with no sessions, `browser_session` sees everything you're logged into — Twitter/X, LinkedIn, Instagram, WordPress, and any other platform — and can interact with it exactly like a human would.
+
+### One-Time Setup
+
+**1. Create a Chrome shortcut.** Right-click Desktop → New → Shortcut → paste this as the target, name it `ChromeTrinity`:
+
+```
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\ChromeDebug"
+```
+
+`--user-data-dir` is required — it forces Chrome to start as a fully independent process. Without it, Chrome hands off to any existing instance and the debug flag is ignored.
+
+> Before launching: close all Chrome windows and kill any `chrome.exe` in Task Manager → Details tab.
+
+**2. Create the port proxy** — run this once in CMD **as Administrator** (survives reboots):
+
+```
+netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=9223 connectaddress=127.0.0.1 connectport=9222
+```
+
+Chrome on Windows only binds its debug port to `127.0.0.1` (loopback). Docker containers can't reach loopback directly, so this proxy bridges port 9223 on all interfaces to Chrome's port 9222. Verify:
+
+```
+netstat -an | findstr 9223
+```
+
+You should see `TCP 0.0.0.0:9223 LISTENING`. This rule persists across reboots — you only need to run it once.
+
+**3. Launch ChromeTrinity** and verify Chrome is listening:
+
+```
+netstat -an | findstr 9222
+```
+
+You should see `TCP 127.0.0.1:9222 LISTENING`.
+
+**4. Log in once** to Twitter, LinkedIn, Instagram, etc. in this ChromeDebug profile. Sessions are saved in `C:\ChromeDebug` and persist forever.
+
+> Your normal Chrome and ChromeTrinity run simultaneously with no conflicts.
+
+> **Linux users:** The portproxy is Windows-only. On Linux, launch Chrome with `--remote-debugging-address=0.0.0.0` (Linux Chrome honours this flag) and set `BROWSER_CDP_URL=http://172.17.0.1:9222` in `.env`.
+
+### Available Functions
+
+| Function | Description |
+|----------|-------------|
+| `list_tabs()` | List all open tabs with index, title, and URL |
+| `screenshot(tab_index?)` | Capture current tab — saved to `/app/memory/browser_screenshots/` |
+| `goto(url, tab_index?)` | Navigate to a URL |
+| `get_text(tab_index?)` | Extract visible page text (up to 5000 chars) |
+| `get_html(tab_index?, selector?)` | Get full HTML or a specific element's HTML |
+| `click(target, tab_index?)` | Click by CSS selector, `text=Foo`, or `[aria-label="Bar"]` |
+| `type_text(target, text, clear_first?, tab_index?)` | Type into any field — works on `<input>` and `contenteditable` divs (Twitter, LinkedIn) |
+| `scroll(direction, tab_index?)` | Scroll: `up` / `down` / `top` / `bottom` |
+| `press_key(key, tab_index?)` | Press keyboard key: `Enter`, `Escape`, `Control+Enter`, etc. |
+| `wait_for(selector, tab_index?, timeout_ms?)` | Wait for an element before the next action |
+| `new_tab(url?)` | Open a new tab, optionally navigate to URL |
+| `evaluate(js_code, tab_index?)` | Run JavaScript and return the result |
+
+### Example — Posting a Tweet
+
+```
+browser_session.screenshot()
+browser_session.goto("https://x.com")
+browser_session.click('[data-testid="SideNav_NewTweet_Button"]')
+browser_session.type_text('[data-testid="tweetTextarea_0"]', "Your content here")
+browser_session.screenshot()   ← verify before posting
+browser_session.click('[data-testid="tweetButtonInline"]')
+```
+
+### What This Replaces
+
+Instead of building separate Twitter API, LinkedIn API, and Instagram API integrations — each requiring OAuth app approval, developer accounts, and rate limits — the agent uses your real browser session on every platform simultaneously. Any site you can use in a browser, the agent can use too.
 
 ---
 
@@ -841,8 +914,8 @@ curl -X POST http://localhost:8001/skill/call \
 ```
 trinity-claw/
 ├── docker-compose.yml          # Docker orchestration
-├── setup.bat                   # Windows installer (double-click, no Git/admin needed)
-├── install.ps1                 # Windows installer core (called by setup.bat)
+├── setup.bat                   # Windows installer alternative (double-click, from GitHub Releases)
+├── install.ps1                 # Windows installer (run via Win+R one-liner or setup.bat)
 ├── install.sh                  # Linux/Mac installer
 ├── .env                        # Secrets (not in git)
 ├── .env.example                # Secrets template
