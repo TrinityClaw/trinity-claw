@@ -244,6 +244,12 @@ then scan for `aria-label` attributes to find the current correct selectors.
 > - Use `gmail` skill (OAuth) for: searching, summarizing, bulk reading, draft-approval flows, IMAP access
 > - Use `browser_session` Gmail below for: visually reading and replying inside your open Gmail tab,
 >   exactly as you would yourself — no API setup required beyond being logged in
+>
+> **CRITICAL — Do NOT fall back to email_sender or SMTP:**
+> If the user asks to send an email via the browser tab, use ONLY `browser_session`.
+> If a selector fails, try the fallback selectors listed below or call `get_html` to discover the current DOM.
+> Never silently switch to `email_sender.send()` — that bypasses the browser entirely.
+> If `browser_session` fails after trying all fallbacks, stop and report the error to the user.
 
 ### Selectors
 
