@@ -87,13 +87,18 @@ Run `browser_session.get_html(selector="section")` and look for `aria-label` att
 |--------|----------|
 | Go to inbox | `browser_session.goto("https://mail.google.com/mail/u/0/#inbox")` |
 | First unread email row | `tr.zA.zE` |
-| Reply button (inside email) | `[aria-label="Reply"]` or `[data-tooltip="Reply"]` |
-| Reply compose area | `div[aria-label="Message Body"][contenteditable="true"]` |
-| Send button | `[data-tooltip="Send"]` or `[aria-label="Send"]` |
-| Search bar | `input[aria-label="Search mail"]` |
-| Compose new | `[aria-label="Compose"]` or `[gh="cm"]` |
-| To field (new email) | `[aria-label="To recipients"]` |
-| Subject field (new email) | `[aria-label="Subject"]` |
+| Reply button (inside email) | `[data-tooltip^="Odg"]` (Serbian) or `[data-tooltip="Reply"]` (English) — use `get_html` to confirm |
+| Reply compose area | `div[contenteditable="true"][aria-label]` — or just `div[contenteditable="true"]` inside reply panel |
+| Send button | `[data-tooltip^="Pošalji"]` (Serbian) or `[data-tooltip="Send"]` (English) — or `[jsaction*="send"]` |
+| Search bar | `input[name="q"]` — language-independent |
+| **Compose new (use this)** | `[gh="cm"]` — language-independent internal Gmail attribute |
+| To field (new email) | `[name="to"]` — language-independent |
+| Subject field (new email) | `[name="subjectbox"]` — language-independent |
+| Body (new compose) | `div[contenteditable="true"][aria-multiline="true"]` or `div[g_editable="true"]` |
+
+> **Non-English Gmail:** If Gmail is in Serbian (or any non-English language), `aria-label` values are
+> translated and text selectors will fail. Always prefer `[gh]`, `[name]`, `[data-testid]`, or
+> `[jsaction]` attributes — they are language-independent. Run `get_html(selector="[gh='cm']")` to verify.
 
 ### Multiple Gmail accounts
 - Account 1: `https://mail.google.com/mail/u/0/`
@@ -103,12 +108,23 @@ Run `browser_session.get_html(selector="section")` and look for `aria-label` att
 ### Reply to an email (quick reference)
 ```
 1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
-2. browser_session.click('tr.zA.zE')                                             — open first unread
-3. browser_session.get_text()                                                    — read email
-4. browser_session.click('[aria-label="Reply"]')                                 — open reply panel
-5. browser_session.type_text('div[aria-label="Message Body"][contenteditable="true"]', "reply text")
-6. browser_session.screenshot()                                                  — verify before send
-7. browser_session.click('[data-tooltip="Send"]')                                — send
+2. browser_session.click('tr.zA.zE')                                                    — open first unread
+3. browser_session.get_text()                                                           — read email
+4. browser_session.click('[data-tooltip^="Odg"]')                                      — reply (Serbian UI)
+   Fallback: browser_session.click('[jsaction*="reply"]')                              — language-independent
+5. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "reply text")
+6. browser_session.screenshot()                                                         — verify before send
+7. browser_session.press_key("Control+Enter")                                           — send (universal)
+```
+
+### Compose a new email (quick reference)
+```
+1. browser_session.click('[gh="cm"]')                                                   — compose (language-independent)
+2. browser_session.type_text('[name="to"]', "email@example.com")                        — recipient
+3. browser_session.type_text('[name="subjectbox"]', "Subject here")                     — subject
+4. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Body here")
+5. browser_session.screenshot()                                                         — verify
+6. browser_session.press_key("Control+Enter")                                           — send
 ```
 
 ### If Gmail selectors fail

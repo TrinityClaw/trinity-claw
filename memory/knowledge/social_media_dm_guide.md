@@ -247,20 +247,24 @@ then scan for `aria-label` attributes to find the current correct selectors.
 
 ### Selectors
 
+> **Language note:** This Gmail account uses the Serbian interface (`Примљено` = Inbox).
+> `aria-label` and `data-tooltip` values are translated — do NOT use English text in selectors.
+> Always prefer the language-independent selectors listed below (`[gh]`, `[name]`, `[jsaction]`).
+
 | Action | Selector |
 |--------|----------|
-| Inbox (primary tab) | `[data-tooltip="Inbox"]` or `browser_session.goto("https://mail.google.com/mail/u/0/#inbox")` |
-| First unread email row | `tr.zA.zE` (unread rows have class `zE`; read rows have `zO`) |
-| Open an email | Click the email row — `tr.zA.zE` |
-| Email subject / body content | `get_text()` after opening — Gmail renders full body as visible text |
-| Reply button (inside open email) | `[data-tooltip="Reply"]` or `[aria-label="Reply"]` |
-| Reply compose area | `[aria-label="Message Body"]` or `div[contenteditable="true"]` inside the reply panel |
-| Send button (in reply) | `[data-tooltip="Send"]` or `[aria-label="Send"]` |
-| Search inbox | `input[aria-label="Search mail"]` |
-| Compose new email | `[aria-label="Compose"]` or `[gh="cm"]` |
-| To field (new compose) | `[aria-label="To recipients"]` |
-| Subject field (new compose) | `[aria-label="Subject"]` |
-| Body (new compose) | `div[aria-label="Message Body"][contenteditable="true"]` |
+| Inbox (primary tab) | `browser_session.goto("https://mail.google.com/mail/u/0/#inbox")` |
+| First unread email row | `tr.zA.zE` (unread = class `zE`; read = class `zO`) — class-based, language-safe |
+| Open an email | `browser_session.click('tr.zA.zE')` |
+| Email subject / body content | `get_text()` after opening |
+| Reply button (inside open email) | `[data-tooltip^="Odg"]` — Serbian prefix; fallback: `[jsaction*="reply"]` |
+| Reply compose area | `div[contenteditable="true"][aria-multiline="true"]` or `div[g_editable="true"]` |
+| Send button (in reply) | `[jsaction*="send"]` or `[data-tooltip^="Pošalji"]` |
+| Search inbox | `input[name="q"]` — language-independent |
+| **Compose new email** | `[gh="cm"]` — language-independent, always works |
+| To field (new compose) | `[name="to"]` — language-independent |
+| Subject field (new compose) | `[name="subjectbox"]` — language-independent |
+| Body (new compose) | `div[contenteditable="true"][aria-multiline="true"]` |
 
 ### Step-by-Step: Read & Reply to an Email
 
@@ -288,17 +292,19 @@ then scan for `aria-label` attributes to find the current correct selectors.
 
 8. (Compose reply using tone guidelines — see below)
 
-9. browser_session.click('[aria-label="Reply"]')
-   → Open the inline reply panel
+9. browser_session.click('[data-tooltip^="Odg"]')
+   → Open the inline reply panel (Serbian "Odgovori" = Reply)
+   → Fallback if that fails: browser_session.get_html(selector="[jsaction*='reply']") to find the button
 
-10. browser_session.click('div[aria-label="Message Body"][contenteditable="true"]')
-11. browser_session.type_text('div[aria-label="Message Body"][contenteditable="true"]', "Your reply here")
+10. browser_session.click('div[contenteditable="true"][aria-multiline="true"]')
+11. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Your reply here")
 
 12. browser_session.screenshot()
     → VERIFY the reply text and recipient before sending
 
-13. browser_session.click('[data-tooltip="Send"]')
-    → Send the reply
+13. browser_session.click('[jsaction*="send"]')
+    → Send the reply (language-independent)
+    → Fallback: browser_session.press_key("Control+Enter")
 
 14. browser_session.screenshot()
     → Confirm sent (Gmail briefly shows "Message sent" toast)
@@ -310,21 +316,22 @@ then scan for `aria-label` attributes to find the current correct selectors.
 
 ```
 1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
-2. browser_session.click('[aria-label="Compose"]')
-   → Opens compose modal in bottom-right
+2. browser_session.click('[gh="cm"]')
+   → Opens compose modal (language-independent)
 
-3. browser_session.type_text('[aria-label="To recipients"]', "recipient@email.com")
+3. browser_session.type_text('[name="to"]', "recipient@email.com")
 4. browser_session.press_key("Tab")
    → Move to subject
 
-5. browser_session.type_text('[aria-label="Subject"]', "Subject line here")
-6. browser_session.click('div[aria-label="Message Body"][contenteditable="true"]')
-7. browser_session.type_text('div[aria-label="Message Body"][contenteditable="true"]', "Email body here")
+5. browser_session.type_text('[name="subjectbox"]', "Subject line here")
+6. browser_session.click('div[contenteditable="true"][aria-multiline="true"]')
+7. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Email body here")
 
 8. browser_session.screenshot()
    → VERIFY everything before sending
 
-9. browser_session.click('[data-tooltip="Send"]')
+9. browser_session.press_key("Control+Enter")
+   → Send (works in any language — keyboard shortcut is universal)
 10. browser_session.screenshot()
     → Confirm sent
 ```
