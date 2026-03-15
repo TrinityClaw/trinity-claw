@@ -28,21 +28,21 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 | DM reply input | `[data-testid="dmComposerTextInput"]` |
 | DM send button | `[data-testid="dmComposerSendButton"]` |
 
-### Post a Tweet (step-by-step) — PREFERRED METHOD
+### Post a Tweet — PREFERRED METHOD (single call)
+```
+browser_session.tweet("your tweet text here")
+```
+This single function handles the complete workflow internally: navigate → compose → type → post.
+ALWAYS use browser_session.tweet() for posting. Never chain goto+click+type_text+click manually.
+
+### Post a Tweet (manual fallback — only if tweet() fails)
 ```
 1. browser_session.goto("https://x.com/home", tab_index=0)
 2. browser_session.click('[data-testid="SideNav_NewTweet_Button"]', tab_index=0)
    → URL becomes https://x.com/compose/post after this click
 3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
 4. browser_session.click('[data-testid="tweetButton"]', tab_index=0)
-   → IMPORTANT: use tweetButton (NOT tweetButtonInline) — URL is x.com/compose/post at this point
-```
-
-### Post a Tweet (alternate — go directly to compose page)
-```
-1. browser_session.goto("https://x.com/compose/post", tab_index=0)
-2. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
-3. browser_session.click('[data-testid="tweetButton"]', tab_index=0)
+   → use tweetButton (NOT tweetButtonInline) on compose/post page
 ```
 
 ### Reply to a Tweet
