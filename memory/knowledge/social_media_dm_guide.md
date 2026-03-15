@@ -42,6 +42,54 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 
 ---
 
+## Twitter / X — Public Engagement (Likes, Replies, Follows, Posts)
+
+> **Use single-call functions — never chain steps manually.**
+> These functions handle the full workflow internally and are reliable with small LLMs.
+
+| Action | Skill call |
+|--------|-----------|
+| Post a new tweet | `browser_session.tweet("tweet text")` |
+| Like a tweet | `browser_session.like_tweet("https://x.com/user/status/ID")` |
+| Reply to a tweet | `browser_session.reply_tweet("https://x.com/user/status/ID", "reply text")` |
+| Follow a user | `browser_session.follow_user("username")` |
+
+### When to Like
+- User explicitly asks, or content is directly relevant to their niche
+- A follower or supporter posted something worth acknowledging
+- **Never:** controversial/political tweets, bot accounts, competitor content
+
+### When to Reply
+- User explicitly asks, or someone mentioned/tagged TrinityClaw
+- A question can be answered helpfully and accurately
+- **Rules:** Keep replies short (1–2 sentences). Add something specific — never "Great post!" or "Love this!" (looks like bot spam). Match the tone of the original tweet.
+- **Never:** argue, self-promote unsolicited, engage with political/sensitive content
+
+### When to Follow
+- User explicitly asks, or someone followed TrinityClaw and their content is relevant
+- After a meaningful interaction (reply, mention, retweet from a real person)
+- **Rules:** Never mass-follow. Never unfollow unless explicitly asked — `follow_user()` only follows, it never unfollows.
+
+### Read a Thread Before Replying
+```
+1. browser_session.goto("tweet_url")
+2. browser_session.get_text()
+3. browser_session.reply_tweet("tweet_url", "reply text")
+```
+
+### Like + Reply to the Same Tweet
+```
+1. browser_session.like_tweet("tweet_url")
+2. browser_session.reply_tweet("tweet_url", "reply text")
+```
+
+### Hard Rules
+- Never post, like, follow, or reply **autonomously** — always confirm intent with user first
+- Never engage with political, religious, or controversial content — flag to user instead
+- Never generate tweet content the user didn't write or approve without being explicitly asked
+
+---
+
 ## Twitter / X — DM Workflow
 
 ### Selectors
