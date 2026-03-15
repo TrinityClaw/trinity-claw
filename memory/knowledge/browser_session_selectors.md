@@ -32,15 +32,17 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 ```
 1. browser_session.goto("https://x.com/home", tab_index=0)
 2. browser_session.click('[data-testid="SideNav_NewTweet_Button"]', tab_index=0)
+   → URL becomes https://x.com/compose/post after this click
 3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
-4. browser_session.click('[data-testid="tweetButtonInline"]', tab_index=0)
+4. browser_session.click('[data-testid="tweetButton"]', tab_index=0)
+   → IMPORTANT: use tweetButton (NOT tweetButtonInline) — URL is x.com/compose/post at this point
 ```
 
-### Post a Tweet (alternate — dedicated compose page)
+### Post a Tweet (alternate — go directly to compose page)
 ```
 1. browser_session.goto("https://x.com/compose/post", tab_index=0)
 2. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
-3. browser_session.click('[data-testid="tweetButton"]', tab_index=0)   — note: tweetButton not tweetButtonInline
+3. browser_session.click('[data-testid="tweetButton"]', tab_index=0)
 ```
 
 ### Reply to a Tweet
