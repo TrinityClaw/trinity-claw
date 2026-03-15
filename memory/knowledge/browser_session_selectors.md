@@ -16,7 +16,10 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 | Like button | `[data-testid="like"]` |
 | Retweet button | `[data-testid="retweet"]` |
 | Follow button (on profile) | `[data-testid="placementTracking"]` |
-| DM / Messages | `[data-testid="AppTabBar_DirectMessage_Link"]` |
+| DM / Messages (nav) | `[data-testid="AppTabBar_DirectMessage_Link"]` |
+| DM conversation (first) | `[data-testid="conversation"]` |
+| DM reply input | `[data-testid="dmComposerTextInput"]` |
+| DM send button | `[data-testid="dmComposerSendButton"]` |
 
 ### Post a Tweet (step-by-step)
 ```
@@ -46,6 +49,12 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 | Start a post | `button.share-box-feed-entry__trigger` or `[data-control-name="share.sharebox_trigger"]` |
 | Post text area | `.ql-editor[contenteditable="true"]` |
 | Post button | `button.share-actions__primary-action` |
+| Open DM inbox | `browser_session.goto("https://www.linkedin.com/messaging/")` |
+| Conversation list | `.msg-conversations-container__conversations-list` |
+| First unread conversation | `.msg-conversation-listitem__link` |
+| Message thread content | `.msg-s-message-list__event` |
+| DM reply input | `.msg-form__contenteditable[contenteditable="true"]` |
+| DM send button | `.msg-form__send-button` — or `press_key("Control+Enter")` |
 
 ### If LinkedIn selectors fail
 LinkedIn updates their DOM frequently. Run `browser_session.get_html(selector="main")` to inspect current structure, then identify the correct selector.
@@ -56,8 +65,99 @@ LinkedIn updates their DOM frequently. Run `browser_session.get_html(selector="m
 
 | Action | Selector / Method |
 |--------|------------------|
-| New post | Click `+` icon in nav or use `browser_session.click('[aria-label="New post"]')` |
+| New post | `browser_session.click('[aria-label="New post"]')` |
 | Caption field | `textarea[aria-label="Write a caption..."]` |
+| Open DM inbox | `browser_session.goto("https://www.instagram.com/direct/inbox/")` |
+| Conversation list item | `[role="listbox"] > div` (first = most recent) |
+| DM reply input | `[aria-label="Message..."]` or `[placeholder="Message..."]` |
+| DM send | `press_key("Enter")` |
+
+### If Instagram selectors fail
+Run `browser_session.get_html(selector="section")` and look for `aria-label` attributes.
+
+---
+
+## Gmail (mail.google.com)
+
+> **Note:** The `gmail` OAuth skill is preferred for search/summarize/bulk tasks.
+> Use `browser_session` for Gmail when you need to work inside the user's open tab visually.
+> For full workflows see `social_media_dm_guide.md`.
+
+| Action | Selector |
+|--------|----------|
+| Go to inbox | `browser_session.goto("https://mail.google.com/mail/u/0/#inbox")` |
+| First unread email row | `tr.zA.zE` |
+| Reply button (inside email) | `[aria-label="Reply"]` or `[data-tooltip="Reply"]` |
+| Reply compose area | `div[aria-label="Message Body"][contenteditable="true"]` |
+| Send button | `[data-tooltip="Send"]` or `[aria-label="Send"]` |
+| Search bar | `input[aria-label="Search mail"]` |
+| Compose new | `[aria-label="Compose"]` or `[gh="cm"]` |
+| To field (new email) | `[aria-label="To recipients"]` |
+| Subject field (new email) | `[aria-label="Subject"]` |
+
+### Multiple Gmail accounts
+- Account 1: `https://mail.google.com/mail/u/0/`
+- Account 2: `https://mail.google.com/mail/u/1/`
+- Account 3: `https://mail.google.com/mail/u/2/`
+
+### Reply to an email (quick reference)
+```
+1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
+2. browser_session.click('tr.zA.zE')                                             — open first unread
+3. browser_session.get_text()                                                    — read email
+4. browser_session.click('[aria-label="Reply"]')                                 — open reply panel
+5. browser_session.type_text('div[aria-label="Message Body"][contenteditable="true"]', "reply text")
+6. browser_session.screenshot()                                                  — verify before send
+7. browser_session.click('[data-tooltip="Send"]')                                — send
+```
+
+### If Gmail selectors fail
+Gmail uses obfuscated class names. Prefer `aria-label` and `data-tooltip` — they are stable.
+Run `browser_session.get_html(selector="[role='main']")` to inspect current DOM.
+
+---
+
+## Viber (web.viber.com)
+
+> **Requirement:** Viber desktop app must be installed and paired with your phone.
+> Viber Web at `https://web.viber.com` mirrors your account — like WhatsApp Web.
+> Must be logged in via QR code scan first. After that, stays connected while desktop app is running.
+
+| Action | Selector |
+|--------|----------|
+| Go to Viber Web | `browser_session.goto("https://web.viber.com")` |
+| Conversation list | `[data-qa="conversation-list"]` or `.conversation-list` |
+| First conversation item | `[data-qa="conversation-item"]:first-child` or `.conversation-item` |
+| Search conversations | `[data-qa="search-input"]` or `input[placeholder*="Search"]` |
+| Message input area | `[data-qa="message-input"]` or `div[contenteditable="true"]` |
+| Send button | `[data-qa="send-button"]` or `button[aria-label="Send"]` |
+| Send via keyboard | `press_key("Enter")` |
+
+> **Note:** Viber Web uses `data-qa` attributes which are relatively stable.
+> If selectors above fail, run `browser_session.get_html(selector="[class*='conversation']")`
+> to discover the current structure.
+
+### Reply to a Viber Message (quick reference)
+```
+1. browser_session.goto("https://web.viber.com")
+2. browser_session.screenshot()                                    — confirm logged in and connected
+3. browser_session.get_text()                                      — read conversation list previews
+4. browser_session.click('[data-qa="conversation-item"]:first-child') — open first conversation
+5. browser_session.screenshot()                                    — see the message thread
+6. browser_session.get_text()                                      — read full thread
+7. browser_session.click('[data-qa="message-input"]')              — focus input
+8. browser_session.type_text('[data-qa="message-input"]', "reply") — type reply
+9. browser_session.screenshot()                                    — verify before sending
+10. browser_session.press_key("Enter")                             — send
+11. browser_session.screenshot()                                   — confirm sent
+```
+
+### If Viber Web selectors fail
+```
+browser_session.get_html(selector="main")
+browser_session.get_html(selector="[class*='chat']")
+```
+Look for `data-qa` attributes first — they are Viber's most stable hook.
 
 ---
 
