@@ -21,7 +21,9 @@ DOC = (
     "press_key(key, tab_index?)→press keyboard key: Enter, Escape, Tab, Control+Enter, etc.; "
     "wait_for(selector, tab_index?, timeout_ms?)→wait for element to appear before next action; "
     "new_tab(url?)→open a new tab, optionally navigate to URL; "
-    "evaluate(js_code, tab_index?)→run JavaScript and return result."
+    "evaluate(js_code, tab_index?)→run JavaScript and return result; "
+    "tweet(text)→POST A TWEET in one step — navigates to x.com, opens compose, types text, clicks Post. "
+    "USE THIS instead of chaining goto+click+type_text+click for Twitter posts."
 )
 
 _SCREENSHOT_DIR = Path("/app/memory/browser_screenshots")
@@ -451,6 +453,65 @@ def new_tab(url: str = "") -> str:
         return "✅ New blank tab opened (tab index will be the last in list_tabs())"
     except Exception as e:
         return f"❌ {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def tweet(text: str) -> str:
+    """Post a tweet to Twitter/X — complete workflow in one call.
+
+    Navigates to x.com/home, opens the compose box, types the text,
+    and clicks the Post button. Returns ✅ with confirmation or ❌ with error.
+    Use this instead of chaining goto + click + type_text + click separately.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, 0)
+
+        # Step 1: navigate to home
+        page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=30000)
+
+        # Step 2: open compose box
+        compose_btn = page.locator('[data-testid="SideNav_NewTweet_Button"]').first
+        compose_btn.wait_for(state="visible", timeout=10000)
+        compose_btn.click()
+
+        # Step 3: type the tweet text
+        textarea = page.locator('[data-testid="tweetTextarea_0"]').first
+        textarea.wait_for(state="visible", timeout=10000)
+        textarea.click()
+        # Wait for focus to settle before typing — prevents stray keystrokes hitting
+        # Twitter's page-level keyboard listeners and triggering shortcuts (theme toggle etc.)
+        page.wait_for_timeout(400)
+        textarea.type(text, delay=50)
+
+        # Step 4: click Post button (on x.com/compose/post the button is tweetButton)
+        post_btn = page.locator('[data-testid="tweetButton"]').first
+        post_btn.wait_for(state="visible", timeout=10000)
+        post_btn.click()
+
+        # Wait for the compose page to close (URL leaves compose/post → tweet was sent)
+        try:
+            page.wait_for_url(
+                lambda url: "compose/post" not in url,
+                timeout=10000,
+            )
+        except Exception:
+            # If navigation doesn't happen, give it a moment anyway
+            page.wait_for_timeout(2000)
+
+        return (
+            f"✅ Tweet posted successfully!\n"
+            f"Text ({len(text)} chars): {text[:120]}{'...' if len(text) > 120 else ''}\n"
+            f"Current page: {page.url}"
+        )
+    except Exception as e:
+        return f"❌ Could not post tweet: {e}"
     finally:
         if pw:
             try:
