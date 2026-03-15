@@ -30,24 +30,17 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 
 ### Post a Tweet (step-by-step) — PREFERRED METHOD
 ```
-1. browser_session.goto("https://x.com/home", tab_index=0)             — ensure on home feed
-2. browser_session.screenshot(tab_index=0)                             — confirm home loaded
-3. browser_session.click('[data-testid="SideNav_NewTweet_Button"]', tab_index=0)  — open compose
-4. browser_session.screenshot(tab_index=0)                             — confirm compose opened
-5. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
-6. browser_session.screenshot(tab_index=0)                             — verify text before posting
-7. browser_session.click('[data-testid="tweetButtonInline"]', tab_index=0)  — post
-8. browser_session.screenshot(tab_index=0)                             — confirm posted
+1. browser_session.goto("https://x.com/home", tab_index=0)
+2. browser_session.click('[data-testid="SideNav_NewTweet_Button"]', tab_index=0)
+3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
+4. browser_session.click('[data-testid="tweetButtonInline"]', tab_index=0)
 ```
 
 ### Post a Tweet (alternate — dedicated compose page)
 ```
-1. browser_session.goto("https://x.com/compose/post", tab_index=0)    — ✅ correct URL
-2. browser_session.screenshot(tab_index=0)
-3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
-4. browser_session.screenshot(tab_index=0)
-5. browser_session.click('[data-testid="tweetButton"]', tab_index=0)   — note: tweetButton not tweetButtonInline
-6. browser_session.screenshot(tab_index=0)
+1. browser_session.goto("https://x.com/compose/post", tab_index=0)
+2. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
+3. browser_session.click('[data-testid="tweetButton"]', tab_index=0)   — note: tweetButton not tweetButtonInline
 ```
 
 ### Reply to a Tweet
@@ -55,8 +48,7 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 1. browser_session.goto("https://x.com/user/status/TWEET_ID", tab_index=0)
 2. browser_session.click('[data-testid="reply"]', tab_index=0)
 3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "reply text", tab_index=0)
-4. browser_session.screenshot(tab_index=0)
-5. browser_session.click('[data-testid="tweetButtonInline"]', tab_index=0)
+4. browser_session.click('[data-testid="tweetButtonInline"]', tab_index=0)
 ```
 
 ### If Twitter selectors fail
@@ -206,13 +198,9 @@ Look for `data-qa` attributes first — they are Viber's most stable hook.
 
 ### When selectors are unknown
 ```
-browser_session.screenshot()           — see the page
 browser_session.get_html(selector="nav")  — inspect navigation
 browser_session.get_text()             — read all visible text
 ```
-
-### Always verify before destructive actions
-Always take a `browser_session.screenshot()` after composing and BEFORE clicking post/submit on any platform. Show it to the user for confirmation if possible.
 
 ### Selector fallbacks
 If a `data-testid` selector fails (platform updated their DOM):

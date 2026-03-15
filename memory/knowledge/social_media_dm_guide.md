@@ -57,38 +57,14 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 ### Step-by-Step: Read & Reply to a DM
 
 ```
-1. browser_session.screenshot()
-   → Confirm you are on x.com and logged in
-
-2. browser_session.click('[data-testid="AppTabBar_DirectMessage_Link"]')
-   → Navigate to DM inbox
-
-3. browser_session.screenshot()
-   → See the list of conversations
-
+1. browser_session.click('[data-testid="AppTabBar_DirectMessage_Link"]')
+2. browser_session.get_text()
+3. browser_session.click('[data-testid="conversation"]')
 4. browser_session.get_text()
-   → Read names and preview text of unread conversations
-
-5. browser_session.click('[data-testid="conversation"]')  ← first unread
-   → Open the conversation
-
-6. browser_session.get_text()
-   → Read the full message thread
-
-7. (Compose reply using tone guidelines above)
-
-8. browser_session.click('[data-testid="dmComposerTextInput"]')
-9. browser_session.type_text('[data-testid="dmComposerTextInput"]', "Your reply here")
-
-10. browser_session.screenshot()
-    → VERIFY the reply looks correct before sending
-
-11. browser_session.click('[data-testid="dmComposerSendButton"]')
-
-12. browser_session.screenshot()
-    → Confirm message was sent
-
-13. notes.write("dm_log", "Twitter DM sent to [username] — [summary of reply]")
+5. (Compose reply using tone guidelines above)
+6. browser_session.type_text('[data-testid="dmComposerTextInput"]', "Your reply here")
+7. browser_session.click('[data-testid="dmComposerSendButton"]')
+8. notes.write("dm_log", "Twitter DM sent to [username] — [summary of reply]")
 ```
 
 ### When to Escalate (Do Not Reply — Tell the User)
@@ -116,40 +92,14 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 ### Step-by-Step: Read & Reply to a LinkedIn DM
 
 ```
-1. browser_session.screenshot()
-   → Confirm you are on linkedin.com and logged in
-
-2. browser_session.goto("https://www.linkedin.com/messaging/")
-   → Navigate directly to inbox
-
-3. browser_session.screenshot()
-   → See conversation list
-
+1. browser_session.goto("https://www.linkedin.com/messaging/")
+2. browser_session.get_text()
+3. browser_session.click('.msg-conversation-listitem__link')
 4. browser_session.get_text()
-   → Read unread message previews
-
-5. browser_session.click('.msg-conversation-listitem__link')  ← first unread
-   → Open the conversation
-
-6. browser_session.get_text()
-   → Read full message thread
-
-7. (Compose reply — LinkedIn tone should be slightly more professional than Instagram/Twitter
-    but still warm. Use "Hi [Name]," not "Hey")
-
-8. browser_session.click('.msg-form__contenteditable[contenteditable="true"]')
-9. browser_session.type_text('.msg-form__contenteditable[contenteditable="true"]', "Your reply here")
-
-10. browser_session.screenshot()
-    → VERIFY the reply before sending
-
-11. browser_session.press_key("Control+Enter")
-    → Send (LinkedIn uses Ctrl+Enter by default; fallback: click send button)
-
-12. browser_session.screenshot()
-    → Confirm sent
-
-13. notes.write("dm_log", "LinkedIn DM sent to [name] — [summary of reply]")
+5. (Compose reply — slightly more professional than Instagram/Twitter. Use "Hi [Name]," not "Hey")
+6. browser_session.type_text('.msg-form__contenteditable[contenteditable="true"]', "Your reply here")
+7. browser_session.press_key("Control+Enter")
+8. notes.write("dm_log", "LinkedIn DM sent to [name] — [summary of reply]")
 ```
 
 ### LinkedIn-Specific Tone Notes
@@ -188,39 +138,14 @@ to inspect current structure and find updated selectors.
 ### Step-by-Step: Read & Reply to an Instagram DM
 
 ```
-1. browser_session.screenshot()
-   → Confirm you are on instagram.com and logged in
-
-2. browser_session.goto("https://www.instagram.com/direct/inbox/")
-   → Navigate directly to DM inbox
-
-3. browser_session.screenshot()
-   → See conversation list
-
+1. browser_session.goto("https://www.instagram.com/direct/inbox/")
+2. browser_session.get_text()
+3. browser_session.click('[role="listbox"] > div')
 4. browser_session.get_text()
-   → Read names and message previews
-
-5. browser_session.click('[role="listbox"] > div')  ← click first unread
-   → Open the conversation
-
-6. browser_session.get_text()
-   → Read full message thread
-
-7. (Compose reply — Instagram tone can be most casual and emoji-friendly of the three)
-
-8. browser_session.click('[aria-label="Message..."]')
-9. browser_session.type_text('[aria-label="Message..."]', "Your reply here")
-
-10. browser_session.screenshot()
-    → VERIFY the reply before sending
-
-11. browser_session.press_key("Enter")
-    → Send the message
-
-12. browser_session.screenshot()
-    → Confirm sent
-
-13. notes.write("dm_log", "Instagram DM sent to [username] — [summary of reply]")
+5. (Compose reply — most casual and emoji-friendly of the platforms)
+6. browser_session.type_text('[aria-label="Message..."]', "Your reply here")
+7. browser_session.press_key("Enter")
+8. notes.write("dm_log", "Instagram DM sent to [username] — [summary of reply]")
 ```
 
 ### Instagram-Specific Notes
@@ -275,47 +200,16 @@ then scan for `aria-label` attributes to find the current correct selectors.
 ### Step-by-Step: Read & Reply to an Email
 
 ```
-1. browser_session.screenshot()
-   → Confirm Gmail is open and you are logged in
-
-2. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
-   → Navigate to inbox (use u/0 for primary account, u/1 for second account, etc.)
-
-3. browser_session.screenshot()
-   → See the inbox list
-
+1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
+2. browser_session.get_text()
+3. browser_session.click('tr.zA.zE')
 4. browser_session.get_text()
-   → Read sender names, subjects, and preview snippets of unread emails
-
-5. browser_session.click('tr.zA.zE')   ← first unread row
-   → Open the email
-
-6. browser_session.screenshot()
-   → Confirm the email opened correctly
-
-7. browser_session.get_text()
-   → Read full email body and any prior thread
-
-8. (Compose reply using tone guidelines — see below)
-
-9. browser_session.click('[data-tooltip^="Odg"]')
-   → Open the inline reply panel (Serbian "Odgovori" = Reply)
-   → Fallback if that fails: browser_session.get_html(selector="[jsaction*='reply']") to find the button
-
-10. browser_session.click('div[contenteditable="true"][aria-multiline="true"]')
-11. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Your reply here")
-
-12. browser_session.screenshot()
-    → VERIFY the reply text and recipient before sending
-
-13. browser_session.click('[jsaction*="send"]')
-    → Send the reply (language-independent)
-    → Fallback: browser_session.press_key("Control+Enter")
-
-14. browser_session.screenshot()
-    → Confirm sent (Gmail briefly shows "Message sent" toast)
-
-15. notes.write("dm_log", "Gmail reply sent to [sender] — Subject: [subject] — [summary]")
+5. (Compose reply using tone guidelines — see below)
+6. browser_session.click('[data-tooltip^="Odg"]')
+   → Fallback: browser_session.get_html(selector="[jsaction*='reply']") to find the button
+7. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Your reply here")
+8. browser_session.press_key("Control+Enter")
+9. notes.write("dm_log", "Gmail reply sent to [sender] — Subject: [subject] — [summary]")
 ```
 
 ### Step-by-Step: Compose a New Email
@@ -323,23 +217,11 @@ then scan for `aria-label` attributes to find the current correct selectors.
 ```
 1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
 2. browser_session.click('[gh="cm"]')
-   → Opens compose modal (language-independent)
-
 3. browser_session.type_text('[name="to"]', "recipient@email.com")
 4. browser_session.press_key("Tab")
-   → Move to subject
-
 5. browser_session.type_text('[name="subjectbox"]', "Subject line here")
-6. browser_session.click('div[contenteditable="true"][aria-multiline="true"]')
-7. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Email body here")
-
-8. browser_session.screenshot()
-   → VERIFY everything before sending
-
-9. browser_session.press_key("Control+Enter")
-   → Send (works in any language — keyboard shortcut is universal)
-10. browser_session.screenshot()
-    → Confirm sent
+6. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Email body here")
+7. browser_session.press_key("Control+Enter")
 ```
 
 ### Multiple Gmail Accounts
@@ -395,42 +277,14 @@ are more stable than class names.
 ### Step-by-Step: Read & Reply to a Viber Message
 
 ```
-1. browser_session.screenshot()
-   → Confirm Viber Web is open and shows "Connected" status (not QR screen)
-
-2. browser_session.goto("https://web.viber.com")
-   → Navigate to Viber Web (skip if already on the right tab)
-
-3. browser_session.screenshot()
-   → See conversation list on the left panel
-
+1. browser_session.goto("https://web.viber.com")
+2. browser_session.get_text()
+3. browser_session.click('[data-qa="conversation-item"]:first-child')
 4. browser_session.get_text()
-   → Read contact names and message previews from the conversation list
-
-5. browser_session.click('[data-qa="conversation-item"]:first-child')
-   → Open the most recent / first unread conversation
-
-6. browser_session.screenshot()
-   → Confirm the conversation opened
-
-7. browser_session.get_text()
-   → Read the full message thread
-
-8. (Compose reply using tone guidelines — friendly and warm, Viber is personal/informal)
-
-9. browser_session.click('[data-qa="message-input"]')
-10. browser_session.type_text('[data-qa="message-input"]', "Your reply here")
-
-11. browser_session.screenshot()
-    → VERIFY the reply before sending
-
-12. browser_session.press_key("Enter")
-    → Send the message
-
-13. browser_session.screenshot()
-    → Confirm message sent (appears in thread on the right side)
-
-14. notes.write("dm_log", "Viber reply sent to [contact name] — [summary of reply]")
+5. (Compose reply — friendly and warm, Viber is personal/informal)
+6. browser_session.type_text('[data-qa="message-input"]', "Your reply here")
+7. browser_session.press_key("Enter")
+8. notes.write("dm_log", "Viber reply sent to [contact name] — [summary of reply]")
 ```
 
 ### Searching for a Specific Contact
