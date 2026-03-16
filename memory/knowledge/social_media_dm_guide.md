@@ -170,6 +170,92 @@ to inspect current structure and find updated selectors.
 
 ---
 
+## TikTok — Public Engagement (Likes, Comments, Follows)
+
+> **Use single-call functions — never chain steps manually.**
+> TikTok is a SPA; these functions handle hydration waits internally.
+
+| Action | Skill call |
+|--------|-----------|
+| Like a video | `browser_session.tiktok_like("https://www.tiktok.com/@user/video/ID")` |
+| Comment on a video | `browser_session.tiktok_comment("https://www.tiktok.com/@user/video/ID", "comment text")` |
+| Follow a user | `browser_session.tiktok_follow("username")` |
+
+### When to Like
+- User explicitly asks, or the content is directly relevant to their niche
+- A follower or creator posted something worth acknowledging
+- **Never:** controversial/political content, spam accounts, competitor content
+
+### When to Comment
+- User explicitly asks, or someone tagged/mentioned TrinityClaw in a video
+- A question in a comment section can be answered helpfully and accurately
+- **Rules:** Keep comments short and specific — never "Great video!" (looks like bot spam). Match the energy of the post.
+- **Never:** argue, self-promote unsolicited, engage with political/sensitive content
+
+### When to Follow
+- User explicitly asks, or a creator followed TrinityClaw and their content is relevant
+- After a meaningful interaction (comment, collab mention)
+- **Rules:** Never mass-follow. `tiktok_follow()` only follows — it never unfollows unless explicitly asked.
+
+### Hard Rules
+- Never post, like, comment, or follow **autonomously** — always confirm intent with user first
+- Never engage with political, religious, or controversial content — flag to user instead
+- Never generate comment text the user didn't write or approve without being explicitly asked
+
+---
+
+## TikTok — DM Workflow
+
+### Selectors
+
+| Action | Selector |
+|--------|----------|
+| Open DM inbox | `browser_session.goto("https://www.tiktok.com/messages")` |
+| DM conversation list | `[data-e2e="dm-message-list"]` |
+| First/top conversation | `[data-e2e="dm-message-row"]` (first result) |
+| Message thread text | `get_text()` after opening a conversation |
+| DM reply input box | `[data-e2e="dm-input"]` |
+| Send button | `[data-e2e="dm-send-btn"]` or `press_key("Enter")` |
+
+### Step-by-Step: Read & Reply to a TikTok DM
+
+```
+1. browser_session.goto("https://www.tiktok.com/messages")
+2. browser_session.wait_for('[data-e2e="dm-message-row"]')
+3. browser_session.get_text()
+4. browser_session.click('[data-e2e="dm-message-row"]')
+5. browser_session.get_text()
+6. (Compose reply using tone guidelines — casual, short, emoji-friendly)
+7. browser_session.type_text('[data-e2e="dm-input"]', "Your reply here")
+8. browser_session.click('[data-e2e="dm-send-btn"]')
+   Fallback: browser_session.press_key("Enter")
+9. notes.write("dm_log", "TikTok DM sent to [username] — [summary of reply]")
+```
+
+### TikTok-Specific Tone Notes
+- TikTok skews young and casual — keep replies short, energetic, and emoji-friendly
+- 1–2 sentences is the sweet spot; anything longer feels out of place
+- Common DM types: fan messages, collab proposals, questions about content, giveaway inquiries
+- Escalate: brand deals, paid partnerships, anything involving money or commitments
+- Escalate: anything that feels hostile, spammy, or involves clicking a link
+
+### When to Escalate (Do Not Reply — Tell the User)
+- Message proposes a brand deal, sponsorship, or paid collaboration
+- Message asks for pricing or a quote
+- Message appears to be a scam or phishing attempt (especially "You won!" messages)
+- Message is hostile, threatening, or harassing
+- Message contains a link asking you to click
+- Message requests personal info
+
+### If TikTok Selectors Fail
+TikTok uses `data-e2e` attributes. If those fail, run:
+```
+browser_session.get_html(selector="main")
+```
+and look for `data-e2e` attributes to find the updated selectors.
+
+---
+
 ## Instagram — DM Workflow
 
 ### Selectors
@@ -491,6 +577,39 @@ Reply:
 
 ---
 
+### TikTok — Reply Templates
+
+```
+[TEMPLATE: Fan / Appreciation Message]
+Trigger: Someone DMing to say they love your content or that you inspired them
+Reply:
+[ADD YOUR REPLY TEMPLATE HERE]
+
+[TEMPLATE: Collab or Duet Request]
+Trigger: Another creator asking to collab, duet, or stitch your content
+Reply:
+[ADD YOUR REPLY TEMPLATE HERE]
+
+[TEMPLATE: Product or Service Question via TikTok DM]
+Trigger: Someone asking about what you offer after seeing a video
+Reply:
+[ADD YOUR REPLY TEMPLATE HERE]
+
+[TEMPLATE: Giveaway or "I Won" Message]
+Trigger: Someone claiming they won something, or asking about a giveaway
+Reply: Escalate to user. Do not confirm or deny giveaway details.
+
+[TEMPLATE: Sponsorship / Brand Deal Pitch]
+Trigger: Creator or brand pitching a paid collaboration
+Reply: Escalate to user. Do not commit to anything.
+
+[TEMPLATE: Spam / Suspicious Link]
+Trigger: Generic "Check this out!", follow-for-follow, or a message with a suspicious link
+Reply: Do not reply. Do not click the link. Flag to user.
+```
+
+---
+
 ### Instagram — Reply Templates
 
 ```
@@ -532,4 +651,4 @@ When the agent encounters any of these, it should stop and notify the user inste
 
 ---
 
-*Last updated: 2026-03-15 — Covers Twitter/X, LinkedIn, Instagram, Gmail (browser), and Viber. Add your reply templates above before asking the agent to handle messages autonomously.*
+*Last updated: 2026-03-16 — Covers Twitter/X, LinkedIn, Instagram, Gmail (browser), Viber, and TikTok. Add your reply templates above before asking the agent to handle messages autonomously.*

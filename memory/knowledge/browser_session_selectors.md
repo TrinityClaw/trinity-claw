@@ -196,6 +196,68 @@ Look for `data-qa` attributes first — they are Viber's most stable hook.
 
 ---
 
+## TikTok (tiktok.com)
+
+> **SPA hydration:** TikTok is a heavy SPA — always add `page.wait_for_timeout(2000)` (or use
+> `wait_for()`) after `goto()` before interacting with any element.
+>
+> TikTok uses `data-e2e` attributes as its primary stable hooks (similar to Twitter's `data-testid`).
+> **Never call `get_html()` without a selector on TikTok** — the page is large and will time out.
+> Always scope it: `get_html(selector="[data-e2e='browse-video-container']")`
+
+| Action | Selector |
+|--------|----------|
+| Like button (video page) | `[data-e2e="browse-like-icon"]` |
+| Comment button (video page) | `[data-e2e="browse-comment-icon"]` |
+| Comment input field | `[data-e2e="comment-input"]` |
+| Post comment button | `[data-e2e="comment-post"]` |
+| Follow button (on profile) | `[data-e2e="follow-button"]` |
+| Share button | `[data-e2e="share-icon"]` |
+| Go to DM inbox | `browser_session.goto("https://www.tiktok.com/messages")` |
+| DM conversation list | `[data-e2e="dm-message-list"]` |
+| DM conversation item (first) | `[data-e2e="dm-message-row"]` |
+| DM reply input | `[data-e2e="dm-input"]` |
+| DM send button | `[data-e2e="dm-send-btn"]` |
+
+### Like a TikTok Video — PREFERRED METHOD (single call)
+```
+browser_session.tiktok_like("https://www.tiktok.com/@user/video/VIDEO_ID")
+```
+Navigates to the video URL, waits for hydration, clicks Like.
+
+### Comment on a TikTok Video — PREFERRED METHOD (single call)
+```
+browser_session.tiktok_comment("https://www.tiktok.com/@user/video/VIDEO_ID", "comment text")
+```
+Navigates to the video, types the comment in the input, and posts it.
+
+### Follow a TikTok User — PREFERRED METHOD (single call)
+```
+browser_session.tiktok_follow("username")
+```
+Navigates to `tiktok.com/@username`, checks follow state, clicks Follow. Skips if already following.
+
+### Reply to a TikTok DM (manual — no single-call helper yet)
+```
+1. browser_session.goto("https://www.tiktok.com/messages")
+2. browser_session.wait_for('[data-e2e="dm-message-row"]')
+3. browser_session.click('[data-e2e="dm-message-row"]')
+4. browser_session.get_text()                                  — read the thread
+5. browser_session.type_text('[data-e2e="dm-input"]', "reply text")
+6. browser_session.click('[data-e2e="dm-send-btn"]')
+   Fallback send: browser_session.press_key("Enter")
+```
+
+### If TikTok selectors fail
+```
+browser_session.get_html(selector="[data-e2e='browse-video-container']")
+browser_session.get_html(selector="main")
+```
+TikTok uses `data-e2e` as its primary hook. If those fail, inspect with `get_html` and
+look for `data-e2e` attributes on the target elements.
+
+---
+
 ## General Patterns
 
 ### When selectors are unknown
