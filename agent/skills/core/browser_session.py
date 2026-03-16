@@ -27,7 +27,11 @@ DOC = (
     "like_tweet(tweet_url)→LIKE a tweet — navigates to the tweet URL and clicks Like; "
     "reply_tweet(tweet_url, text)→REPLY to a tweet — navigates to tweet, clicks Reply, types text, posts; "
     "follow_user(username)→FOLLOW a Twitter user by username (with or without @). "
-    "Use tweet/like_tweet/reply_tweet/follow_user for ALL Twitter actions — never chain the steps manually."
+    "Use tweet/like_tweet/reply_tweet/follow_user for ALL Twitter actions — never chain the steps manually; "
+    "tiktok_like(video_url)→LIKE a TikTok video — navigates to the video URL and clicks Like; "
+    "tiktok_comment(video_url, text)→COMMENT on a TikTok video — navigates to the video, types the comment, and posts it; "
+    "tiktok_follow(username)→FOLLOW a TikTok user by username (with or without @). "
+    "Use tiktok_like/tiktok_comment/tiktok_follow for TikTok actions — never chain the steps manually."
 )
 
 _SCREENSHOT_DIR = Path("/app/memory/browser_screenshots")
@@ -625,6 +629,116 @@ def follow_user(username: str) -> str:
         return f"✅ Now following @{username} (https://x.com/{username})"
     except Exception as e:
         return f"❌ Could not follow @{username}: {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def tiktok_like(video_url: str) -> str:
+    """Like a TikTok video — complete workflow in one call.
+
+    video_url: full URL of the video (https://www.tiktok.com/@user/video/ID).
+    Navigates to the video, waits for SPA hydration, and clicks the Like button.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, 0)
+        if not video_url.startswith(("http://", "https://")):
+            video_url = "https://" + video_url
+        page.goto(video_url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)  # TikTok SPA needs time to hydrate
+        like_btn = page.locator('[data-e2e="browse-like-icon"]').first
+        like_btn.wait_for(state="visible", timeout=10000)
+        like_btn.click()
+        page.wait_for_timeout(1000)
+        return f"✅ Liked TikTok video: {video_url}"
+    except Exception as e:
+        return (
+            f"❌ Could not like TikTok video: {e}\n"
+            f"Tip: run get_html(selector=\"main\") to find the current like button selector."
+        )
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def tiktok_comment(video_url: str, text: str) -> str:
+    """Comment on a TikTok video — complete workflow in one call.
+
+    video_url: full URL of the video (https://www.tiktok.com/@user/video/ID).
+    text: the comment text to post.
+    Navigates to the video, types the comment in the input, and posts it.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, 0)
+        if not video_url.startswith(("http://", "https://")):
+            video_url = "https://" + video_url
+        page.goto(video_url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)  # TikTok SPA hydration
+
+        comment_input = page.locator('[data-e2e="comment-input"]').first
+        comment_input.wait_for(state="visible", timeout=10000)
+        comment_input.click()
+        page.wait_for_timeout(300)
+        comment_input.type(text, delay=50)
+
+        post_btn = page.locator('[data-e2e="comment-post"]').first
+        post_btn.wait_for(state="visible", timeout=10000)
+        post_btn.click()
+        page.wait_for_timeout(1500)
+
+        return (
+            f"✅ Comment posted on: {video_url}\n"
+            f"Comment ({len(text)} chars): {text[:120]}{'...' if len(text) > 120 else ''}"
+        )
+    except Exception as e:
+        return (
+            f"❌ Could not post TikTok comment: {e}\n"
+            f"Tip: run get_html(selector=\"main\") to find the current comment selector."
+        )
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def tiktok_follow(username: str) -> str:
+    """Follow a TikTok user — complete workflow in one call.
+
+    username: TikTok handle with or without @ (e.g. 'username' or '@username').
+    Navigates to their profile and clicks Follow. Skips if already following.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, 0)
+        username = username.strip().lstrip("@")
+        page.goto(f"https://www.tiktok.com/@{username}", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)  # TikTok SPA hydration
+
+        follow_btn = page.locator('[data-e2e="follow-button"]').first
+        follow_btn.wait_for(state="visible", timeout=10000)
+
+        btn_text = follow_btn.inner_text().strip().lower()
+        if "following" in btn_text or "friends" in btn_text:
+            return f"ℹ️ Already following @{username} on TikTok — no action taken."
+
+        follow_btn.click()
+        page.wait_for_timeout(1000)
+        return f"✅ Now following @{username} on TikTok (https://www.tiktok.com/@{username})"
+    except Exception as e:
+        return f"❌ Could not follow @{username} on TikTok: {e}"
     finally:
         if pw:
             try:
