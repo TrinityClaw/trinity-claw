@@ -15,6 +15,8 @@ DOC = (
     "Step 2: get_snapshot() — see every interactive element with @eN refs (like agent-browser snapshot -i). "
     "Step 3a: click_ref('@e3') / fill_ref('@e7', text) — interact by ref (FASTEST). "
     "Step 3b: click_accessible(role, name) / type_accessible(role, name, text) — interact by role+name. "
+    "click_ref / click_accessible automatically return an updated snapshot after every click — "
+    "no need to call get_snapshot() again manually. Works on ANY website, no per-site rules. "
     "Works across ALL iframes automatically (Gmail compose, LinkedIn DMs, etc.). "
 
     "=== ALL FUNCTIONS === "
@@ -104,6 +106,74 @@ def _collect_a11y_nodes(node: dict, results: list, limit: int = 250) -> None:
         results.append((role, name))
     for child in node.get("children") or []:
         _collect_a11y_nodes(child, results, limit)
+
+
+def _snapshot_page(page) -> str:
+    """Build a snapshot string from an already-connected Playwright page.
+
+    Reuses the open connection — call this from within a function that already
+    called _connect(), so we avoid the overhead of a second CDP connection.
+    Updates _ref_cache in place.
+    """
+    global _ref_cache
+    sections = []
+
+    frames_to_check = [(page.main_frame, "main")]
+    for i, frame in enumerate(page.frames):
+        if frame is page.main_frame:
+            continue
+        url = frame.url or ""
+        if url and url not in ("about:blank", ""):
+            frames_to_check.append((frame, f"iframe[{i}]"))
+
+    for frame, label in frames_to_check:
+        items = []
+        try:
+            tree = frame.accessibility.snapshot()
+            if tree:
+                _collect_a11y_nodes(tree, items)
+        except Exception:
+            pass
+        if not items:
+            try:
+                snap = frame.locator("body").aria_snapshot()
+                if snap:
+                    for line in _filter_snapshot_lines(snap):
+                        s = line.strip().lstrip("- ").strip()
+                        parts = s.split('"')
+                        if len(parts) >= 2:
+                            r = parts[0].strip().split()[0].lower().rstrip(":[")
+                            n = parts[1]
+                            if r in _INTERACTIVE_ROLES and n:
+                                items.append((r, n))
+            except Exception:
+                pass
+        if items:
+            sections.append((label, items))
+
+    if not sections:
+        return "⚠️ Snapshot empty — page may still be loading."
+
+    _ref_cache.clear()
+    output_parts = []
+    counter = 1
+    for label, items in sections:
+        if len(sections) > 1:
+            output_parts.append(f"\n[{label}]")
+        for r, n in items:
+            ref = f"@e{counter}"
+            _ref_cache[ref] = (r, n)
+            output_parts.append(f"  {ref}  {r} \"{n}\"")
+            counter += 1
+
+    body = "\n".join(output_parts)
+    return (
+        f"📋 Page Snapshot — {page.url}\n"
+        f"Title: {page.title()}\n"
+        + "─" * 50 + "\n"
+        + body + "\n"
+        "Use click_ref('@eN') / fill_ref('@eN', text)"
+    )
 
 
 def _filter_snapshot_lines(snapshot_text: str, limit: int = 250) -> list:
@@ -1046,85 +1116,17 @@ def get_snapshot(tab_index: int = 0) -> str:
 
     Workflow (preferred — no CSS selectors needed):
       1. get_snapshot()                             → see '@e3 button "Compose"', '@e7 textbox "To"'
-      2. click_ref("@e3")                           → click by ref
+      2. click_ref("@e3")                           → click it — snapshot returned automatically
       3. fill_ref("@e7", "user@example.com")        → fill by ref
       — or use role+name directly —
       2. click_accessible("button", "Compose")
       3. type_accessible("textbox", "To", "user@example.com")
     """
-    global _ref_cache
     pw = None
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
-
-        # Collect (role, name) from main frame + every meaningful child frame
-        # structure: list of (frame_label, [(role, name), ...])
-        sections = []
-
-        frames_to_check = [(page.main_frame, "main")]
-        for i, frame in enumerate(page.frames):
-            if frame is page.main_frame:
-                continue
-            url = frame.url or ""
-            if url and url not in ("about:blank", ""):
-                frames_to_check.append((frame, f"iframe[{i}]"))
-
-        for frame, label in frames_to_check:
-            items = []
-            # Try accessibility.snapshot() dict first (most structured)
-            try:
-                tree = frame.accessibility.snapshot()
-                if tree:
-                    _collect_a11y_nodes(tree, items)
-            except Exception:
-                pass
-
-            # If dict API returned nothing, fall back to aria_snapshot() text
-            if not items:
-                try:
-                    snap = frame.locator("body").aria_snapshot()
-                    if snap:
-                        for line in _filter_snapshot_lines(snap):
-                            s = line.strip().lstrip("- ").strip()
-                            parts = s.split('"')
-                            if len(parts) >= 2:
-                                role = parts[0].strip().split()[0].lower().rstrip(":[")
-                                name = parts[1]
-                                if role in _INTERACTIVE_ROLES and name:
-                                    items.append((role, name))
-                except Exception:
-                    pass
-
-            if items:
-                sections.append((label, items))
-
-        if not sections:
-            return "⚠️ Accessibility snapshot is empty — page may still be loading."
-
-        # Assign @eN refs and build output
-        _ref_cache.clear()
-        output_parts = []
-        counter = 1
-
-        for label, items in sections:
-            if len(sections) > 1:
-                output_parts.append(f"\n[{label}]")
-            for role, name in items:
-                ref = f"@e{counter}"
-                _ref_cache[ref] = (role, name)
-                output_parts.append(f"  {ref}  {role} \"{name}\"")
-                counter += 1
-
-        body = "\n".join(output_parts)
-        return (
-            f"📋 Page Snapshot — {page.url}\n"
-            f"Title: {page.title()}\n"
-            + "─" * 50 + "\n"
-            + body + "\n\n"
-            "Use click_ref('@e3') / fill_ref('@e7', text)  — or —  "
-            "click_accessible(role, name) / type_accessible(role, name, text)"
-        )
+        return _snapshot_page(page)
     except Exception as e:
         return f"❌ {e}"
     finally:
@@ -1164,10 +1166,14 @@ def click_accessible(role: str, name: str, tab_index: int = 0, exact: bool = Fal
         except Exception:
             actual_label = name
         locator.click()
-        result = f"✅ Clicked {role} \"{actual_label}\"\nURL after click: {page.url}"
+        # Wait for any dialog/iframe triggered by the click to render
+        page.wait_for_timeout(700)
+        header = f"✅ Clicked {role} \"{actual_label}\"\nURL after click: {page.url}"
         if actual_label.lower().strip() != name.lower().strip():
-            result += f"\n⚠️  You requested \"{name}\" but matched \"{actual_label}\" — verify this is correct."
-        return result
+            header += f"\n⚠️  Requested \"{name}\", matched \"{actual_label}\"."
+        # Auto-snapshot after every click — universal, works on any site
+        snapshot = _snapshot_page(page)
+        return header + "\n\n" + snapshot
     except Exception as e:
         return (
             f"❌ Could not click {role} \"{name}\": {e}\n"
