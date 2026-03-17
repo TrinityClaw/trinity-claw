@@ -97,9 +97,16 @@ def _connect():
 
 def _get_page(browser, tab_index: int = 0):
     """Get a specific tab by index from the connected browser."""
-    # Coerce tab_index — LLM sometimes passes 'False'/'True'/'None' instead of 0
+    # Coerce tab_index — LLM sometimes passes 'False'/'True'/'None'/selector string instead of 0
     if isinstance(tab_index, str):
-        tab_index = 0 if tab_index.strip().lower() in ("false", "true", "none", "") else int(tab_index)
+        stripped = tab_index.strip()
+        if stripped.lower() in ("false", "true", "none", ""):
+            tab_index = 0
+        else:
+            try:
+                tab_index = int(stripped)
+            except ValueError:
+                tab_index = 0  # unrecognizable string — default to tab 0
     else:
         tab_index = int(tab_index)
     contexts = browser.contexts
@@ -232,6 +239,10 @@ def get_html(tab_index: int = 0, selector: str = "") -> str:
     selector: optional CSS selector to narrow to a specific element.
     Returns up to 4000 chars. Use selector to target specific sections.
     """
+    # LLM sometimes passes selector as first positional arg instead of tab_index
+    if isinstance(tab_index, str) and not str(tab_index).strip().lstrip("-").isdigit():
+        selector = tab_index
+        tab_index = 0
     pw = None
     try:
         pw, browser = _connect()
@@ -778,22 +789,39 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
         compose_btn.wait_for(state="visible", timeout=10000)
         compose_btn.click()
 
-        # Step 3: wait for compose window and fill To field
-        to_field = page.locator('[name="to"]').first
-        to_field.wait_for(state="visible", timeout=10000)
-        to_field.click()
-        to_field.type(to, delay=30)
-        page.keyboard.press("Tab")  # move focus to Subject
+        # Step 3: wait for compose window to open — subjectbox is the reliable visible indicator
+        subject_field = page.locator('[name="subjectbox"]').first
+        subject_field.wait_for(state="visible", timeout=10000)
+        page.wait_for_timeout(300)  # let compose dialog animate in fully
+
+        # Step 4: fill To field.
+        # Gmail hides [name="to"] (it's a proxy textarea). The visible chip autocomplete
+        # input is input.agP. Fall back to keyboard typing (Gmail opens compose with
+        # focus already on the To area, so typing directly works reliably).
+        to_typed = False
+        for to_sel in ["input.agP", "input.agP.aFw"]:
+            try:
+                to_el = page.locator(to_sel).first
+                to_el.wait_for(state="visible", timeout=2500)
+                to_el.click()
+                to_el.type(to, delay=30)
+                page.keyboard.press("Tab")
+                to_typed = True
+                break
+            except Exception:
+                continue
+        if not to_typed:
+            # Compose opens with focus on To — type directly via keyboard
+            page.keyboard.type(to, delay=30)
+            page.keyboard.press("Tab")
         page.wait_for_timeout(200)
 
-        # Step 4: fill Subject
-        subject_field = page.locator('[name="subjectbox"]').first
-        subject_field.wait_for(state="visible", timeout=8000)
+        # Step 5: fill Subject
         subject_field.click()
         subject_field.type(subject, delay=30)
         page.wait_for_timeout(200)
 
-        # Step 5: click into body and type
+        # Step 6: click into body and type
         body_field = page.locator('div[contenteditable="true"][aria-multiline="true"]').first
         body_field.wait_for(state="visible", timeout=8000)
         body_field.click()
