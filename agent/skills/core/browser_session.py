@@ -31,7 +31,11 @@ DOC = (
     "tiktok_like(video_url)→LIKE a TikTok video — navigates to the video URL and clicks Like; "
     "tiktok_comment(video_url, text)→COMMENT on a TikTok video — navigates to the video, types the comment, and posts it; "
     "tiktok_follow(username)→FOLLOW a TikTok user by username (with or without @). "
-    "Use tiktok_like/tiktok_comment/tiktok_follow for TikTok actions — never chain the steps manually."
+    "Use tiktok_like/tiktok_comment/tiktok_follow for TikTok actions — never chain the steps manually; "
+    "send_gmail(to, subject, body, tab_index?)→COMPOSE AND SEND a new Gmail email in one step — "
+    "navigates to Gmail, clicks Compose, fills To/Subject/Body, and sends with Ctrl+Enter. "
+    "USE THIS for all new email sends — never chain goto+click+type_text+press_key for Gmail compose. "
+    "tab_index defaults to 0; pass the correct index if Gmail is not on the first tab."
 )
 
 _SCREENSHOT_DIR = Path("/app/memory/browser_screenshots")
@@ -739,6 +743,84 @@ def tiktok_follow(username: str) -> str:
         return f"✅ Now following @{username} on TikTok (https://www.tiktok.com/@{username})"
     except Exception as e:
         return f"❌ Could not follow @{username} on TikTok: {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
+    """Compose and send a new email via Gmail browser tab — complete workflow in one call.
+
+    to: recipient email address (e.g. "someone@gmail.com")
+    subject: email subject line
+    body: email body text
+    tab_index: which tab has Gmail open (default 0 — or pass the correct index from list_tabs())
+
+    Navigates to Gmail inbox, clicks Compose, fills To/Subject/Body, then sends with Ctrl+Enter.
+    Use this instead of chaining goto + click + type_text + press_key for Gmail compose.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, tab_index)
+
+        # Step 1: go to Gmail inbox (ensures compose button is available)
+        current_url = page.url or ""
+        if "mail.google.com" not in current_url:
+            page.goto("https://mail.google.com/mail/u/0/#inbox", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1000)
+
+        # Step 2: click Compose — [gh="cm"] is language-independent
+        compose_btn = page.locator('[gh="cm"]').first
+        compose_btn.wait_for(state="visible", timeout=10000)
+        compose_btn.click()
+
+        # Step 3: wait for compose window and fill To field
+        to_field = page.locator('[name="to"]').first
+        to_field.wait_for(state="visible", timeout=10000)
+        to_field.click()
+        to_field.type(to, delay=30)
+        page.keyboard.press("Tab")  # move focus to Subject
+        page.wait_for_timeout(200)
+
+        # Step 4: fill Subject
+        subject_field = page.locator('[name="subjectbox"]').first
+        subject_field.wait_for(state="visible", timeout=8000)
+        subject_field.click()
+        subject_field.type(subject, delay=30)
+        page.wait_for_timeout(200)
+
+        # Step 5: click into body and type
+        body_field = page.locator('div[contenteditable="true"][aria-multiline="true"]').first
+        body_field.wait_for(state="visible", timeout=8000)
+        body_field.click()
+        page.wait_for_timeout(300)
+        body_field.type(body, delay=40)
+        page.wait_for_timeout(300)
+
+        # Step 6: send via Ctrl+Enter
+        page.keyboard.press("Control+Enter")
+
+        # Wait for compose window to close (compose windows disappear when sent)
+        try:
+            page.wait_for_selector('[name="to"]', state="detached", timeout=8000)
+        except Exception:
+            page.wait_for_timeout(2000)
+
+        return (
+            f"✅ Email sent!\n"
+            f"To: {to}\n"
+            f"Subject: {subject}\n"
+            f"Body preview: {body[:120]}{'...' if len(body) > 120 else ''}"
+        )
+    except Exception as e:
+        return (
+            f"❌ Could not send Gmail: {e}\n"
+            f"Tip: run browser_session.get_html(selector=\"[role='main']\") to inspect the Gmail DOM."
+        )
     finally:
         if pw:
             try:
