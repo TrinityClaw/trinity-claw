@@ -9,39 +9,83 @@ DOC = (
     "Unlike the 'web' skill which launches a fresh private browser, this skill ATTACHES to your "
     "running Chrome — so it sees all your sessions, logins, cookies, and open tabs. "
     "One-time setup: launch Chrome with --remote-debugging-port=9222. "
-    "Functions: "
+
+    "=== PREFERRED INTERACTION PATTERN (no CSS selectors needed) === "
+    "Step 1: goto(url) to navigate. "
+    "Step 2: get_snapshot() to see all interactive elements by role and name. "
+    "Step 3: click_accessible(role, name) to click, or type_accessible(role, name, text) to type. "
+    "These three functions work on ANY website without needing to know CSS selectors or DOM structure. "
+    "Works across iframes automatically. "
+
+    "=== ALL FUNCTIONS === "
+    "get_snapshot(tab_index?)→READ the page — returns all buttons, links, textboxes etc. by role+name. "
+    "ALWAYS call this first when you need to interact with a page you haven't seen before; "
+    "click_accessible(role, name, tab_index?, exact?)→CLICK any element by its ARIA role and label. "
+    "role examples: button/link/tab/menuitem/checkbox. Works across iframes. "
+    "Use get_snapshot() first to find the correct role and name; "
+    "type_accessible(role, name, text, tab_index?, exact?)→TYPE into any field by its ARIA role and label. "
+    "role is usually textbox or searchbox. Works across iframes. "
+    "Use get_snapshot() first to find the correct role and name; "
+
     "list_tabs()→list all open tabs with index/title/URL; "
-    "screenshot(tab_index?)→capture screenshot of current tab, saved to /app/memory/browser_screenshots/; "
-    "goto(url, tab_index?)→navigate to a URL in specified tab; "
-    "get_text(tab_index?)→extract visible text content from current page (up to 5000 chars); "
-    "get_html(tab_index?, selector?)→get full HTML or HTML of a specific element by CSS selector; "
-    "click(target, tab_index?)→click element — supports CSS selector, 'text=Foo', 'aria-label=Bar'; "
-    "type_text(target, text, clear_first?, tab_index?)→type into any field including contenteditable (Twitter/LinkedIn); "
-    "scroll(direction, tab_index?)→scroll page: up / down / top / bottom; "
-    "press_key(key, tab_index?)→press keyboard key: Enter, Escape, Tab, Control+Enter, etc.; "
-    "wait_for(selector, tab_index?, timeout_ms?)→wait for element to appear before next action; "
-    "new_tab(url?)→open a new tab, optionally navigate to URL; "
-    "evaluate(js_code, tab_index?)→run JavaScript and return result; "
-    "tweet(text)→POST A TWEET in one step — navigates to x.com, opens compose, types text, clicks Post. "
-    "USE THIS instead of chaining goto+click+type_text+click for Twitter posts; "
-    "like_tweet(tweet_url)→LIKE a tweet — navigates to the tweet URL and clicks Like; "
-    "reply_tweet(tweet_url, text)→REPLY to a tweet — navigates to tweet, clicks Reply, types text, posts; "
-    "follow_user(username)→FOLLOW a Twitter user by username (with or without @). "
-    "Use tweet/like_tweet/reply_tweet/follow_user for ALL Twitter actions — never chain the steps manually; "
-    "tiktok_like(video_url)→LIKE a TikTok video — navigates to the video URL and clicks Like; "
-    "tiktok_comment(video_url, text)→COMMENT on a TikTok video — navigates to the video, types the comment, and posts it; "
-    "tiktok_follow(username)→FOLLOW a TikTok user by username (with or without @). "
-    "Use tiktok_like/tiktok_comment/tiktok_follow for TikTok actions — never chain the steps manually; "
-    "send_gmail(to, subject, body, tab_index?)→COMPOSE AND SEND a new Gmail email in one step — "
-    "navigates to Gmail, clicks Compose, fills To/Subject/Body, and sends with Ctrl+Enter. "
-    "USE THIS for all new email sends — never chain goto+click+type_text+press_key for Gmail compose. "
-    "tab_index defaults to 0; pass the correct index if Gmail is not on the first tab."
+    "screenshot(tab_index?)→capture screenshot; "
+    "goto(url, tab_index?)→navigate to a URL; "
+    "get_text(tab_index?)→extract visible text (up to 5000 chars); "
+    "get_html(tab_index?, selector?)→get HTML of page or a CSS-selected element; "
+    "click(target, tab_index?)→click by CSS selector or 'text=Foo' (use click_accessible instead when possible); "
+    "type_text(target, text, clear_first?, tab_index?)→type into CSS selector target (use type_accessible instead when possible); "
+    "scroll(direction, tab_index?)→scroll: up/down/top/bottom; "
+    "press_key(key, tab_index?)→press keyboard key: Enter, Tab, Control+Enter, Escape, etc.; "
+    "wait_for(selector, tab_index?, timeout_ms?)→wait for CSS selector to appear; "
+    "new_tab(url?)→open a new tab; "
+    "evaluate(js_code, tab_index?)→run JavaScript; "
+
+    "=== SINGLE-CALL HELPERS (use these for specific platforms) === "
+    "tweet(text)→POST A TWEET in one step. USE THIS for Twitter — never chain manually; "
+    "like_tweet(tweet_url)→LIKE a tweet; "
+    "reply_tweet(tweet_url, text)→REPLY to a tweet; "
+    "follow_user(username)→FOLLOW a Twitter user; "
+    "tiktok_like(video_url)→LIKE a TikTok video; "
+    "tiktok_comment(video_url, text)→COMMENT on a TikTok video; "
+    "tiktok_follow(username)→FOLLOW a TikTok user; "
+    "send_gmail(to, subject, body, tab_index?)→COMPOSE AND SEND a new Gmail email in one step. "
+    "USE THIS for Gmail — never chain manually."
 )
+
+SKILL_TIMEOUT = 60  # browser operations can take up to 60s
 
 _SCREENSHOT_DIR = Path("/app/memory/browser_screenshots")
 _CDP_URL = os.getenv("BROWSER_CDP_URL", "http://host.docker.internal:9223")
 
 logger = logging.getLogger(__name__)
+
+# Roles considered "interactive" for get_snapshot output
+_INTERACTIVE_ROLES = {
+    "button", "link", "textbox", "checkbox", "radio", "combobox",
+    "listbox", "menuitem", "tab", "spinbutton", "searchbox", "option",
+    "menuitemcheckbox", "menuitemradio", "treeitem", "switch",
+}
+
+
+def _format_a11y_tree(node: dict, depth: int = 0, lines: list = None, count: list = None) -> list:
+    """Recursively format an accessibility tree node into readable lines.
+    Only includes interactive roles with non-empty names. Max 120 items.
+    """
+    if lines is None:
+        lines = []
+    if count is None:
+        count = [0]
+    if count[0] >= 120:
+        return lines
+    role = (node.get("role") or "").lower()
+    name = (node.get("name") or "").strip()
+    if role in _INTERACTIVE_ROLES and name:
+        indent = "  " * depth
+        lines.append(f"{indent}{role} \"{name}\"")
+        count[0] += 1
+    for child in node.get("children") or []:
+        _format_a11y_tree(child, depth + 1, lines, count)
+    return lines
 
 
 # ─────────────────────────────────────────────
@@ -824,40 +868,47 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
                 "Tip: call browser_session.screenshot() to see the current state."
             )
 
-        # Step 4: fill To field.
-        # Try the visible chip-autocomplete input first (input.agP), then fall back to
-        # keyboard typing — Gmail opens compose with focus on the To area already.
+        # Step 4: fill To field via get_by_role — works across iframes, language-independent.
+        # The To field is always the first textbox in the compose dialog.
+        # get_by_role() on the detected frame (ctx) handles iframe scope automatically.
         to_typed = False
-        for to_sel in ["input.agP", "input.agP.aFw", 'input[autocomplete="email"]']:
-            try:
-                to_el = ctx.locator(to_sel).first
-                to_el.wait_for(state="visible", timeout=2000)
-                to_el.click()
-                to_el.type(to, delay=30)
-                page.keyboard.press("Tab")
-                to_typed = True
-                break
-            except Exception:
-                continue
+        try:
+            to_el = ctx.get_by_role("textbox").first
+            to_el.wait_for(state="visible", timeout=5000)
+            to_el.click()
+            to_el.fill(to)
+            page.keyboard.press("Tab")
+            to_typed = True
+        except Exception:
+            pass
         if not to_typed:
-            # Compose opens with focus on To — type directly via keyboard as last resort
+            # Last resort: compose opens with focus on To — type via keyboard directly
             page.keyboard.type(to, delay=30)
             page.keyboard.press("Tab")
         page.wait_for_timeout(200)
 
-        # Step 5: fill Subject
+        # Step 5: fill Subject — [name="subjectbox"] is an HTML attribute, language-independent
         subject_el = ctx.locator('[name="subjectbox"]').first
+        subject_el.wait_for(state="visible", timeout=5000)
         subject_el.click()
-        subject_el.type(subject, delay=30)
+        subject_el.fill(subject)
         page.wait_for_timeout(200)
 
-        # Step 6: fill Body
-        body_el = ctx.locator('div[contenteditable="true"][aria-multiline="true"]').first
-        body_el.wait_for(state="visible", timeout=8000)
+        # Step 6: fill Body — the second contenteditable textbox in compose
+        body_el = ctx.get_by_role("textbox").nth(1)
+        try:
+            body_el.wait_for(state="visible", timeout=5000)
+        except Exception:
+            # fallback to the old selector if nth(1) doesn't work
+            body_el = ctx.locator('div[contenteditable="true"][aria-multiline="true"]').first
+            body_el.wait_for(state="visible", timeout=5000)
         body_el.click()
-        page.wait_for_timeout(300)
-        body_el.type(body, delay=40)
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(200)
+        try:
+            body_el.fill(body)
+        except Exception:
+            body_el.type(body, delay=40)
+        page.wait_for_timeout(200)
 
         # Step 7: send via Ctrl+Enter
         page.keyboard.press("Control+Enter")
@@ -882,6 +933,141 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
             f"❌ Could not send Gmail: {e}\n"
             f"Tip: call browser_session.screenshot() to see what's on screen, "
             f"or browser_session.get_html(selector=\"[role='main']\") to inspect the DOM."
+        )
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def get_snapshot(tab_index: int = 0) -> str:
+    """Get a semantic accessibility snapshot of the current page.
+
+    Returns a list of interactive elements (buttons, links, textboxes, etc.)
+    with their ARIA role and visible name — works across iframes automatically.
+    Use this to understand page structure WITHOUT needing CSS selectors.
+    Then use click_accessible() or type_accessible() to interact with elements.
+
+    Example workflow:
+      1. get_snapshot()          → see 'button "Compose"', 'textbox "To"', etc.
+      2. click_accessible("button", "Compose")
+      3. type_accessible("textbox", "To", "user@example.com")
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, tab_index)
+
+        # Try Playwright's newer aria_snapshot (1.35+) first; fall back to older API
+        snapshot_text = None
+        try:
+            snapshot_text = page.locator("body").aria_snapshot()
+        except Exception:
+            pass
+
+        if snapshot_text:
+            # aria_snapshot returns YAML-like text already formatted
+            lines = [l for l in snapshot_text.splitlines() if l.strip()][:120]
+            body = "\n".join(lines)
+        else:
+            # Older Playwright: use accessibility.snapshot() dict + format it
+            tree = page.accessibility.snapshot()
+            if not tree:
+                return "⚠️ Accessibility snapshot is empty — page may still be loading."
+            lines = _format_a11y_tree(tree)
+            body = "\n".join(lines) if lines else "(No interactive elements found)"
+
+        return (
+            f"📋 Page Snapshot — {page.url}\n"
+            f"Title: {page.title()}\n"
+            + "─" * 50 + "\n"
+            + body + "\n\n"
+            "Use click_accessible(role, name) or type_accessible(role, name, text) "
+            "to interact with any element above."
+        )
+    except Exception as e:
+        return f"❌ {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def click_accessible(role: str, name: str, tab_index: int = 0, exact: bool = False) -> str:
+    """Click a page element by its ARIA role and visible label — no CSS selector needed.
+
+    role: ARIA role such as 'button', 'link', 'tab', 'menuitem', 'checkbox', etc.
+    name: the visible label or aria-label of the element (partial match by default).
+    exact: set True to require an exact name match (default False = partial match).
+
+    Works across iframes automatically.
+    Get role and name values from get_snapshot() first if unsure.
+
+    Examples:
+      click_accessible("button", "Compose")
+      click_accessible("link", "Inbox")
+      click_accessible("button", "Send")
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, tab_index)
+        locator = page.get_by_role(role, name=name, exact=exact).first
+        locator.wait_for(state="visible", timeout=10000)
+        locator.click()
+        return f"✅ Clicked {role} \"{name}\"\nURL after click: {page.url}"
+    except Exception as e:
+        return (
+            f"❌ Could not click {role} \"{name}\": {e}\n"
+            f"Tip: call get_snapshot() to see all available elements on this page."
+        )
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def type_accessible(role: str, name: str, text: str, tab_index: int = 0, exact: bool = False) -> str:
+    """Type text into any input field by its ARIA role and label — no CSS selector needed.
+
+    role: usually 'textbox', 'searchbox', or 'spinbutton'.
+    name: the visible label or placeholder of the field (partial match by default).
+    text: the text to type into the field. Clears existing content first.
+    exact: set True for exact name match (default False = partial match).
+
+    Works across iframes automatically — no iframe handling needed.
+    Get role and name values from get_snapshot() first if unsure.
+
+    Examples:
+      type_accessible("textbox", "To", "user@example.com")
+      type_accessible("textbox", "Subject", "Hello there")
+      type_accessible("searchbox", "Search", "my query")
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, tab_index)
+        locator = page.get_by_role(role, name=name, exact=exact).first
+        locator.wait_for(state="visible", timeout=10000)
+        locator.click()
+        # fill() clears and sets value — works on <input>, <textarea>, and contenteditable
+        try:
+            locator.fill(text)
+        except Exception:
+            # fallback for non-standard inputs (contenteditable without value)
+            locator.press("Control+a")
+            locator.type(text, delay=40)
+        return f"✅ Typed into {role} \"{name}\": {text[:100]}{'...' if len(text) > 100 else ''}"
+    except Exception as e:
+        return (
+            f"❌ Could not type into {role} \"{name}\": {e}\n"
+            f"Tip: call get_snapshot() to see all available fields on this page."
         )
     finally:
         if pw:
