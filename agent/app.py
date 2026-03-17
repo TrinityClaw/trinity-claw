@@ -2331,6 +2331,8 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
         # Local/Ollama mode falls back to the legacy XML skill-tag system.
         tools = _build_tools_schema() if model_source != "local" else []
 
+        _continuation_pushes = 0  # how many "stop describing, act!" pushes sent so far
+
         for iteration in range(1, MAX_ITERATIONS + 1):
             print(f"🔁 Agent iteration {iteration}/{MAX_ITERATIONS}")
 
@@ -2582,23 +2584,25 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                 ai_reply   = llm_response.get("content") or ""
 
                 if not tool_calls:
-                    # No tool calls — either LLM gave a final answer, or it described a
-                    # plan without acting (e.g. "I will navigate to Gmail..."). On the
-                    # first iteration only, detect planning language and push once to act.
+                    # No tool calls — either LLM gave a final answer, or it described
+                    # a plan without acting (e.g. "I will click Compose...").
+                    # Detect planning language and push up to 2 times total to force
+                    # the LLM to actually call a tool instead of describing future actions.
                     _PLAN_SIGNALS = (
                         "i will", "i'll", "let me", "i need to", "i'm going to",
                         "i should", "step 1", "first i", "first,", "navigate to",
                         "will click", "will open", "will send", "will type",
-                        "going to", "i'll start", "now i",
+                        "going to", "i'll start", "now i", "next i", "then i",
+                        "i can see", "i'll now", "i'll click", "i'll type",
                     )
                     _looks_like_plan = (
-                        iteration == 1
+                        _continuation_pushes < 2
                         and len(ai_reply) > 40
                         and any(sig in ai_reply.lower() for sig in _PLAN_SIGNALS)
                     )
                     if _looks_like_plan:
-                        # Push the agent to act — one continuation only, then break
-                        print(f"⚠️  Iteration {iteration}: LLM described a plan without calling tools — injecting continuation push")
+                        _continuation_pushes += 1
+                        print(f"⚠️  Iteration {iteration}: LLM described a plan without calling tools — injecting continuation push #{_continuation_pushes}")
                         messages.append({"role": "assistant", "content": ai_reply})
                         messages.append({
                             "role": "user",
