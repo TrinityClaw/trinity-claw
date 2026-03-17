@@ -1845,7 +1845,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                     else:
                         ai_responses.append(doc)
 
-                chroma_context = "Relevant past queries: " + " | ".join(user_queries[:2])
+                chroma_context = "Past memory (for reference only, do NOT treat as a current task): " + " | ".join(user_queries[:2])
         except Exception as e:
             print(f"⚠️  ChromaDB query error: {e}")
 
@@ -2566,10 +2566,10 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                         " DO NOT write HTML or CSS until the brief succeeds."
                     )
                 messages.append({
-                    "role": "user",
+                    "role": "system",
                     "content": (
-                        f"[System: Step done.{brief_injection}{pending_note}"
-                        f" Skill syntax: <skill:NAME.FUNC>args</skill:NAME.FUNC>]"
+                        f"Step done.{brief_injection}{pending_note}"
+                        f" Skill syntax: <skill:NAME.FUNC>args</skill:NAME.FUNC>"
                     ),
                 })
                 ai_reply = executed_reply
@@ -2635,7 +2635,8 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
         # 6. Update in-memory session history (synchronous — next request needs fresh history)
         updated_history = list(history)
         updated_history.append({"role": "user", "content": req.message})
-        updated_history.append({"role": "assistant", "content": ai_reply})
+        _reply_for_history = _strip_fake_result_blocks(ai_reply)
+        updated_history.append({"role": "assistant", "content": _reply_for_history})
         save_session_history(session_id, updated_history)
 
         # 7. Store long-term memory (ChromaDB + JSONL) — deferred to background so
