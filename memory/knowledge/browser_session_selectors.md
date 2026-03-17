@@ -4,21 +4,40 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 
 ---
 
-## ⚡ PREFERRED APPROACH — No CSS Selectors Needed
+## ⚡ PREFERRED APPROACH — @eN Refs (fastest, no selectors needed)
 
-**Always use this pattern first for any page:**
+`get_snapshot()` now works like `agent-browser snapshot -i`:
+- Scans **main page + all iframes** automatically
+- Filters to interactive elements only (buttons, links, textboxes, etc.)
+- Assigns stable `@e1`, `@e2`, ... refs for the current page state
+
+**Step-by-step for any page:**
 
 ```
-1. browser_session.goto("https://...")           — navigate
-2. browser_session.get_snapshot()                — READ the page (buttons, textboxes, links by name)
-3. browser_session.click_accessible("button", "Compose")   — click by role + label
-4. browser_session.type_accessible("textbox", "To", "user@example.com")  — type by role + label
+1. browser_session.goto("https://...")
+2. browser_session.get_snapshot()
+   → @e1  link "Inbox"
+   → @e5  button "Compose"
+   → @e9  textbox "Search mail"
+   → [iframe[3]]
+   → @e12 textbox "To"
+   → @e13 textbox "Subject"
+   → @e14 textbox "Message Body"
+3. browser_session.click_ref("@e5")                    ← click Compose by ref
+4. browser_session.fill_ref("@e12", "user@example.com") ← fill To by ref
+5. browser_session.fill_ref("@e13", "Subject here")
+6. browser_session.fill_ref("@e14", "Body here")
+7. browser_session.click_ref("@e20")                   ← click Send by ref
 ```
 
-`get_snapshot()` works across iframes automatically. It returns elements by their semantic name
-so it works in any language (Serbian, English, etc.) without needing CSS selectors.
+**Or use role+name (still works, no need for refs):**
+```
+browser_session.click_accessible("button", "Compose")
+browser_session.type_accessible("textbox", "To", "user@example.com")
+```
 
-**Use CSS selectors (sections below) ONLY as last-resort fallback if `click_accessible` fails.**
+`get_snapshot()` covers iframes automatically — Gmail compose fields, LinkedIn DMs, etc. are visible.
+**Use CSS selectors (sections below) ONLY as last-resort fallback if ref/accessible methods fail.**
 
 For single-call platform helpers (tweet, send_gmail, etc.) see the ALL FUNCTIONS list in the DOC.
 
