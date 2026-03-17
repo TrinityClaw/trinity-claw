@@ -2067,7 +2067,9 @@ Tool names follow the pattern: skill_name__function_name (double underscore sepa
 Example: to search the web call web__search, to upload to Drive call google_drive__upload_to_folder.
 
 NEVER write fake result blocks like [✅ ...] or [❌ ...] yourself — those only appear when a real tool runs.
-NEVER claim you completed an action until the tool result confirms it."""
+NEVER claim you completed an action until the tool result confirms it.
+
+CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call the tool IN THE SAME RESPONSE. Never write "I will navigate to X" or "Let me click Y" and stop — that produces text with no action and the task never executes. If you need to do something, CALL THE TOOL NOW. Text describing future actions is not a substitute for calling the tool."""
 
         _search_example = "Call the web__search tool with query='current weather New York NY'"
 
@@ -2306,7 +2308,7 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
 - Ask one question at a time if confused
 {_local_model_reminder}"""
 
-    MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "12"))
+    MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
 
     try:
         model_source = "local" if _is_local_model else "cloud"
@@ -2580,7 +2582,32 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                 ai_reply   = llm_response.get("content") or ""
 
                 if not tool_calls:
-                    # No tools requested → LLM produced its final answer
+                    # No tool calls — either LLM gave a final answer, or it described a
+                    # plan without acting (e.g. "I will navigate to Gmail..."). On the
+                    # first iteration only, detect planning language and push once to act.
+                    _PLAN_SIGNALS = (
+                        "i will", "i'll", "let me", "i need to", "i'm going to",
+                        "i should", "step 1", "first i", "first,", "navigate to",
+                        "will click", "will open", "will send", "will type",
+                        "going to", "i'll start", "now i",
+                    )
+                    _looks_like_plan = (
+                        iteration == 1
+                        and len(ai_reply) > 40
+                        and any(sig in ai_reply.lower() for sig in _PLAN_SIGNALS)
+                    )
+                    if _looks_like_plan:
+                        # Push the agent to act — one continuation only, then break
+                        print(f"⚠️  Iteration {iteration}: LLM described a plan without calling tools — injecting continuation push")
+                        messages.append({"role": "assistant", "content": ai_reply})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Stop describing — call the tool now using the function-calling interface. "
+                                "Do not write any more text. Just call the tool."
+                            ),
+                        })
+                        continue
                     print(f"✅ Agent loop complete after {iteration} iteration(s)")
                     break
 
