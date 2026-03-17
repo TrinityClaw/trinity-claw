@@ -1482,6 +1482,7 @@ def analyze_design_folder(folder: str, language: str = "English", model: str = N
 
 __all__ = [
     "NAME", "DOC",
+    "get_design_system",
     "analyze_design_folder",
     "scaffold", "write_file", "patch_file", "read_file",
     "delete_file", "delete_project", "export_zip",
