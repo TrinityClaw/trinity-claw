@@ -346,7 +346,18 @@ then scan for `aria-label` attributes to find the current correct selectors.
 9. notes.write("dm_log", "Gmail reply sent to [sender] — Subject: [subject] — [summary]")
 ```
 
-### Step-by-Step: Compose a New Email
+### Compose a New Email — PREFERRED METHOD (single call)
+
+> **Use single-call function — never chain steps manually.**
+> This function handles the full workflow internally and is reliable with small LLMs.
+
+```
+browser_session.send_gmail("recipient@email.com", "Subject line here", "Email body here")
+```
+ALWAYS use `send_gmail()` for new emails. Never chain goto+click+type_text+press_key manually.
+If Gmail is not on tab 0, pass the correct tab: `browser_session.send_gmail(..., tab_index=2)`
+
+### Compose a New Email (manual fallback — only if send_gmail() fails)
 
 ```
 1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")

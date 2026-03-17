@@ -136,14 +136,23 @@ Run `browser_session.get_html(selector="section")` and look for `aria-label` att
 7. browser_session.press_key("Control+Enter")                                           — send (universal)
 ```
 
-### Compose a new email (quick reference)
+### Compose a new email — PREFERRED METHOD (single call)
+```
+browser_session.send_gmail("recipient@example.com", "Subject here", "Body here")
+```
+This single function handles the complete workflow internally: goto inbox → compose → fill To/Subject/Body → send.
+ALWAYS use browser_session.send_gmail() for new emails. Never chain goto+click+type_text+press_key manually.
+If Gmail is not on tab 0, pass the correct index: `browser_session.send_gmail(..., tab_index=2)`
+
+### Compose a new email (manual fallback — only if send_gmail() fails)
 ```
 1. browser_session.click('[gh="cm"]')                                                   — compose (language-independent)
 2. browser_session.type_text('[name="to"]', "email@example.com")                        — recipient
-3. browser_session.type_text('[name="subjectbox"]', "Subject here")                     — subject
-4. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Body here")
-5. browser_session.screenshot()                                                         — verify
-6. browser_session.press_key("Control+Enter")                                           — send
+3. browser_session.press_key("Tab")                                                     — move to subject
+4. browser_session.type_text('[name="subjectbox"]', "Subject here")                     — subject
+5. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Body here")
+6. browser_session.screenshot()                                                         — verify
+7. browser_session.press_key("Control+Enter")                                           — send
 ```
 
 ### If Gmail selectors fail
