@@ -39,7 +39,9 @@ DOC = (
     "delete_project(project)→remove entire project; list_projects()→all projects; "
     "serve(project,port)→live preview; stop_server()→stop preview; validate(project)→HTML checks; "
     "export_zip(project)→pack project as downloadable zip. "
+    "get_design_system(description,project_name?)→generate industry-matched design system (colors, typography, UI style, anti-patterns) using 161 reasoning rules; call BEFORE scaffold() for best results. "
     "TEXT-ONLY BUILD WORKFLOW: scaffold(name,professional) → patch_file×N (update content/colors) → serve(). "
+    "DESIGN-AWARE BUILD WORKFLOW (RECOMMENDED): get_design_system(description) → scaffold(name,professional) → patch_file×N (apply design system colors/fonts) → serve(). "
     "IMAGE BUILD WORKFLOW: analyze_design_folder() → scaffold(name,professional) → patch_file×N (apply brief colors/text) → serve()."
 )
 
@@ -818,6 +820,48 @@ def _slugify(name: str) -> str:
 def _safe_filename(filename: str) -> bool:
     p = Path(filename)
     return p.suffix in ALLOWED_EXTENSIONS and p.name == str(p) and ".." not in filename
+
+# ── UI/UX Design System ───────────────────────────────────────────────────────
+
+_UI_UX_SCRIPTS = Path("/app/tools/ui_ux/scripts")
+
+def get_design_system(description: str, project_name: str = None) -> str:
+    """
+    Generate an industry-matched design system for a web project.
+
+    Uses the UI/UX Pro Max reasoning engine (161 rules, 67 styles, 161 color
+    palettes, 57 font pairings) to recommend colors, typography, UI style,
+    anti-patterns to avoid, and a pre-delivery checklist.
+
+    Call this BEFORE scaffold() to get design context, then use patch_file()
+    to apply the recommended colors and fonts to the scaffolded project.
+
+    Args:
+        description:  Natural language description of the project
+                      (e.g. "beauty spa landing page", "SaaS dashboard fintech")
+        project_name: Optional display name for the output header
+
+    Returns:
+        Formatted design system string with colors, fonts, style, anti-patterns.
+
+    Example:
+        <skill:web_builder.get_design_system>beauty spa landing page,Serenity Spa</skill:web_builder.get_design_system>
+    """
+    import sys
+    scripts_path = str(_UI_UX_SCRIPTS)
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    try:
+        from design_system import generate_design_system
+        return generate_design_system(description, project_name, output_format="markdown")
+    except ImportError:
+        return (
+            "❌ UI/UX Pro Max tools not found at /app/tools/ui_ux/scripts/. "
+            "Ensure agent/tools/ui_ux/ is present in the repo and the container has been rebuilt."
+        )
+    except Exception as e:
+        return f"❌ Design system error: {e}"
+
 
 # ── Public skill functions ────────────────────────────────────────────────────
 
