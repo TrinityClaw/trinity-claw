@@ -40,8 +40,9 @@ DOC = (
     "serve(project,port)→live preview; stop_server()→stop preview; validate(project)→HTML checks; "
     "export_zip(project)→pack project as downloadable zip. "
     "get_design_system(description,project_name?)→generate industry-matched design system (colors, typography, UI style, anti-patterns) using 161 reasoning rules; call BEFORE scaffold() for best results. "
-    "TEXT-ONLY BUILD WORKFLOW: scaffold(name,professional) → patch_file×N (update content/colors) → serve(). "
-    "DESIGN-AWARE BUILD WORKFLOW (RECOMMENDED): get_design_system(description) → scaffold(name,professional) → patch_file×N (apply design system colors/fonts) → serve(). "
+    "⚠️ CRITICAL RULE: After scaffold(), ALWAYS use patch_file() — NEVER write_file() on index.html or style.css. write_file() overwrites the full professional template and destroys the layout. "
+    "TEXT-ONLY BUILD WORKFLOW: scaffold(name,professional) → patch_file×N (update placeholders + :root colors) → serve(). "
+    "DESIGN-AWARE BUILD WORKFLOW (RECOMMENDED): get_design_system(description) → scaffold(name,professional) → patch_file×N (apply design system :root variables, fonts, section text) → serve(). "
     "IMAGE BUILD WORKFLOW: analyze_design_folder() → scaffold(name,professional) → patch_file×N (apply brief colors/text) → serve()."
 )
 
@@ -900,8 +901,12 @@ def scaffold(name: str, template: str = "blank") -> str:
     return (
         f"🚀 Project '{slug}' created ({template} template):\n"
         + "\n".join(created)
-        + f"\n\nNext step: write_file({slug}, index.html, <html content>)"
-        + f" then write_file({slug}, style.css, ...) then write_file({slug}, script.js, ...) then serve({slug})"
+        + f"\n\n⚠️ IMPORTANT: Do NOT use write_file() on index.html or style.css — this would overwrite the complete professional template and break the layout."
+        + f"\n\nNext step: Use patch_file() to update content and apply design system colors/fonts."
+        + f"\n  • patch_file({slug}, style.css, old_css_block, new_css_block) — swap :root color/font variables"
+        + f"\n  • patch_file({slug}, index.html, placeholder_text, real_content) — replace each placeholder section"
+        + f"\n  • patch_file({slug}, script.js, old_js, new_js) — only if JS changes needed"
+        + f"\nFinish with: serve({slug})"
     )
 
 
