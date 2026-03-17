@@ -1071,8 +1071,19 @@ def click_accessible(role: str, name: str, tab_index: int = 0, exact: bool = Fal
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
         locator = _find_in_frames(page, role, name, exact=exact)
+        # Read back the actual element label before clicking for verification
+        try:
+            actual_label = locator.evaluate(
+                "el => el.getAttribute('aria-label') || el.getAttribute('name') "
+                "|| el.getAttribute('placeholder') || el.textContent?.trim() || ''"
+            ) or name
+        except Exception:
+            actual_label = name
         locator.click()
-        return f"✅ Clicked {role} \"{name}\"\nURL after click: {page.url}"
+        result = f"✅ Clicked {role} \"{actual_label}\"\nURL after click: {page.url}"
+        if actual_label.lower().strip() != name.lower().strip():
+            result += f"\n⚠️  You requested \"{name}\" but matched \"{actual_label}\" — verify this is correct."
+        return result
     except Exception as e:
         return (
             f"❌ Could not click {role} \"{name}\": {e}\n"
@@ -1107,6 +1118,14 @@ def type_accessible(role: str, name: str, text: str, tab_index: int = 0, exact: 
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
         locator = _find_in_frames(page, role, name, exact=exact)
+        # Read back the actual element label before typing for verification
+        try:
+            actual_label = locator.evaluate(
+                "el => el.getAttribute('aria-label') || el.getAttribute('name') "
+                "|| el.getAttribute('placeholder') || ''"
+            ) or name
+        except Exception:
+            actual_label = name
         locator.click()
         # fill() clears and sets value — works on <input>, <textarea>, and contenteditable
         try:
@@ -1115,7 +1134,10 @@ def type_accessible(role: str, name: str, text: str, tab_index: int = 0, exact: 
             # fallback for non-standard inputs (contenteditable without value)
             locator.press("Control+a")
             locator.type(text, delay=40)
-        return f"✅ Typed into {role} \"{name}\": {text[:100]}{'...' if len(text) > 100 else ''}"
+        result = f"✅ Typed into {role} \"{actual_label}\": {text[:100]}{'...' if len(text) > 100 else ''}"
+        if actual_label.lower().strip() != name.lower().strip():
+            result += f"\n⚠️  You requested \"{name}\" but matched \"{actual_label}\" — verify this is the correct field. Call get_snapshot() to check field names."
+        return result
     except Exception as e:
         return (
             f"❌ Could not type into {role} \"{name}\": {e}\n"
