@@ -1033,32 +1033,6 @@ def get_snapshot(tab_index: int = 0) -> str:
             lines = _format_a11y_tree(tree)
             body = "\n".join(lines) if lines else "(No interactive elements found)"
 
-        # Also snapshot child frames — Gmail compose, LinkedIn/Instagram message boxes
-        # live inside iframes and may not appear in the main body aria_snapshot.
-        frame_sections = []
-        for i, frame in enumerate(page.frames):
-            if frame is page.main_frame:
-                continue
-            try:
-                fsnapshot = frame.locator("body").aria_snapshot()
-                if not fsnapshot:
-                    continue
-                flines = [l for l in fsnapshot.splitlines() if l.strip()]
-                # Only include if the frame has meaningful interactive content
-                interactive = [l for l in flines if any(
-                    l.lstrip().startswith(r) for r in
-                    ("button", "textbox", "link", "combobox", "checkbox", "tab", "menuitem", "searchbox")
-                )]
-                if interactive:
-                    frame_sections.append(
-                        f"\n[iframe {i}]\n" + "\n".join(flines[:60])
-                    )
-            except Exception:
-                continue
-
-        if frame_sections:
-            body += "\n" + "\n".join(frame_sections)
-
         return (
             f"📋 Page Snapshot — {page.url}\n"
             f"Title: {page.title()}\n"
