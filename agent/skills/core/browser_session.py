@@ -894,13 +894,14 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
         subject_el.fill(subject)
         page.wait_for_timeout(200)
 
-        # Step 6: fill Body — the second contenteditable textbox in compose
-        body_el = ctx.get_by_role("textbox").nth(1)
+        # Step 6: fill Body — Gmail body is a contenteditable div with aria-multiline=true.
+        # Do NOT use nth(1) — that grabs the Subject input, not the body.
+        body_el = ctx.locator('div[contenteditable="true"][aria-multiline="true"]').first
         try:
             body_el.wait_for(state="visible", timeout=5000)
         except Exception:
-            # fallback to the old selector if nth(1) doesn't work
-            body_el = ctx.locator('div[contenteditable="true"][aria-multiline="true"]').first
+            # fallback: last textbox role in compose (To=0, Subject=1, Body=2+)
+            body_el = ctx.get_by_role("textbox").last
             body_el.wait_for(state="visible", timeout=5000)
         body_el.click()
         page.wait_for_timeout(200)
