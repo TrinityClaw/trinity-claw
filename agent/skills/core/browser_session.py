@@ -12,14 +12,16 @@ DOC = (
 
     "=== PREFERRED INTERACTION PATTERN (no CSS selectors needed) === "
     "Step 1: goto(url) to navigate. "
-    "Step 2: get_snapshot() to see all interactive elements by role and name. "
-    "Step 3: click_accessible(role, name) to click, or type_accessible(role, name, text) to type. "
-    "These three functions work on ANY website without needing to know CSS selectors or DOM structure. "
-    "Works across iframes automatically. "
+    "Step 2: get_snapshot() — see every interactive element with @eN refs (like agent-browser snapshot -i). "
+    "Step 3a: click_ref('@e3') / fill_ref('@e7', text) — interact by ref (FASTEST). "
+    "Step 3b: click_accessible(role, name) / type_accessible(role, name, text) — interact by role+name. "
+    "Works across ALL iframes automatically (Gmail compose, LinkedIn DMs, etc.). "
 
     "=== ALL FUNCTIONS === "
-    "get_snapshot(tab_index?)→READ the page — returns all buttons, links, textboxes etc. by role+name. "
-    "ALWAYS call this first when you need to interact with a page you haven't seen before; "
+    "get_snapshot(tab_index?)→READ the page — returns @eN refs + role+name for every interactive element "
+    "on main page AND all iframes. ALWAYS call first when you need to interact with a new page; "
+    "click_ref(ref, tab_index?)→CLICK by @eN ref from last get_snapshot(). Fastest way to click; "
+    "fill_ref(ref, text, tab_index?)→FILL/TYPE into field by @eN ref from last get_snapshot(); "
     "click_accessible(role, name, tab_index?, exact?)→CLICK any element by its ARIA role and label. "
     "role examples: button/link/tab/menuitem/checkbox. Works across iframes. "
     "Use get_snapshot() first to find the correct role and name; "
@@ -59,6 +61,10 @@ _CDP_URL = os.getenv("BROWSER_CDP_URL", "http://host.docker.internal:9223")
 
 logger = logging.getLogger(__name__)
 
+# Ref cache: populated by get_snapshot(), maps '@e1' → (role, name).
+# Lets click_ref / fill_ref target elements without re-specifying role+name.
+_ref_cache: dict = {}
+
 # Roles considered "interactive" for get_snapshot output
 _INTERACTIVE_ROLES = {
     "button", "link", "textbox", "checkbox", "radio", "combobox",
@@ -69,13 +75,13 @@ _INTERACTIVE_ROLES = {
 
 def _format_a11y_tree(node: dict, depth: int = 0, lines: list = None, count: list = None) -> list:
     """Recursively format an accessibility tree node into readable lines.
-    Only includes interactive roles with non-empty names. Max 120 items.
+    Only includes interactive roles with non-empty names. Max 250 items.
     """
     if lines is None:
         lines = []
     if count is None:
         count = [0]
-    if count[0] >= 120:
+    if count[0] >= 250:
         return lines
     role = (node.get("role") or "").lower()
     name = (node.get("name") or "").strip()
@@ -86,6 +92,41 @@ def _format_a11y_tree(node: dict, depth: int = 0, lines: list = None, count: lis
     for child in node.get("children") or []:
         _format_a11y_tree(child, depth + 1, lines, count)
     return lines
+
+
+def _collect_a11y_nodes(node: dict, results: list, limit: int = 250) -> None:
+    """Recursively collect (role, name) tuples for interactive nodes."""
+    if len(results) >= limit:
+        return
+    role = (node.get("role") or "").lower()
+    name = (node.get("name") or "").strip()
+    if role in _INTERACTIVE_ROLES and name:
+        results.append((role, name))
+    for child in node.get("children") or []:
+        _collect_a11y_nodes(child, results, limit)
+
+
+def _filter_snapshot_lines(snapshot_text: str, limit: int = 250) -> list:
+    """Extract only interactive element lines from Playwright's aria_snapshot() YAML output.
+
+    Skips structural roles (banner, heading, list, group, /url, /text, etc.)
+    and property lines so the agent only sees clickable/typeable elements.
+    """
+    result = []
+    for line in snapshot_text.splitlines():
+        stripped = line.strip().lstrip("- ").strip()
+        if not stripped:
+            continue
+        # Property lines start with / (e.g. /url: "", /text: "…") — skip
+        if stripped.startswith("/"):
+            continue
+        # Extract the first word as the role (strip trailing colon or bracket)
+        first_word = stripped.split()[0].lower().rstrip(":[")
+        if first_word in _INTERACTIVE_ROLES:
+            result.append(line)
+            if len(result) >= limit:
+                break
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -999,47 +1040,90 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
 def get_snapshot(tab_index: int = 0) -> str:
     """Get a semantic accessibility snapshot of the current page.
 
-    Returns a list of interactive elements (buttons, links, textboxes, etc.)
-    with their ARIA role and visible name — works across iframes automatically.
-    Use this to understand page structure WITHOUT needing CSS selectors.
-    Then use click_accessible() or type_accessible() to interact with elements.
+    Returns a filtered list of interactive elements (buttons, links, textboxes, etc.)
+    with @eN refs — same idea as `agent-browser snapshot -i`.
+    Covers the main page AND every iframe automatically (Gmail compose, LinkedIn DMs, etc.).
 
-    Example workflow:
-      1. get_snapshot()          → see 'button "Compose"', 'textbox "To"', etc.
+    Workflow (preferred — no CSS selectors needed):
+      1. get_snapshot()                             → see '@e3 button "Compose"', '@e7 textbox "To"'
+      2. click_ref("@e3")                           → click by ref
+      3. fill_ref("@e7", "user@example.com")        → fill by ref
+      — or use role+name directly —
       2. click_accessible("button", "Compose")
       3. type_accessible("textbox", "To", "user@example.com")
     """
+    global _ref_cache
     pw = None
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
 
-        # Try Playwright's newer aria_snapshot (1.35+) first; fall back to older API
-        snapshot_text = None
-        try:
-            snapshot_text = page.locator("body").aria_snapshot()
-        except Exception:
-            pass
+        # Collect (role, name) from main frame + every meaningful child frame
+        # structure: list of (frame_label, [(role, name), ...])
+        sections = []
 
-        if snapshot_text:
-            # aria_snapshot returns YAML-like text already formatted
-            lines = [l for l in snapshot_text.splitlines() if l.strip()][:120]
-            body = "\n".join(lines)
-        else:
-            # Older Playwright: use accessibility.snapshot() dict + format it
-            tree = page.accessibility.snapshot()
-            if not tree:
-                return "⚠️ Accessibility snapshot is empty — page may still be loading."
-            lines = _format_a11y_tree(tree)
-            body = "\n".join(lines) if lines else "(No interactive elements found)"
+        frames_to_check = [(page.main_frame, "main")]
+        for i, frame in enumerate(page.frames):
+            if frame is page.main_frame:
+                continue
+            url = frame.url or ""
+            if url and url not in ("about:blank", ""):
+                frames_to_check.append((frame, f"iframe[{i}]"))
 
+        for frame, label in frames_to_check:
+            items = []
+            # Try accessibility.snapshot() dict first (most structured)
+            try:
+                tree = frame.accessibility.snapshot()
+                if tree:
+                    _collect_a11y_nodes(tree, items)
+            except Exception:
+                pass
+
+            # If dict API returned nothing, fall back to aria_snapshot() text
+            if not items:
+                try:
+                    snap = frame.locator("body").aria_snapshot()
+                    if snap:
+                        for line in _filter_snapshot_lines(snap):
+                            s = line.strip().lstrip("- ").strip()
+                            parts = s.split('"')
+                            if len(parts) >= 2:
+                                role = parts[0].strip().split()[0].lower().rstrip(":[")
+                                name = parts[1]
+                                if role in _INTERACTIVE_ROLES and name:
+                                    items.append((role, name))
+                except Exception:
+                    pass
+
+            if items:
+                sections.append((label, items))
+
+        if not sections:
+            return "⚠️ Accessibility snapshot is empty — page may still be loading."
+
+        # Assign @eN refs and build output
+        _ref_cache.clear()
+        output_parts = []
+        counter = 1
+
+        for label, items in sections:
+            if len(sections) > 1:
+                output_parts.append(f"\n[{label}]")
+            for role, name in items:
+                ref = f"@e{counter}"
+                _ref_cache[ref] = (role, name)
+                output_parts.append(f"  {ref}  {role} \"{name}\"")
+                counter += 1
+
+        body = "\n".join(output_parts)
         return (
             f"📋 Page Snapshot — {page.url}\n"
             f"Title: {page.title()}\n"
             + "─" * 50 + "\n"
             + body + "\n\n"
-            "Use click_accessible(role, name) or type_accessible(role, name, text) "
-            "to interact with any element above."
+            "Use click_ref('@e3') / fill_ref('@e7', text)  — or —  "
+            "click_accessible(role, name) / type_accessible(role, name, text)"
         )
     except Exception as e:
         return f"❌ {e}"
@@ -1149,6 +1233,53 @@ def type_accessible(role: str, name: str, text: str, tab_index: int = 0, exact: 
                 pw.stop()
             except Exception:
                 pass
+
+
+def click_ref(ref: str, tab_index: int = 0) -> str:
+    """Click an element by its @eN reference from the last get_snapshot() call.
+
+    ref: a ref like '@e3' returned by get_snapshot().
+    Equivalent to agent-browser's `click @e3` command.
+
+    Example:
+      get_snapshot()          → see '@e3 button "Compose"'
+      click_ref('@e3')        → clicks Compose
+    """
+    if ref not in _ref_cache:
+        return (
+            f"❌ Unknown ref '{ref}'. Call get_snapshot() first to refresh element refs.\n"
+            f"Known refs: {', '.join(sorted(_ref_cache.keys())[:10]) or 'none yet'}"
+        )
+    role, name = _ref_cache[ref]
+    result = click_accessible(role, name, tab_index)
+    return result.replace(
+        f"Could not click {role} \"{name}\"",
+        f"Could not click ref {ref} ({role} \"{name}\")"
+    )
+
+
+def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
+    """Fill a field by its @eN reference from the last get_snapshot() call.
+
+    ref: a ref like '@e7' returned by get_snapshot().
+    text: text to fill (clears existing content first).
+    Equivalent to agent-browser's `fill @e7 "text"` command.
+
+    Example:
+      get_snapshot()                      → see '@e7 textbox "To"'
+      fill_ref('@e7', 'user@example.com') → fills To field
+    """
+    if ref not in _ref_cache:
+        return (
+            f"❌ Unknown ref '{ref}'. Call get_snapshot() first to refresh element refs.\n"
+            f"Known refs: {', '.join(sorted(_ref_cache.keys())[:10]) or 'none yet'}"
+        )
+    role, name = _ref_cache[ref]
+    result = type_accessible(role, name, text, tab_index)
+    return result.replace(
+        f"Could not type into {role} \"{name}\"",
+        f"Could not fill ref {ref} ({role} \"{name}\")"
+    )
 
 
 def evaluate(js_code: str, tab_index: int = 0) -> str:
