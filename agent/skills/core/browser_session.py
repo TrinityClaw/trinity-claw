@@ -111,12 +111,34 @@ def _collect_a11y_nodes(node: dict, results: list, limit: int = 250) -> None:
 def _snapshot_page(page) -> str:
     """Build a snapshot string from an already-connected Playwright page.
 
-    Reuses the open connection — call this from within a function that already
-    called _connect(), so we avoid the overhead of a second CDP connection.
-    Updates _ref_cache in place.
+    Uses get_by_role().all() — the same API as _find_in_frames() — so every
+    name in _ref_cache is guaranteed to be findable by click_ref/fill_ref.
+    Iterates main frame + all non-blank child iframes (covers Gmail compose,
+    LinkedIn DMs, etc.). Names come from real DOM attributes, never truncated.
     """
     global _ref_cache
-    sections = []
+
+    # Ordered list of roles to scan; matches _INTERACTIVE_ROLES
+    _ROLES_TO_SCAN = [
+        "button", "link", "textbox", "searchbox", "combobox",
+        "checkbox", "radio", "switch", "spinbutton",
+        "menuitem", "menuitemcheckbox", "menuitemradio",
+        "tab", "listbox",
+    ]
+
+    # JS to read the accessible name from a DOM element — same priority as
+    # Playwright's own accessible-name algorithm: aria-label > title >
+    # placeholder > associated <label> > innerText/value (truncated at 120).
+    _GET_NAME_JS = """el => {
+        const v = el.getAttribute('aria-label')
+            || el.getAttribute('title')
+            || el.getAttribute('placeholder')
+            || (el.labels && el.labels[0] ? el.labels[0].innerText.trim() : '')
+            || el.innerText?.trim()?.slice(0, 120)
+            || el.value?.trim()?.slice(0, 120)
+            || '';
+        return v.trim();
+    }"""
 
     frames_to_check = [(page.main_frame, "main")]
     for i, frame in enumerate(page.frames):
@@ -126,28 +148,26 @@ def _snapshot_page(page) -> str:
         if url and url not in ("about:blank", ""):
             frames_to_check.append((frame, f"iframe[{i}]"))
 
+    sections = []
     for frame, label in frames_to_check:
         items = []
-        try:
-            tree = frame.accessibility.snapshot()
-            if tree:
-                _collect_a11y_nodes(tree, items)
-        except Exception:
-            pass
-        if not items:
+        seen = set()
+        for role in _ROLES_TO_SCAN:
             try:
-                snap = frame.locator("body").aria_snapshot()
-                if snap:
-                    for line in _filter_snapshot_lines(snap):
-                        s = line.strip().lstrip("- ").strip()
-                        parts = s.split('"')
-                        if len(parts) >= 2:
-                            r = parts[0].strip().split()[0].lower().rstrip(":[")
-                            n = parts[1]
-                            if r in _INTERACTIVE_ROLES and n:
-                                items.append((r, n))
+                locs = frame.get_by_role(role).all()
             except Exception:
-                pass
+                continue
+            for loc in locs:
+                try:
+                    if not loc.is_visible():
+                        continue
+                    name = loc.evaluate(_GET_NAME_JS)
+                    name = (name or "").strip()
+                    if name and (role, name) not in seen:
+                        seen.add((role, name))
+                        items.append((role, name))
+                except Exception:
+                    continue
         if items:
             sections.append((label, items))
 
