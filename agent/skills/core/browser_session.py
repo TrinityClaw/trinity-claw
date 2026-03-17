@@ -92,6 +92,59 @@ def _format_a11y_tree(node: dict, depth: int = 0, lines: list = None, count: lis
 # INTERNAL HELPERS
 # ─────────────────────────────────────────────
 
+def _find_in_frames(page, role: str, name: str, exact: bool = False):
+    """Find an element by ARIA role+name across the main page and all child frames.
+
+    Search order:
+      1. Main page (3 s fast try)
+      2. Each child frame (2 s each) — covers Gmail compose, LinkedIn/Instagram iframes, etc.
+      3. Fuzzy first-word fallback on main page + frames (handles "Subject field" → "Subject")
+
+    Returns the first visible Playwright Locator, or raises TimeoutError with a helpful message.
+    """
+    # 1. Main page fast try
+    try:
+        loc = page.get_by_role(role, name=name, exact=exact).first
+        loc.wait_for(state="visible", timeout=3000)
+        return loc
+    except Exception:
+        pass
+
+    # 2. Child frames (Gmail compose, LinkedIn messaging, etc. live in iframes)
+    for frame in page.frames:
+        if frame is page.main_frame:
+            continue
+        try:
+            loc = frame.get_by_role(role, name=name, exact=exact).first
+            loc.wait_for(state="visible", timeout=2000)
+            return loc
+        except Exception:
+            continue
+
+    # 3. Fuzzy fallback: try just the first word (e.g. "Subject field" → "Subject")
+    first_word = name.split()[0] if name.split() else name
+    if first_word != name:
+        try:
+            loc = page.get_by_role(role, name=first_word, exact=False).first
+            loc.wait_for(state="visible", timeout=2000)
+            return loc
+        except Exception:
+            pass
+        for frame in page.frames:
+            if frame is page.main_frame:
+                continue
+            try:
+                loc = frame.get_by_role(role, name=first_word, exact=False).first
+                loc.wait_for(state="visible", timeout=1500)
+                return loc
+            except Exception:
+                continue
+
+    raise TimeoutError(
+        f"Could not find {role} '{name}' on the page or any frame. "
+        f"Call get_snapshot() to see the correct element names."
+    )
+
 def _connect():
     """Start playwright and connect to existing Chrome via CDP.
     Returns (pw, browser). Caller MUST call pw.stop() in a finally block.
@@ -980,6 +1033,32 @@ def get_snapshot(tab_index: int = 0) -> str:
             lines = _format_a11y_tree(tree)
             body = "\n".join(lines) if lines else "(No interactive elements found)"
 
+        # Also snapshot child frames — Gmail compose, LinkedIn/Instagram message boxes
+        # live inside iframes and may not appear in the main body aria_snapshot.
+        frame_sections = []
+        for i, frame in enumerate(page.frames):
+            if frame is page.main_frame:
+                continue
+            try:
+                fsnapshot = frame.locator("body").aria_snapshot()
+                if not fsnapshot:
+                    continue
+                flines = [l for l in fsnapshot.splitlines() if l.strip()]
+                # Only include if the frame has meaningful interactive content
+                interactive = [l for l in flines if any(
+                    l.lstrip().startswith(r) for r in
+                    ("button", "textbox", "link", "combobox", "checkbox", "tab", "menuitem", "searchbox")
+                )]
+                if interactive:
+                    frame_sections.append(
+                        f"\n[iframe {i}]\n" + "\n".join(flines[:60])
+                    )
+            except Exception:
+                continue
+
+        if frame_sections:
+            body += "\n" + "\n".join(frame_sections)
+
         return (
             f"📋 Page Snapshot — {page.url}\n"
             f"Title: {page.title()}\n"
@@ -1017,14 +1096,13 @@ def click_accessible(role: str, name: str, tab_index: int = 0, exact: bool = Fal
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
-        locator = page.get_by_role(role, name=name, exact=exact).first
-        locator.wait_for(state="visible", timeout=10000)
+        locator = _find_in_frames(page, role, name, exact=exact)
         locator.click()
         return f"✅ Clicked {role} \"{name}\"\nURL after click: {page.url}"
     except Exception as e:
         return (
             f"❌ Could not click {role} \"{name}\": {e}\n"
-            f"Tip: call get_snapshot() to see all available elements on this page."
+            f"Tip: call get_snapshot() to see the correct element names on this page."
         )
     finally:
         if pw:
@@ -1054,8 +1132,7 @@ def type_accessible(role: str, name: str, text: str, tab_index: int = 0, exact: 
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
-        locator = page.get_by_role(role, name=name, exact=exact).first
-        locator.wait_for(state="visible", timeout=10000)
+        locator = _find_in_frames(page, role, name, exact=exact)
         locator.click()
         # fill() clears and sets value — works on <input>, <textarea>, and contenteditable
         try:
@@ -1068,7 +1145,7 @@ def type_accessible(role: str, name: str, text: str, tab_index: int = 0, exact: 
     except Exception as e:
         return (
             f"❌ Could not type into {role} \"{name}\": {e}\n"
-            f"Tip: call get_snapshot() to see all available fields on this page."
+            f"Tip: call get_snapshot() to see the correct field names on this page."
         )
     finally:
         if pw:
