@@ -762,6 +762,29 @@ def tiktok_follow(username: str) -> str:
                 pass
 
 
+def _find_gmail_compose(page):
+    """Return the frame (or page) that contains the Gmail compose window.
+
+    Gmail renders its compose dialog inside an <iframe>. This function checks
+    the main page first, then searches all child frames for the subjectbox input.
+    Returns the frame/page object on success, or None if compose is not found.
+    """
+    # Try main page first (some Gmail versions don't use an iframe)
+    try:
+        page.locator('[name="subjectbox"]').first.wait_for(state="visible", timeout=2000)
+        return page
+    except Exception:
+        pass
+    # Search all child frames (Gmail compose iframe)
+    for frame in page.frames:
+        try:
+            frame.locator('[name="subjectbox"]').first.wait_for(state="visible", timeout=800)
+            return frame
+        except Exception:
+            continue
+    return None
+
+
 def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
     """Compose and send a new email via Gmail browser tab — complete workflow in one call.
 
@@ -778,31 +801,37 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
 
-        # Step 1: go to Gmail inbox (ensures compose button is available)
+        # Step 1: ensure we're on Gmail
         current_url = page.url or ""
         if "mail.google.com" not in current_url:
             page.goto("https://mail.google.com/mail/u/0/#inbox", wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(1000)
+            page.wait_for_timeout(1000)
 
-        # Step 2: click Compose — [gh="cm"] is language-independent
+        # Step 2: click Compose to open a new compose window.
+        # [gh="cm"] is language-independent and always present in Gmail.
         compose_btn = page.locator('[gh="cm"]').first
         compose_btn.wait_for(state="visible", timeout=10000)
         compose_btn.click()
+        page.wait_for_timeout(800)  # let compose dialog open and iframe load
 
-        # Step 3: wait for compose window to open — subjectbox is the reliable visible indicator
-        subject_field = page.locator('[name="subjectbox"]').first
-        subject_field.wait_for(state="visible", timeout=10000)
-        page.wait_for_timeout(300)  # let compose dialog animate in fully
+        # Step 3: find the compose context — Gmail renders compose inside an <iframe>.
+        # _find_gmail_compose() searches main page + all child frames for [name="subjectbox"].
+        ctx = _find_gmail_compose(page)
+        if ctx is None:
+            return (
+                "❌ Could not find Gmail compose window after clicking Compose.\n"
+                "The compose dialog did not open or the subjectbox is not reachable.\n"
+                "Tip: call browser_session.screenshot() to see the current state."
+            )
 
         # Step 4: fill To field.
-        # Gmail hides [name="to"] (it's a proxy textarea). The visible chip autocomplete
-        # input is input.agP. Fall back to keyboard typing (Gmail opens compose with
-        # focus already on the To area, so typing directly works reliably).
+        # Try the visible chip-autocomplete input first (input.agP), then fall back to
+        # keyboard typing — Gmail opens compose with focus on the To area already.
         to_typed = False
-        for to_sel in ["input.agP", "input.agP.aFw"]:
+        for to_sel in ["input.agP", "input.agP.aFw", 'input[autocomplete="email"]']:
             try:
-                to_el = page.locator(to_sel).first
-                to_el.wait_for(state="visible", timeout=2500)
+                to_el = ctx.locator(to_sel).first
+                to_el.wait_for(state="visible", timeout=2000)
                 to_el.click()
                 to_el.type(to, delay=30)
                 page.keyboard.press("Tab")
@@ -811,30 +840,34 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
             except Exception:
                 continue
         if not to_typed:
-            # Compose opens with focus on To — type directly via keyboard
+            # Compose opens with focus on To — type directly via keyboard as last resort
             page.keyboard.type(to, delay=30)
             page.keyboard.press("Tab")
         page.wait_for_timeout(200)
 
         # Step 5: fill Subject
-        subject_field.click()
-        subject_field.type(subject, delay=30)
+        subject_el = ctx.locator('[name="subjectbox"]').first
+        subject_el.click()
+        subject_el.type(subject, delay=30)
         page.wait_for_timeout(200)
 
-        # Step 6: click into body and type
-        body_field = page.locator('div[contenteditable="true"][aria-multiline="true"]').first
-        body_field.wait_for(state="visible", timeout=8000)
-        body_field.click()
+        # Step 6: fill Body
+        body_el = ctx.locator('div[contenteditable="true"][aria-multiline="true"]').first
+        body_el.wait_for(state="visible", timeout=8000)
+        body_el.click()
         page.wait_for_timeout(300)
-        body_field.type(body, delay=40)
+        body_el.type(body, delay=40)
         page.wait_for_timeout(300)
 
-        # Step 6: send via Ctrl+Enter
+        # Step 7: send via Ctrl+Enter
         page.keyboard.press("Control+Enter")
 
-        # Wait for compose window to close (compose windows disappear when sent)
+        # Wait for compose window to close (URL leaves compose=new when sent)
         try:
-            page.wait_for_selector('[name="to"]', state="detached", timeout=8000)
+            page.wait_for_url(
+                lambda url: "compose" not in url,
+                timeout=8000,
+            )
         except Exception:
             page.wait_for_timeout(2000)
 
@@ -847,7 +880,8 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
     except Exception as e:
         return (
             f"❌ Could not send Gmail: {e}\n"
-            f"Tip: run browser_session.get_html(selector=\"[role='main']\") to inspect the Gmail DOM."
+            f"Tip: call browser_session.screenshot() to see what's on screen, "
+            f"or browser_session.get_html(selector=\"[role='main']\") to inspect the DOM."
         )
     finally:
         if pw:
