@@ -15,9 +15,15 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 
 ## General Rules (Apply to All Platforms)
 
-1. **Verify the page first.** Before touching any inbox, call `get_text()` to confirm the right page is open and read the current content.
-2. **Read before replying.** Use `get_text()` or `get_html()` to fully read the message thread before composing a response.
-3. **Verify before sending.** Always call `get_text()` on the current page to confirm your reply is typed correctly before clicking Send.
+> **PREFERRED INTERACTION PATTERN for any page you haven't seen before:**
+> 1. `browser_session.get_snapshot()` — read the page (shows all buttons, textboxes, links by name)
+> 2. `browser_session.click_accessible("button", "Name")` — click by semantic role + label
+> 3. `browser_session.type_accessible("textbox", "Name", "text")` — type by semantic role + label
+> These work on ALL platforms without CSS selectors and across iframes automatically.
+
+1. **Verify the page first.** Call `get_snapshot()` or `get_text()` to confirm the right page is open.
+2. **Read before replying.** Use `get_text()` to fully read the message thread before composing a response.
+3. **Verify before sending.** Call `get_text()` to confirm your reply is typed correctly before clicking Send.
 4. **One message at a time.** Never batch-reply to multiple conversations in a single flow. Handle one thread completely, then move to the next.
 5. **When in doubt, escalate.** If a message is ambiguous, sensitive, urgent, or involves money/contracts — do NOT reply. Flag it to the user instead.
 6. **Log all sent replies.** After each reply is confirmed sent, call `notes.write("dm_log", ...)` with the platform, username, timestamp, and a short summary of the reply.
@@ -92,28 +98,25 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 
 ## Twitter / X — DM Workflow
 
-### Selectors
-
-| Action | Selector |
-|--------|----------|
-| Open DM inbox | `[data-testid="AppTabBar_DirectMessage_Link"]` |
-| First/top conversation | `[data-testid="conversation"]` (first result) |
-| Message thread text | `[data-testid="messageEntry"]` |
-| DM reply input box | `[data-testid="dmComposerTextInput"]` |
-| Send button | `[data-testid="dmComposerSendButton"]` |
-
 ### Step-by-Step: Read & Reply to a DM
 
 ```
-1. browser_session.click('[data-testid="AppTabBar_DirectMessage_Link"]')
-2. browser_session.get_text()
-3. browser_session.click('[data-testid="conversation"]')
-4. browser_session.get_text()
-5. (Compose reply using tone guidelines above)
-6. browser_session.type_text('[data-testid="dmComposerTextInput"]', "Your reply here")
-7. browser_session.click('[data-testid="dmComposerSendButton"]')
-8. notes.write("dm_log", "Twitter DM sent to [username] — [summary of reply]")
+1. browser_session.goto("https://x.com/messages")
+2. browser_session.get_snapshot()                                      — see conversation list
+3. browser_session.get_text()                                          — read conversation previews
+4. browser_session.click_accessible("link", "[conversation name]")    — open first/target conversation
+5. browser_session.get_text()                                          — read full thread
+6. (Compose reply using tone guidelines above)
+7. browser_session.type_accessible("textbox", "Message", "Your reply here")
+8. browser_session.click_accessible("button", "Send")
+9. notes.write("dm_log", "Twitter DM sent to [username] — [summary of reply]")
 ```
+
+> **Fallback selectors** (if click_accessible fails — Twitter uses data-testid):
+> - DM inbox nav: `[data-testid="AppTabBar_DirectMessage_Link"]`
+> - First conversation: `[data-testid="conversation"]`
+> - Reply input: `[data-testid="dmComposerTextInput"]`
+> - Send button: `[data-testid="dmComposerSendButton"]`
 
 ### When to Escalate (Do Not Reply — Tell the User)
 - Message contains a legal question or complaint
@@ -141,13 +144,14 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 
 ```
 1. browser_session.goto("https://www.linkedin.com/messaging/")
-2. browser_session.get_text()
-3. browser_session.click('.msg-conversation-listitem__link')
-4. browser_session.get_text()
-5. (Compose reply — slightly more professional than Instagram/Twitter. Use "Hi [Name]," not "Hey")
-6. browser_session.type_text('.msg-form__contenteditable[contenteditable="true"]', "Your reply here")
-7. browser_session.press_key("Control+Enter")
-8. notes.write("dm_log", "LinkedIn DM sent to [name] — [summary of reply]")
+2. browser_session.get_snapshot()                                      — see conversation list
+3. browser_session.get_text()                                          — read conversation previews
+4. browser_session.click_accessible("link", "[contact name]")         — open first/target conversation
+5. browser_session.get_text()                                          — read full thread
+6. (Compose reply — professional tone, "Hi [Name]," not "Hey")
+7. browser_session.type_accessible("textbox", "Write a message", "Your reply here")
+8. browser_session.press_key("Control+Enter")
+9. notes.write("dm_log", "LinkedIn DM sent to [name] — [summary of reply]")
 ```
 
 ### LinkedIn-Specific Tone Notes
@@ -157,16 +161,8 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 - Great for: partnership inquiries, collaboration requests, professional questions
 - Escalate: recruitment spam, sales pitches that need a decision, anything involving contracts
 
-### If LinkedIn Selectors Fail
-LinkedIn updates their DOM frequently. Run:
-```
-browser_session.get_html(selector=".msg-overlay-list-bubble")
-```
-or
-```
-browser_session.get_html(selector="main")
-```
-to inspect current structure and find updated selectors.
+> **If selectors fail:** LinkedIn updates their DOM frequently. Call `get_snapshot()` to see the
+> current structure, then use `click_accessible` / `type_accessible` with whatever names appear.
 
 ---
 
@@ -221,16 +217,20 @@ to inspect current structure and find updated selectors.
 
 ```
 1. browser_session.goto("https://www.tiktok.com/messages")
-2. browser_session.wait_for('[data-e2e="dm-message-row"]')
-3. browser_session.get_text()
-4. browser_session.click('[data-e2e="dm-message-row"]')
-5. browser_session.get_text()
-6. (Compose reply using tone guidelines — casual, short, emoji-friendly)
-7. browser_session.type_text('[data-e2e="dm-input"]', "Your reply here")
-8. browser_session.click('[data-e2e="dm-send-btn"]')
-   Fallback: browser_session.press_key("Enter")
+2. browser_session.get_snapshot()                                      — see conversation list
+3. browser_session.get_text()                                          — read conversation previews
+4. browser_session.click_accessible("link", "[username or preview]")  — open conversation
+5. browser_session.get_text()                                          — read full thread
+6. (Compose reply — casual, short, emoji-friendly)
+7. browser_session.type_accessible("textbox", "Message", "Your reply here")
+8. browser_session.press_key("Enter")
 9. notes.write("dm_log", "TikTok DM sent to [username] — [summary of reply]")
 ```
+
+> **Fallback selectors** (TikTok uses data-e2e attributes):
+> - Conversation row: `[data-e2e="dm-message-row"]`
+> - Reply input: `[data-e2e="dm-input"]`
+> - Send: `[data-e2e="dm-send-btn"]`
 
 ### TikTok-Specific Tone Notes
 - TikTok skews young and casual — keep replies short, energetic, and emoji-friendly
@@ -273,13 +273,14 @@ and look for `data-e2e` attributes to find the updated selectors.
 
 ```
 1. browser_session.goto("https://www.instagram.com/direct/inbox/")
-2. browser_session.get_text()
-3. browser_session.click('[role="listbox"] > div')
-4. browser_session.get_text()
-5. (Compose reply — most casual and emoji-friendly of the platforms)
-6. browser_session.type_text('[aria-label="Message..."]', "Your reply here")
-7. browser_session.press_key("Enter")
-8. notes.write("dm_log", "Instagram DM sent to [username] — [summary of reply]")
+2. browser_session.get_snapshot()                                      — see conversation list
+3. browser_session.get_text()                                          — read conversation previews
+4. browser_session.click_accessible("link", "[username]")             — open conversation
+5. browser_session.get_text()                                          — read full thread
+6. (Compose reply — casual, emoji-friendly)
+7. browser_session.type_accessible("textbox", "Message", "Your reply here")
+8. browser_session.press_key("Enter")
+9. notes.write("dm_log", "Instagram DM sent to [username] — [summary of reply]")
 ```
 
 ### Instagram-Specific Notes
@@ -288,8 +289,8 @@ and look for `data-e2e` attributes to find the updated selectors.
 - Common message types: product questions, collab requests, fan/follower messages, support issues
 - Escalate: complaints about orders or services, influencer/paid partnership inquiries, anything requiring commitment
 
-### If Instagram Selectors Fail
-Instagram rebuilds their DOM frequently. Run:
+> **If selectors fail:** Instagram rebuilds their DOM frequently. Call `get_snapshot()` first —
+> it will show the current elements. Run:
 ```
 browser_session.get_html(selector="section")
 ```
@@ -423,24 +424,25 @@ are more stable than class names.
 
 ```
 1. browser_session.goto("https://web.viber.com")
-2. browser_session.get_text()
-3. browser_session.click('[data-qa="conversation-item"]:first-child')
-4. browser_session.get_text()
-5. (Compose reply — friendly and warm, Viber is personal/informal)
-6. browser_session.type_text('[data-qa="message-input"]', "Your reply here")
-7. browser_session.press_key("Enter")
-8. notes.write("dm_log", "Viber reply sent to [contact name] — [summary of reply]")
+2. browser_session.get_snapshot()                                      — see conversation list
+3. browser_session.get_text()                                          — read conversation previews
+4. browser_session.click_accessible("button", "[contact name]")       — open conversation
+   Fallback: browser_session.click('[data-qa="conversation-item"]:first-child')
+5. browser_session.get_text()                                          — read full thread
+6. (Compose reply — friendly, personal, informal)
+7. browser_session.type_accessible("textbox", "Message", "Your reply here")
+   Fallback: browser_session.type_text('[data-qa="message-input"]', "Your reply here")
+8. browser_session.press_key("Enter")
+9. notes.write("dm_log", "Viber reply sent to [contact name] — [summary of reply]")
 ```
 
 ### Searching for a Specific Contact
 
 ```
-1. browser_session.click('[data-qa="search-input"]')
-2. browser_session.type_text('[data-qa="search-input"]', "Contact Name")
-3. browser_session.get_text()
-   → Read filtered results to confirm correct contact
-4. browser_session.click('[data-qa="conversation-item"]:first-child')
-   → Open their conversation
+1. browser_session.type_accessible("searchbox", "Search", "Contact Name")
+   Fallback: browser_session.type_text('[data-qa="search-input"]', "Contact Name")
+2. browser_session.get_text()                                          — confirm correct contact
+3. browser_session.click_accessible("button", "Contact Name")         — open conversation
 ```
 
 ### Viber-Specific Tone Notes

@@ -4,6 +4,26 @@ Reference file for using `browser_session` skill with real logged-in Chrome.
 
 ---
 
+## ⚡ PREFERRED APPROACH — No CSS Selectors Needed
+
+**Always use this pattern first for any page:**
+
+```
+1. browser_session.goto("https://...")           — navigate
+2. browser_session.get_snapshot()                — READ the page (buttons, textboxes, links by name)
+3. browser_session.click_accessible("button", "Compose")   — click by role + label
+4. browser_session.type_accessible("textbox", "To", "user@example.com")  — type by role + label
+```
+
+`get_snapshot()` works across iframes automatically. It returns elements by their semantic name
+so it works in any language (Serbian, English, etc.) without needing CSS selectors.
+
+**Use CSS selectors (sections below) ONLY as last-resort fallback if `click_accessible` fails.**
+
+For single-call platform helpers (tweet, send_gmail, etc.) see the ALL FUNCTIONS list in the DOC.
+
+---
+
 ## Twitter / X (x.com)
 
 > **Tab:** Twitter is typically open on tab 0. Do NOT navigate away from `x.com/home` to post —
