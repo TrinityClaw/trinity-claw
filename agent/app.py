@@ -19,7 +19,7 @@ import hmac
 import uuid
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Depends, Security, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -34,6 +34,8 @@ import importlib.util
 import subprocess
 import shlex
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import queue as _queue_module
+import asyncio
 
 load_dotenv()
 print("🚀 TrinityClaw Agent is starting up...")
@@ -89,6 +91,20 @@ session_store: Dict[str, Dict] = {}
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
 RATE_LIMIT_RPM = int(os.getenv("CHAT_RATE_LIMIT_RPM", "20"))  # requests per minute per API key
 _rate_timestamps: Dict[str, list] = {}  # key_id -> list of request timestamps
+
+# ── SSE Streaming support ─────────────────────────────────────────────────────
+# Thread-local queue: set by /chat/stream before running chat() in a worker
+# thread. All _stream_emit calls are no-ops on normal /chat requests.
+_stream_local = threading.local()
+
+def _stream_emit(event: dict) -> None:
+    """Put an SSE event into the current thread's stream queue, if one is active."""
+    q = getattr(_stream_local, "queue", None)
+    if q is not None:
+        try:
+            q.put_nowait(event)
+        except Exception:
+            pass
 
 def _check_rate_limit(api_key: str):
     """Raise HTTP 429 if the API key exceeds RATE_LIMIT_RPM requests in the last 60 seconds.
@@ -2335,6 +2351,7 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             print(f"🔁 Agent iteration {iteration}/{MAX_ITERATIONS}")
+            _stream_emit({"type": "iteration", "n": iteration, "max": MAX_ITERATIONS})
 
             is_first = (iteration == 1)
             # Always use the requested model — no separate vision model needed.
@@ -2382,6 +2399,8 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                     ai_reply, auto_verify=req.require_verification
                 )
                 all_execution_logs.extend(execution_log)
+                for _l in execution_log:
+                    _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
 
                 # Capture design brief immediately after analyze_design_folder so
                 # it can be injected into the very next continuation message.
@@ -2618,6 +2637,8 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                 print(f"⚙️  Iteration {iteration}: {len(tool_calls)} tool call(s), looping…")
                 tool_result_messages, execution_log = _execute_tool_calls(tool_calls)
                 all_execution_logs.extend(execution_log)
+                for _l in execution_log:
+                    _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
 
                 # Append assistant turn (must include tool_calls for API continuity)
                 messages.append({
@@ -2701,6 +2722,7 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
 
         threading.Thread(target=_persist_async, daemon=True, name="persist-memory").start()
 
+        _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": len(all_execution_logs)})
         return {
             "reply": ai_reply,
             "execution_log": all_execution_logs,
@@ -2721,6 +2743,56 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+@app.post("/chat/stream")
+async def chat_stream(req: PromptRequest, api_key: str = Depends(verify_api_key)):
+    """Streaming version of /chat — emits Server-Sent Events as each iteration and
+    skill execution completes. Drop-in companion to /chat; same request body.
+
+    Event types:
+      iteration  {"type":"iteration","n":1,"max":20}
+      skill      {"type":"skill","skill":"web","function":"search","status":"success"}
+      reply      {"type":"reply","reply":"...","skills_called":3}
+      error      {"type":"error","message":"..."}
+      heartbeat  {"type":"heartbeat"}   (keep-alive every ~1 s while waiting)
+      done       {"type":"done"}        (always the last event)
+    """
+    _check_rate_limit(api_key)
+    stream_q: _queue_module.Queue = _queue_module.Queue()
+
+    def _run() -> None:
+        _stream_local.queue = stream_q
+        try:
+            chat(req, api_key)
+        except HTTPException as exc:
+            stream_q.put({"type": "error", "status": exc.status_code, "message": exc.detail})
+        except Exception as exc:
+            stream_q.put({"type": "error", "message": str(exc)[:400]})
+        finally:
+            _stream_local.queue = None
+            stream_q.put({"type": "done"})  # sentinel — always last
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run)
+
+    async def generate():
+        while True:
+            try:
+                event = await loop.run_in_executor(
+                    None, lambda: stream_q.get(timeout=1)
+                )
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") in ("done", "error"):
+                    break
+            except _queue_module.Empty:
+                yield 'data: {"type":"heartbeat"}\n\n'
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/download/{filename}", dependencies=[Depends(verify_api_key)])
