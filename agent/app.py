@@ -1166,12 +1166,14 @@ def parse_skill_args(content: str, max_positional: int = None) -> tuple:
 
     parts = [p.strip().strip('"\'') for p in raw_parts]
 
-    # Check for key=value pairs — only treat as kwarg if key is a valid Python identifier
-    # (prevents URLs with query params like ?ixlib=rb-4.0 from being misread as kwargs)
+    # Check for key=value pairs — only treat as kwarg if key is a valid Python identifier.
+    # Strip leading punctuation (e.g. "+tags=DDR5" → key "tags") before checking,
+    # but only if the stripped key is a valid identifier and the original isn't a URL
+    # query param (which contains "?" before "=").
     for part in parts:
-        if '=' in part and not part.startswith('='):
+        if '=' in part and not part.startswith('=') and '?' not in part.split('=', 1)[0]:
             key, val = part.split('=', 1)
-            key = key.strip()
+            key = key.strip().lstrip('+-')  # strip LLM-added prefixes like +tags or -tags
             if key.isidentifier():
                 kwargs[key] = val.strip().strip('"\'')
             else:
