@@ -15,11 +15,12 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 
 ## General Rules (Apply to All Platforms)
 
-> **PREFERRED INTERACTION PATTERN for any page you haven't seen before:**
-> 1. `browser_session.get_snapshot()` — read the page (shows all buttons, textboxes, links by name)
-> 2. `browser_session.click_accessible("button", "Name")` — click by semantic role + label
-> 3. `browser_session.type_accessible("textbox", "Name", "text")` — type by semantic role + label
-> These work on ALL platforms without CSS selectors and across iframes automatically.
+> **PREFERRED INTERACTION PATTERN for any page:**
+> 1. `browser_session.get_snapshot()` — reads the page, stamps every element with an `@eN` ref
+> 2. `browser_session.click_ref("@eN")` — click by ref
+> 3. `browser_session.fill_ref("@eN", "text")` — type by ref
+> This works on ALL platforms including Gmail iframes, LinkedIn DMs, TikTok, Viber, anything.
+> Always call `get_snapshot()` again after a click that opens a new dialog or panel.
 
 1. **Verify the page first.** Call `get_snapshot()` or `get_text()` to confirm the right page is open.
 2. **Read before replying.** Use `get_text()` to fully read the message thread before composing a response.
@@ -102,14 +103,15 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 
 ```
 1. browser_session.goto("https://x.com/messages")
-2. browser_session.get_snapshot()                                      — see conversation list
-3. browser_session.get_text()                                          — read conversation previews
-4. browser_session.click_accessible("link", "[conversation name]")    — open first/target conversation
-5. browser_session.get_text()                                          — read full thread
-6. (Compose reply using tone guidelines above)
-7. browser_session.type_accessible("textbox", "Message", "Your reply here")
-8. browser_session.click_accessible("button", "Send")
-9. notes.write("dm_log", "Twitter DM sent to [username] — [summary of reply]")
+2. browser_session.get_snapshot()                    — see conversation list with @eN refs
+3. browser_session.get_text()                        — read conversation previews
+4. browser_session.click_ref("@eN")                  — click the target conversation link
+5. browser_session.get_snapshot()                    — refresh refs for the open thread
+6. browser_session.get_text()                        — read full thread
+7. (Compose reply using tone guidelines above)
+8. browser_session.fill_ref("@eN", "Your reply here")   — the message input field
+9. browser_session.click_ref("@eN")                      — Send button
+10. notes.write("dm_log", "Twitter DM sent to [username] — [summary of reply]")
 ```
 
 > **Fallback selectors** (if click_accessible fails — Twitter uses data-testid):
@@ -144,14 +146,15 @@ team member who genuinely enjoys helping people, not a corporate auto-responder.
 
 ```
 1. browser_session.goto("https://www.linkedin.com/messaging/")
-2. browser_session.get_snapshot()                                      — see conversation list
-3. browser_session.get_text()                                          — read conversation previews
-4. browser_session.click_accessible("link", "[contact name]")         — open first/target conversation
-5. browser_session.get_text()                                          — read full thread
-6. (Compose reply — professional tone, "Hi [Name]," not "Hey")
-7. browser_session.type_accessible("textbox", "Write a message", "Your reply here")
-8. browser_session.press_key("Control+Enter")
-9. notes.write("dm_log", "LinkedIn DM sent to [name] — [summary of reply]")
+2. browser_session.get_snapshot()                    — see conversation list with @eN refs
+3. browser_session.get_text()                        — read conversation previews
+4. browser_session.click_ref("@eN")                  — click the target conversation
+5. browser_session.get_snapshot()                    — refresh refs for the open thread
+6. browser_session.get_text()                        — read full thread
+7. (Compose reply — professional tone, "Hi [Name]," not "Hey")
+8. browser_session.fill_ref("@eN", "Your reply here")   — the message input field
+9. browser_session.press_key("Control+Enter")
+10. notes.write("dm_log", "LinkedIn DM sent to [name] — [summary of reply]")
 ```
 
 ### LinkedIn-Specific Tone Notes
@@ -347,27 +350,31 @@ then scan for `aria-label` attributes to find the current correct selectors.
 9. notes.write("dm_log", "Gmail reply sent to [sender] — Subject: [subject] — [summary]")
 ```
 
-### Compose a New Email — PREFERRED METHOD (single call)
-
-> **Use single-call function — never chain steps manually.**
-> This function handles the full workflow internally and is reliable with small LLMs.
-
-```
-browser_session.send_gmail("recipient@email.com", "Subject line here", "Email body here")
-```
-ALWAYS use `send_gmail()` for new emails. Never chain goto+click+type_text+press_key manually.
-If Gmail is not on tab 0, pass the correct tab: `browser_session.send_gmail(..., tab_index=2)`
-
-### Compose a New Email (manual fallback — only if send_gmail() fails)
+### Compose a New Email — PREFERRED METHOD (ref-based, works reliably)
 
 ```
 1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
-2. browser_session.click('[gh="cm"]')
-3. browser_session.type_text('[name="to"]', "recipient@email.com")
-4. browser_session.press_key("Tab")
-5. browser_session.type_text('[name="subjectbox"]', "Subject line here")
-6. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Email body here")
-7. browser_session.press_key("Control+Enter")
+2. browser_session.get_snapshot()              ← find Compose button ref
+3. browser_session.click_ref("@eN")            ← click Compose (whichever ref it is)
+4. browser_session.get_snapshot()              ← refresh — compose iframe now visible
+5. browser_session.fill_ref("@eN", "recipient@email.com")   ← To field
+6. browser_session.fill_ref("@eN", "Subject here")          ← Subject field
+7. browser_session.fill_ref("@eN", "Body here")             ← Message body
+8. browser_session.click_ref("@eN")            ← Send button
+```
+
+Use the actual `@eN` values from `get_snapshot()` output. Always call `get_snapshot()` again
+after clicking Compose — the compose window opens as an iframe and adds new refs.
+
+### CSS fallback (only if snapshot returns empty or refs fail)
+
+```
+1. browser_session.click('[gh="cm"]')
+2. browser_session.type_text('[name="to"]', "recipient@email.com")
+3. browser_session.press_key("Tab")
+4. browser_session.type_text('[name="subjectbox"]', "Subject here")
+5. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Body here")
+6. browser_session.press_key("Control+Enter")
 ```
 
 ### Multiple Gmail Accounts

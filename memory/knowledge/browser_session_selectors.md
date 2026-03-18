@@ -1,321 +1,107 @@
-# Browser Session — Platform Selectors & Usage Patterns
+# Browser Session — How to Interact With Any Website
 
-Reference file for using `browser_session` skill with real logged-in Chrome.
-
----
-
-## ⚡ PREFERRED APPROACH — @eN Refs (fastest, no selectors needed)
-
-`get_snapshot()` now works like `agent-browser snapshot -i`:
-- Scans **main page + all iframes** automatically
-- Filters to interactive elements only (buttons, links, textboxes, etc.)
-- Assigns stable `@e1`, `@e2`, ... refs for the current page state
-
-**Step-by-step for any page:**
+## ✅ GENERAL PATTERN (most sites: LinkedIn, Twitter, TikTok, Viber, etc.)
 
 ```
 1. browser_session.goto("https://...")
-2. browser_session.get_snapshot()
-   → @e1  link "Inbox"
-   → @e5  button "Compose"
-   → @e9  textbox "Search mail"
-   → [iframe[3]]
-   → @e12 textbox "To"
-   → @e13 textbox "Subject"
-   → @e14 textbox "Message Body"
-3. browser_session.click_ref("@e5")                    ← click Compose by ref
-4. browser_session.fill_ref("@e12", "user@example.com") ← fill To by ref
-5. browser_session.fill_ref("@e13", "Subject here")
-6. browser_session.fill_ref("@e14", "Body here")
-7. browser_session.click_ref("@e20")                   ← click Send by ref
+2. browser_session.get_snapshot()         ← reads the page, tags every element with @eN
+3. browser_session.click_ref("@e5")       ← click by ref
+4. browser_session.fill_ref("@e12", "text") ← type by ref
 ```
 
-**Or use role+name (still works, no need for refs):**
-```
-browser_session.click_accessible("button", "Compose")
-browser_session.type_accessible("textbox", "To", "user@example.com")
-```
+`get_snapshot()` finds every visible interactive element and stamps each with `data-tc-ref`.
+Returns `@e1 button "Compose"`, `@e5 textbox "To"`, etc.
+`click_ref("@eN")` and `fill_ref("@eN", text)` find the exact same node.
 
-`get_snapshot()` covers iframes automatically — Gmail compose fields, LinkedIn DMs, etc. are visible.
-**Use CSS selectors (sections below) ONLY as last-resort fallback if ref/accessible methods fail.**
-
-For single-call platform helpers (tweet, send_gmail, etc.) see the ALL FUNCTIONS list in the DOC.
+**Always call `get_snapshot()` again after a click that opens a new panel/dialog.**
+The refs change when the DOM changes.
 
 ---
 
-## Twitter / X (x.com)
+## ⚠️ GMAIL EXCEPTION — completely different workflow
 
-> **Tab:** Twitter is typically open on tab 0. Do NOT navigate away from `x.com/home` to post —
-> use the compose button in the sidebar instead. If you must navigate, use `https://x.com/compose/post`
-> (NOT `x.com/i/compose` — that URL is invalid and returns a blank page).
->
-> **Never call `get_html()` without a selector on Twitter** — the page is 3MB+ and will time out.
-> Always scope it: `get_html(selector="[data-testid='primaryColumn']", tab_index=0)`
+Gmail is NOT compatible with get_snapshot/click_ref/fill_ref.
+Use CSS selectors directly. Do NOT call get_snapshot() at any point during Gmail compose.
 
-| Action | Selector |
-|--------|----------|
-| Open compose box (sidebar) | `[data-testid="SideNav_NewTweet_Button"]` |
-| Tweet textarea | `[data-testid="tweetTextarea_0"]` |
-| Post button (home feed inline) | `[data-testid="tweetButtonInline"]` |
-| Post button (compose/post page) | `[data-testid="tweetButton"]` |
-| Reply button (on a tweet) | `[data-testid="reply"]` |
-| Like button | `[data-testid="like"]` |
-| Retweet button | `[data-testid="retweet"]` |
-| Follow button (on profile) | `[data-testid="placementTracking"]` |
-| DM / Messages (nav) | `[data-testid="AppTabBar_DirectMessage_Link"]` |
-| DM conversation (first) | `[data-testid="conversation"]` |
-| DM reply input | `[data-testid="dmComposerTextInput"]` |
-| DM send button | `[data-testid="dmComposerSendButton"]` |
+### Compose and send a new email — follow ALL 7 steps without stopping:
 
-### Post a Tweet — PREFERRED METHOD (single call)
 ```
-browser_session.tweet("your tweet text here")
-```
-This single function handles the complete workflow internally: navigate → compose → type → post.
-ALWAYS use browser_session.tweet() for posting. Never chain goto+click+type_text+click manually.
-
-### Post a Tweet (manual fallback — only if tweet() fails)
-```
-1. browser_session.goto("https://x.com/home", tab_index=0)
-2. browser_session.click('[data-testid="SideNav_NewTweet_Button"]', tab_index=0)
-   → URL becomes https://x.com/compose/post after this click
-3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "tweet text", tab_index=0)
-4. browser_session.click('[data-testid="tweetButton"]', tab_index=0)
-   → use tweetButton (NOT tweetButtonInline) on compose/post page
+1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
+2. browser_session.click('[gh="cm"]')
+3. browser_session.type_text('[name="to"]', "recipient@example.com")
+4. browser_session.press_key("Tab")
+5. browser_session.type_text('[name="subjectbox"]', "Subject here")
+6. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Body text here")
+7. browser_session.press_key("Control+Enter")
 ```
 
-### Reply to a Tweet
-```
-1. browser_session.goto("https://x.com/user/status/TWEET_ID", tab_index=0)
-2. browser_session.click('[data-testid="reply"]', tab_index=0)
-3. browser_session.type_text('[data-testid="tweetTextarea_0"]', "reply text", tab_index=0)
-4. browser_session.click('[data-testid="tweetButtonInline"]', tab_index=0)
-```
+STRICT RULES:
+- Do NOT call get_snapshot() — not before step 2, not between any steps.
+- Do NOT use fill_ref, click_ref, or type_accessible.
+- Do NOT stop after step 3 — typing the To field does NOT send the email.
+- Steps 4, 5, 6, 7 are ALL MANDATORY before the task is complete.
+- Step 7 (Control+Enter) sends the email. The task is done only after step 7.
 
-### If Twitter selectors fail
-```
-browser_session.get_html(selector="[data-testid='primaryColumn']", tab_index=0)
-```
-Never call `get_html()` without a selector on Twitter — the full page HTML is 3MB+ and will time out.
-
----
-
-## LinkedIn (linkedin.com)
-
-| Action | Selector |
-|--------|----------|
-| Start a post | `button.share-box-feed-entry__trigger` or `[data-control-name="share.sharebox_trigger"]` |
-| Post text area | `.ql-editor[contenteditable="true"]` |
-| Post button | `button.share-actions__primary-action` |
-| Open DM inbox | `browser_session.goto("https://www.linkedin.com/messaging/")` |
-| Conversation list | `.msg-conversations-container__conversations-list` |
-| First unread conversation | `.msg-conversation-listitem__link` |
-| Message thread content | `.msg-s-message-list__event` |
-| DM reply input | `.msg-form__contenteditable[contenteditable="true"]` |
-| DM send button | `.msg-form__send-button` — or `press_key("Control+Enter")` |
-
-### If LinkedIn selectors fail
-LinkedIn updates their DOM frequently. Run `browser_session.get_html(selector="main")` to inspect current structure, then identify the correct selector.
-
----
-
-## Instagram (instagram.com)
-
-| Action | Selector / Method |
-|--------|------------------|
-| New post | `browser_session.click('[aria-label="New post"]')` |
-| Caption field | `textarea[aria-label="Write a caption..."]` |
-| Open DM inbox | `browser_session.goto("https://www.instagram.com/direct/inbox/")` |
-| Conversation list item | `[role="listbox"] > div` (first = most recent) |
-| DM reply input | `[aria-label="Message..."]` or `[placeholder="Message..."]` |
-| DM send | `press_key("Enter")` |
-
-### If Instagram selectors fail
-Run `browser_session.get_html(selector="section")` and look for `aria-label` attributes.
-
----
-
-## Gmail (mail.google.com)
-
-> **Note:** The `gmail` OAuth skill is preferred for search/summarize/bulk tasks.
-> Use `browser_session` for Gmail when you need to work inside the user's open tab visually.
-> For full workflows see `social_media_dm_guide.md`.
-
-| Action | Selector |
-|--------|----------|
-| Go to inbox | `browser_session.goto("https://mail.google.com/mail/u/0/#inbox")` |
-| First unread email row | `tr.zA.zE` |
-| Reply button (inside email) | `[data-tooltip^="Odg"]` (Serbian) or `[data-tooltip="Reply"]` (English) — use `get_html` to confirm |
-| Reply compose area | `div[contenteditable="true"][aria-label]` — or just `div[contenteditable="true"]` inside reply panel |
-| Send button | `[data-tooltip^="Pošalji"]` (Serbian) or `[data-tooltip="Send"]` (English) — or `[jsaction*="send"]` |
-| Search bar | `input[name="q"]` — language-independent |
-| **Compose new (use this)** | `[gh="cm"]` — language-independent internal Gmail attribute |
-| To field (new email) | `[name="to"]` — language-independent |
-| Subject field (new email) | `[name="subjectbox"]` — language-independent |
-| Body (new compose) | `div[contenteditable="true"][aria-multiline="true"]` or `div[g_editable="true"]` |
-
-> **Non-English Gmail:** If Gmail is in Serbian (or any non-English language), `aria-label` values are
-> translated and text selectors will fail. Always prefer `[gh]`, `[name]`, `[data-testid]`, or
-> `[jsaction]` attributes — they are language-independent. Run `get_html(selector="[gh='cm']")` to verify.
+### Gmail CSS selectors (all language-independent)
+- Compose button: `[gh="cm"]`
+- To field: `[name="to"]`
+- Subject: `[name="subjectbox"]`
+- Body: `div[contenteditable="true"][aria-multiline="true"]`
+- Send: `press_key("Control+Enter")` while body is focused
 
 ### Multiple Gmail accounts
 - Account 1: `https://mail.google.com/mail/u/0/`
 - Account 2: `https://mail.google.com/mail/u/1/`
-- Account 3: `https://mail.google.com/mail/u/2/`
-
-### Reply to an email (quick reference)
-```
-1. browser_session.goto("https://mail.google.com/mail/u/0/#inbox")
-2. browser_session.click('tr.zA.zE')                                                    — open first unread
-3. browser_session.get_text()                                                           — read email
-4. browser_session.click('[data-tooltip^="Odg"]')                                      — reply (Serbian UI)
-   Fallback: browser_session.click('[jsaction*="reply"]')                              — language-independent
-5. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "reply text")
-6. browser_session.screenshot()                                                         — verify before send
-7. browser_session.press_key("Control+Enter")                                           — send (universal)
-```
-
-### Compose a new email — PREFERRED METHOD (single call)
-```
-browser_session.send_gmail("recipient@example.com", "Subject here", "Body here")
-```
-This single function handles the complete workflow internally: goto inbox → compose → fill To/Subject/Body → send.
-ALWAYS use browser_session.send_gmail() for new emails. Never chain goto+click+type_text+press_key manually.
-If Gmail is not on tab 0, pass the correct index: `browser_session.send_gmail(..., tab_index=2)`
-
-### Compose a new email (manual fallback — only if send_gmail() fails)
-```
-1. browser_session.click('[gh="cm"]')                                                   — compose (language-independent)
-2. browser_session.type_text('[name="to"]', "email@example.com")                        — recipient
-3. browser_session.press_key("Tab")                                                     — move to subject
-4. browser_session.type_text('[name="subjectbox"]', "Subject here")                     — subject
-5. browser_session.type_text('div[contenteditable="true"][aria-multiline="true"]', "Body here")
-6. browser_session.screenshot()                                                         — verify
-7. browser_session.press_key("Control+Enter")                                           — send
-```
-
-### If Gmail selectors fail
-Gmail uses obfuscated class names. Prefer `aria-label` and `data-tooltip` — they are stable.
-Run `browser_session.get_html(selector="[role='main']")` to inspect current DOM.
 
 ---
 
-## Viber (web.viber.com)
+## Fallbacks (use only if get_snapshot returns empty or ref click fails)
 
-> **Requirement:** Viber desktop app must be installed and paired with your phone.
-> Viber Web at `https://web.viber.com` mirrors your account — like WhatsApp Web.
-> Must be logged in via QR code scan first. After that, stays connected while desktop app is running.
-
-| Action | Selector |
-|--------|----------|
-| Go to Viber Web | `browser_session.goto("https://web.viber.com")` |
-| Conversation list | `[data-qa="conversation-list"]` or `.conversation-list` |
-| First conversation item | `[data-qa="conversation-item"]:first-child` or `.conversation-item` |
-| Search conversations | `[data-qa="search-input"]` or `input[placeholder*="Search"]` |
-| Message input area | `[data-qa="message-input"]` or `div[contenteditable="true"]` |
-| Send button | `[data-qa="send-button"]` or `button[aria-label="Send"]` |
-| Send via keyboard | `press_key("Enter")` |
-
-> **Note:** Viber Web uses `data-qa` attributes which are relatively stable.
-> If selectors above fail, run `browser_session.get_html(selector="[class*='conversation']")`
-> to discover the current structure.
-
-### Reply to a Viber Message (quick reference)
+### click_accessible / type_accessible
 ```
-1. browser_session.goto("https://web.viber.com")
-2. browser_session.screenshot()                                    — confirm logged in and connected
-3. browser_session.get_text()                                      — read conversation list previews
-4. browser_session.click('[data-qa="conversation-item"]:first-child') — open first conversation
-5. browser_session.screenshot()                                    — see the message thread
-6. browser_session.get_text()                                      — read full thread
-7. browser_session.click('[data-qa="message-input"]')              — focus input
-8. browser_session.type_text('[data-qa="message-input"]', "reply") — type reply
-9. browser_session.screenshot()                                    — verify before sending
-10. browser_session.press_key("Enter")                             — send
-11. browser_session.screenshot()                                   — confirm sent
+browser_session.click_accessible("button", "Compose")
+browser_session.type_accessible("textbox", "To", "user@example.com")
 ```
+Use role + visible label. Works across iframes. Slower than refs.
 
-### If Viber Web selectors fail
+### CSS selector click
 ```
-browser_session.get_html(selector="main")
-browser_session.get_html(selector="[class*='chat']")
+browser_session.click('[data-testid="tweetButton"]') ← Twitter post button
 ```
-Look for `data-qa` attributes first — they are Viber's most stable hook.
 
 ---
 
-## TikTok (tiktok.com)
+## Single-call helpers (Twitter and TikTok only)
 
-> **SPA hydration:** TikTok is a heavy SPA — always add `page.wait_for_timeout(2000)` (or use
-> `wait_for()`) after `goto()` before interacting with any element.
->
-> TikTok uses `data-e2e` attributes as its primary stable hooks (similar to Twitter's `data-testid`).
-> **Never call `get_html()` without a selector on TikTok** — the page is large and will time out.
-> Always scope it: `get_html(selector="[data-e2e='browse-video-container']")`
-
-| Action | Selector |
-|--------|----------|
-| Like button (video page) | `[data-e2e="browse-like-icon"]` |
-| Comment button (video page) | `[data-e2e="browse-comment-icon"]` |
-| Comment input field | `[data-e2e="comment-input"]` |
-| Post comment button | `[data-e2e="comment-post"]` |
-| Follow button (on profile) | `[data-e2e="follow-button"]` |
-| Share button | `[data-e2e="share-icon"]` |
-| Go to DM inbox | `browser_session.goto("https://www.tiktok.com/messages")` |
-| DM conversation list | `[data-e2e="dm-message-list"]` |
-| DM conversation item (first) | `[data-e2e="dm-message-row"]` |
-| DM reply input | `[data-e2e="dm-input"]` |
-| DM send button | `[data-e2e="dm-send-btn"]` |
-
-### Like a TikTok Video — PREFERRED METHOD (single call)
-```
-browser_session.tiktok_like("https://www.tiktok.com/@user/video/VIDEO_ID")
-```
-Navigates to the video URL, waits for hydration, clicks Like.
-
-### Comment on a TikTok Video — PREFERRED METHOD (single call)
-```
-browser_session.tiktok_comment("https://www.tiktok.com/@user/video/VIDEO_ID", "comment text")
-```
-Navigates to the video, types the comment in the input, and posts it.
-
-### Follow a TikTok User — PREFERRED METHOD (single call)
-```
-browser_session.tiktok_follow("username")
-```
-Navigates to `tiktok.com/@username`, checks follow state, clicks Follow. Skips if already following.
-
-### Reply to a TikTok DM (manual — no single-call helper yet)
-```
-1. browser_session.goto("https://www.tiktok.com/messages")
-2. browser_session.wait_for('[data-e2e="dm-message-row"]')
-3. browser_session.click('[data-e2e="dm-message-row"]')
-4. browser_session.get_text()                                  — read the thread
-5. browser_session.type_text('[data-e2e="dm-input"]', "reply text")
-6. browser_session.click('[data-e2e="dm-send-btn"]')
-   Fallback send: browser_session.press_key("Enter")
-```
-
-### If TikTok selectors fail
-```
-browser_session.get_html(selector="[data-e2e='browse-video-container']")
-browser_session.get_html(selector="main")
-```
-TikTok uses `data-e2e` as its primary hook. If those fail, inspect with `get_html` and
-look for `data-e2e` attributes on the target elements.
+| Function | Use for |
+|----------|---------|
+| `tweet(text)` | Post to Twitter in one call |
+| `like_tweet(url)` | Like a tweet |
+| `reply_tweet(url, text)` | Reply to a tweet |
+| `follow_user(username)` | Follow on Twitter |
+| `tiktok_like(url)` | Like a TikTok |
+| `tiktok_comment(url, text)` | Comment on a TikTok |
+| `tiktok_follow(username)` | Follow on TikTok |
 
 ---
 
-## General Patterns
+## Platform notes
 
-### When selectors are unknown
-```
-browser_session.get_html(selector="nav")  — inspect navigation
-browser_session.get_text()             — read all visible text
-```
+### Twitter / X
+- Compose sidebar: `[data-testid="SideNav_NewTweet_Button"]`
+- Post button: `[data-testid="tweetButton"]` (compose page) or `[data-testid="tweetButtonInline"]` (inline)
+- **Never call `get_html()` without a selector** — page is 3MB+
 
-### Selector fallbacks
-If a `data-testid` selector fails (platform updated their DOM):
-1. Try `text=Button Label` — e.g. `text=Post`
-2. Try `[aria-label="Button Label"]`
-3. Use `browser_session.get_html()` to find the current selector
+### LinkedIn
+- DOM changes frequently — always use `get_snapshot()` first
+- DM input: `.msg-form__contenteditable[contenteditable="true"]`
+- Send: `press_key("Control+Enter")`
+
+### TikTok
+- Heavy SPA — wait 2s after `goto()` before interacting
+- Uses `data-e2e` attributes as stable hooks
+- **Never `get_html()` without selector** — page is large
+
+### Viber
+- Uses `data-qa` attributes as stable hooks
+- Requires desktop app installed and paired
