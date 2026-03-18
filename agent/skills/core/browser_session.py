@@ -111,34 +111,66 @@ def _collect_a11y_nodes(node: dict, results: list, limit: int = 250) -> None:
 def _snapshot_page(page) -> str:
     """Build a snapshot string from an already-connected Playwright page.
 
-    Uses get_by_role().all() — the same API as _find_in_frames() — so every
-    name in _ref_cache is guaranteed to be findable by click_ref/fill_ref.
-    Iterates main frame + all non-blank child iframes (covers Gmail compose,
-    LinkedIn DMs, etc.). Names come from real DOM attributes, never truncated.
+    Uses frame.locator(css).all() — Playwright's CSS-based DOM locator —
+    which calls querySelectorAll internally and never touches Chrome's
+    accessibility tree. This avoids the partial-tree bug where Gmail returns
+    only 5 items from accessibility.snapshot() / get_by_role().all().
+
+    For each element, name is extracted via a single loc.evaluate() call
+    (one CDP round-trip per element, no multi-network-call overhead).
+    Runs on main frame + all non-blank child iframes.
     """
     global _ref_cache
 
-    # Ordered list of roles to scan; matches _INTERACTIVE_ROLES
-    _ROLES_TO_SCAN = [
-        "button", "link", "textbox", "searchbox", "combobox",
-        "checkbox", "radio", "switch", "spinbutton",
-        "menuitem", "menuitemcheckbox", "menuitemradio",
-        "tab", "listbox",
+    # (css_selector, aria_role_label) pairs — ordered by priority.
+    # CSS selectors are used by frame.locator() which calls querySelectorAll.
+    _CSS_MAP = [
+        ("button:not([disabled])",                          "button"),
+        ("[role='button']:not([disabled])",                 "button"),
+        ("input[type='submit']:not([disabled])",            "button"),
+        ("input[type='button']:not([disabled])",            "button"),
+        ("a[href]",                                         "link"),
+        ("input[type='text']:not([disabled])",              "textbox"),
+        ("input[type='email']:not([disabled])",             "textbox"),
+        ("input[type='password']:not([disabled])",          "textbox"),
+        ("input[type='url']:not([disabled])",               "textbox"),
+        ("textarea:not([disabled])",                        "textbox"),
+        ("[role='textbox']",                                "textbox"),
+        ("[contenteditable='true']:not([role])",            "textbox"),
+        ("input[type='search']:not([disabled])",            "searchbox"),
+        ("[role='searchbox']",                              "searchbox"),
+        ("select:not([disabled])",                          "combobox"),
+        ("[role='combobox']",                               "combobox"),
+        ("input[type='checkbox']:not([disabled])",          "checkbox"),
+        ("[role='checkbox']",                               "checkbox"),
+        ("input[type='radio']:not([disabled])",             "radio"),
+        ("[role='radio']",                                  "radio"),
+        ("[role='tab']",                                    "tab"),
+        ("[role='menuitem']",                               "menuitem"),
+        ("[role='switch']",                                 "switch"),
+        ("[role='spinbutton']",                             "spinbutton"),
     ]
 
-    # JS to read the accessible name from a DOM element — same priority as
-    # Playwright's own accessible-name algorithm: aria-label > title >
-    # placeholder > associated <label> > innerText/value (truncated at 120).
-    _GET_NAME_JS = """el => {
-        const v = el.getAttribute('aria-label')
-            || el.getAttribute('title')
-            || el.getAttribute('placeholder')
-            || (el.labels && el.labels[0] ? el.labels[0].innerText.trim() : '')
-            || el.innerText?.trim()?.slice(0, 120)
-            || el.value?.trim()?.slice(0, 120)
-            || '';
-        return v.trim();
-    }"""
+    # One evaluate() call per locator → single CDP round-trip per element.
+    # Priority: aria-label > title > placeholder > label text > innerText > value.
+    _NAME_JS = (
+        "el => {"
+        "  const a = el.getAttribute('aria-label');"
+        "  if (a && a.trim()) return a.trim();"
+        "  const t = el.getAttribute('title');"
+        "  if (t && t.trim()) return t.trim();"
+        "  const p = el.getAttribute('placeholder');"
+        "  if (p && p.trim()) return p.trim();"
+        "  if (el.labels && el.labels[0]) {"
+        "    const l = el.labels[0].innerText.trim();"
+        "    if (l) return l;"
+        "  }"
+        "  const tx = el.innerText ? el.innerText.trim().slice(0,120) : '';"
+        "  if (tx) return tx;"
+        "  const v = el.value ? String(el.value).trim().slice(0,120) : '';"
+        "  return v;"
+        "}"
+    )
 
     frames_to_check = [(page.main_frame, "main")]
     for i, frame in enumerate(page.frames):
@@ -152,20 +184,25 @@ def _snapshot_page(page) -> str:
     for frame, label in frames_to_check:
         items = []
         seen = set()
-        for role in _ROLES_TO_SCAN:
+        count = 0
+        for css, role in _CSS_MAP:
+            if count >= 200:
+                break
             try:
-                locs = frame.get_by_role(role).all()
+                locs = frame.locator(css).all()
             except Exception:
                 continue
             for loc in locs:
+                if count >= 200:
+                    break
                 try:
                     if not loc.is_visible():
                         continue
-                    name = loc.evaluate(_GET_NAME_JS)
-                    name = (name or "").strip()
+                    name = (loc.evaluate(_NAME_JS) or "").strip()
                     if name and (role, name) not in seen:
                         seen.add((role, name))
                         items.append((role, name))
+                        count += 1
                 except Exception:
                     continue
         if items:
@@ -227,12 +264,76 @@ def _find_in_frames(page, role: str, name: str, exact: bool = False):
     """Find an element by ARIA role+name across the main page and all child frames.
 
     Search order:
-      1. Main page (3 s fast try)
-      2. Each child frame (2 s each) — covers Gmail compose, LinkedIn/Instagram iframes, etc.
-      3. Fuzzy first-word fallback on main page + frames (handles "Subject field" → "Subject")
+      1. Main page via get_by_role() (3 s fast try)
+      2. Each child frame via get_by_role() (2 s each)
+      3. Fuzzy first-word fallback with get_by_role() on main page + frames
+      4. CSS-based fallback — same strategy as _snapshot_page(), works on sites
+         where Chrome's accessibility tree is broken/partial (Gmail, LinkedIn, etc.)
 
     Returns the first visible Playwright Locator, or raises TimeoutError with a helpful message.
     """
+    # CSS selectors used by _snapshot_page, grouped by role.
+    # Tier 4 iterates these when get_by_role() fails entirely.
+    _ROLE_CSS = {
+        "button":    ["button:not([disabled])", "[role='button']:not([disabled])",
+                      "input[type='submit']:not([disabled])", "input[type='button']:not([disabled])"],
+        "link":      ["a[href]"],
+        "textbox":   ["input[type='text']:not([disabled])", "input[type='email']:not([disabled])",
+                      "input[type='password']:not([disabled])", "input[type='url']:not([disabled])",
+                      "textarea:not([disabled])", "[role='textbox']",
+                      "[contenteditable='true']:not([role])"],
+        "searchbox": ["input[type='search']:not([disabled])", "[role='searchbox']"],
+        "combobox":  ["select:not([disabled])", "[role='combobox']"],
+        "checkbox":  ["input[type='checkbox']:not([disabled])", "[role='checkbox']"],
+        "radio":     ["input[type='radio']:not([disabled])", "[role='radio']"],
+        "tab":       ["[role='tab']"],
+        "menuitem":  ["[role='menuitem']"],
+        "switch":    ["[role='switch']"],
+        "spinbutton":["[role='spinbutton']"],
+    }
+
+    # Name extraction JS — same priority order as _snapshot_page.
+    _NAME_JS = (
+        "el => {"
+        "  const a = el.getAttribute('aria-label');"
+        "  if (a && a.trim()) return a.trim();"
+        "  const t = el.getAttribute('title');"
+        "  if (t && t.trim()) return t.trim();"
+        "  const p = el.getAttribute('placeholder');"
+        "  if (p && p.trim()) return p.trim();"
+        "  if (el.labels && el.labels[0]) {"
+        "    const l = el.labels[0].innerText.trim();"
+        "    if (l) return l;"
+        "  }"
+        "  const tx = el.innerText ? el.innerText.trim().slice(0,120) : '';"
+        "  if (tx) return tx;"
+        "  const v = el.value ? String(el.value).trim().slice(0,120) : '';"
+        "  return v;"
+        "}"
+    )
+
+    def _css_find_in_frame(frame, role, name, exact):
+        """CSS-based element search for a single frame — mirrors _snapshot_page logic."""
+        css_selectors = _ROLE_CSS.get(role, [])
+        name_lower = name.lower().strip()
+        for css in css_selectors:
+            try:
+                locs = frame.locator(css).all()
+            except Exception:
+                continue
+            for loc in locs:
+                try:
+                    if not loc.is_visible():
+                        continue
+                    el_name = (loc.evaluate(_NAME_JS) or "").strip()
+                    el_lower = el_name.lower()
+                    match = (el_lower == name_lower) if exact else (name_lower in el_lower)
+                    if match:
+                        return loc
+                except Exception:
+                    continue
+        return None
+
     # 1. Main page fast try
     try:
         loc = page.get_by_role(role, name=name, exact=exact).first
@@ -270,6 +371,30 @@ def _find_in_frames(page, role: str, name: str, exact: bool = False):
                 return loc
             except Exception:
                 continue
+
+    # 4. CSS-based fallback — same strategy as _snapshot_page().
+    # Handles sites where Chrome's a11y tree is partial (Gmail, LinkedIn, etc.).
+    # The snapshot found the element via CSS; clicking must be able to find it the same way.
+    loc = _css_find_in_frame(page.main_frame, role, name, exact)
+    if loc is not None:
+        return loc
+    for frame in page.frames:
+        if frame is page.main_frame:
+            continue
+        loc = _css_find_in_frame(frame, role, name, exact)
+        if loc is not None:
+            return loc
+    # Fuzzy CSS fallback: partial name match on first word
+    if first_word != name:
+        loc = _css_find_in_frame(page.main_frame, role, first_word, exact=False)
+        if loc is not None:
+            return loc
+        for frame in page.frames:
+            if frame is page.main_frame:
+                continue
+            loc = _css_find_in_frame(frame, role, first_word, exact=False)
+            if loc is not None:
+                return loc
 
     raise TimeoutError(
         f"Could not find {role} '{name}' on the page or any frame. "
@@ -1157,7 +1282,7 @@ def get_snapshot(tab_index: int = 0) -> str:
                 pass
 
 
-def click_accessible(role: str, name: str, tab_index: int = 0, exact: bool = False) -> str:
+def click_accessible(role: str, name: str = "", tab_index: int = 0, exact: bool = False) -> str:
     """Click a page element by its ARIA role and visible label — no CSS selector needed.
 
     role: ARIA role such as 'button', 'link', 'tab', 'menuitem', 'checkbox', etc.
@@ -1172,6 +1297,20 @@ def click_accessible(role: str, name: str, tab_index: int = 0, exact: bool = Fal
       click_accessible("link", "Inbox")
       click_accessible("button", "Send")
     """
+    # Guard: auto-correct swapped or missing arguments.
+    # Agents sometimes call click_accessible("Compose") or click_accessible("Compose","button").
+    if role not in _INTERACTIVE_ROLES:
+        if not name:
+            # click_accessible("Compose") — name passed as role, default role to button
+            name = role
+            role = "button"
+        elif name in _INTERACTIVE_ROLES:
+            # click_accessible("Compose", "button") — args swapped
+            role, name = name, role
+        else:
+            # Both args provided but role is invalid — try button as a safe default
+            name = name or role
+            role = "button"
     pw = None
     try:
         pw, browser = _connect()
@@ -1207,7 +1346,7 @@ def click_accessible(role: str, name: str, tab_index: int = 0, exact: bool = Fal
                 pass
 
 
-def type_accessible(role: str, name: str, text: str, tab_index: int = 0, exact: bool = False) -> str:
+def type_accessible(role: str, name: str = "", text: str = "", tab_index: int = 0, exact: bool = False) -> str:
     """Type text into any input field by its ARIA role and label — no CSS selector needed.
 
     role: usually 'textbox', 'searchbox', or 'spinbutton'.
@@ -1223,6 +1362,18 @@ def type_accessible(role: str, name: str, text: str, tab_index: int = 0, exact: 
       type_accessible("textbox", "Subject", "Hello there")
       type_accessible("searchbox", "Search", "my query")
     """
+    # Guard: auto-correct swapped or missing arguments.
+    if role not in _INTERACTIVE_ROLES:
+        if name in _INTERACTIVE_ROLES:
+            # type_accessible("Subject", "textbox", "text") — args swapped
+            role, name = name, role
+        elif not name:
+            # type_accessible("Subject", "", "text") — name passed as role
+            name = role
+            role = "textbox"
+        else:
+            name = name or role
+            role = "textbox"
     pw = None
     try:
         pw, browser = _connect()
