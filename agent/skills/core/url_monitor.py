@@ -329,13 +329,13 @@ class UrlMonitor:
         
         # Get latest checks for each URL
         cursor.execute('''
-            SELECT url, status_code, check_time, error 
-            FROM url_checks 
+            SELECT url_checks.url, url_checks.status_code, url_checks.check_time, url_checks.error
+            FROM url_checks
             JOIN (
                 SELECT url, MAX(check_time) as latest FROM url_checks
                 WHERE check_time > datetime('now', '-1 day')
                 GROUP BY url
-            ) latest_checks ON url_checks.url = latest_checks.url AND check_time = latest_checks.latest
+            ) latest_checks ON url_checks.url = latest_checks.url AND url_checks.check_time = latest_checks.latest
         ''')
         
         latest_checks = cursor.fetchall()

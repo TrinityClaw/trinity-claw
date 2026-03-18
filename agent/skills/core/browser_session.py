@@ -53,7 +53,8 @@ DOC = (
     "tiktok_comment(video_url, text)→COMMENT on a TikTok video; "
     "tiktok_follow(username)→FOLLOW a TikTok user; "
     "send_gmail(to, subject, body, tab_index?)→COMPOSE AND SEND a new Gmail email in one step. "
-    "USE THIS for Gmail — never chain manually."
+    "⚠️ ALWAYS use send_gmail for Gmail. NEVER use click_accessible/type_accessible to fill compose fields manually — Gmail's compose window is in an iframe and requires this dedicated helper. "
+    "If a compose window is already open on screen, still call send_gmail() — it handles that case."
 )
 
 SKILL_TIMEOUT = 60  # browser operations can take up to 60s
@@ -109,21 +110,17 @@ def _collect_a11y_nodes(node: dict, results: list, limit: int = 250) -> None:
 
 
 def _snapshot_page(page) -> str:
-    """Build a snapshot string from an already-connected Playwright page.
+    """Build a snapshot using Playwright CSS locators (proven reliable on any site).
 
-    Uses frame.locator(css).all() — Playwright's CSS-based DOM locator —
-    which calls querySelectorAll internally and never touches Chrome's
-    accessibility tree. This avoids the partial-tree bug where Gmail returns
-    only 5 items from accessibility.snapshot() / get_by_role().all().
+    For each visible element, a single evaluate() call both extracts the name AND
+    stamps data-tc-ref="@eN" directly onto the DOM node.
 
-    For each element, name is extracted via a single loc.evaluate() call
-    (one CDP round-trip per element, no multi-network-call overhead).
-    Runs on main frame + all non-blank child iframes.
+    click_ref / fill_ref locate elements with frame.locator('[data-tc-ref="@eN"]') —
+    a plain CSS selector on the tag we just stamped. No re-searching, no accessibility
+    tree, no name matching at click time. Same node the snapshot found = same node clicked.
     """
     global _ref_cache
 
-    # (css_selector, aria_role_label) pairs — ordered by priority.
-    # CSS selectors are used by frame.locator() which calls querySelectorAll.
     _CSS_MAP = [
         ("button:not([disabled])",                          "button"),
         ("[role='button']:not([disabled])",                 "button"),
@@ -151,10 +148,10 @@ def _snapshot_page(page) -> str:
         ("[role='spinbutton']",                             "spinbutton"),
     ]
 
-    # One evaluate() call per locator → single CDP round-trip per element.
-    # Priority: aria-label > title > placeholder > label text > innerText > value.
-    _NAME_JS = (
-        "el => {"
+    # Single evaluate() per element: stamps data-tc-ref AND returns the name.
+    _TAG_AND_NAME_JS = (
+        "(el, ref) => {"
+        "  el.setAttribute('data-tc-ref', ref);"
         "  const a = el.getAttribute('aria-label');"
         "  if (a && a.trim()) return a.trim();"
         "  const t = el.getAttribute('title');"
@@ -172,16 +169,27 @@ def _snapshot_page(page) -> str:
         "}"
     )
 
-    frames_to_check = [(page.main_frame, "main")]
+    _ref_cache.clear()
+    counter = 1
+    sections = []
+
+    frames_to_check = [(page.main_frame, "main", None)]
     for i, frame in enumerate(page.frames):
         if frame is page.main_frame:
             continue
-        url = frame.url or ""
-        if url and url not in ("about:blank", ""):
-            frames_to_check.append((frame, f"iframe[{i}]"))
+        # Include ALL frames — Gmail compose iframes often have no/blank URL
+        frames_to_check.append((frame, f"iframe[{i}]", i))
 
-    sections = []
-    for frame, label in frames_to_check:
+    for frame, label, frame_idx in frames_to_check:
+        # Remove stale tags from the previous snapshot in this frame
+        try:
+            frame.evaluate(
+                "() => document.querySelectorAll('[data-tc-ref]')"
+                ".forEach(el => el.removeAttribute('data-tc-ref'))"
+            )
+        except Exception:
+            pass
+
         items = []
         seen = set()
         count = 0
@@ -198,11 +206,24 @@ def _snapshot_page(page) -> str:
                 try:
                     if not loc.is_visible():
                         continue
-                    name = (loc.evaluate(_NAME_JS) or "").strip()
+                    ref = f"@e{counter}"
+                    name = (loc.evaluate(_TAG_AND_NAME_JS, ref) or "").strip()
                     if name and (role, name) not in seen:
                         seen.add((role, name))
-                        items.append((role, name))
+                        _ref_cache[ref] = {
+                            "role": role, "name": name,
+                            "frame_is_main": frame_idx is None,
+                            "frame_idx": frame_idx,
+                        }
+                        items.append((ref, role, name))
+                        counter += 1
                         count += 1
+                    else:
+                        # Dup or no name — remove the tag we just stamped
+                        try:
+                            loc.evaluate("el => el.removeAttribute('data-tc-ref')")
+                        except Exception:
+                            pass
                 except Exception:
                     continue
         if items:
@@ -211,17 +232,12 @@ def _snapshot_page(page) -> str:
     if not sections:
         return "⚠️ Snapshot empty — page may still be loading."
 
-    _ref_cache.clear()
     output_parts = []
-    counter = 1
     for label, items in sections:
         if len(sections) > 1:
             output_parts.append(f"\n[{label}]")
-        for r, n in items:
-            ref = f"@e{counter}"
-            _ref_cache[ref] = (r, n)
-            output_parts.append(f"  {ref}  {r} \"{n}\"")
-            counter += 1
+        for ref, role, name in items:
+            output_parts.append(f"  {ref}  {role} \"{name}\"")
 
     body = "\n".join(output_parts)
     return (
@@ -400,6 +416,86 @@ def _find_in_frames(page, role: str, name: str, exact: bool = False):
         f"Could not find {role} '{name}' on the page or any frame. "
         f"Call get_snapshot() to see the correct element names."
     )
+
+
+def _locate_by_ref(page, ref_data: dict):
+    """Re-locate an element using the exact DOM path stored during get_snapshot().
+
+    Uses frame_idx + css + visible_nth — the identical strategy the snapshot used.
+    This avoids any re-search by name or accessibility tree: it replays the precise
+    CSS selector and nth-visible-element position that produced the @eN ref.
+
+    Falls back to name-based CSS scan if the DOM position has shifted since snapshot.
+    Returns a Playwright Locator or None if the element cannot be found.
+    """
+    _NAME_JS = (
+        "el => {"
+        "  const a = el.getAttribute('aria-label');"
+        "  if (a && a.trim()) return a.trim();"
+        "  const t = el.getAttribute('title');"
+        "  if (t && t.trim()) return t.trim();"
+        "  const p = el.getAttribute('placeholder');"
+        "  if (p && p.trim()) return p.trim();"
+        "  if (el.labels && el.labels[0]) {"
+        "    const l = el.labels[0].innerText.trim();"
+        "    if (l) return l;"
+        "  }"
+        "  const tx = el.innerText ? el.innerText.trim().slice(0,120) : '';"
+        "  if (tx) return tx;"
+        "  const v = el.value ? String(el.value).trim().slice(0,120) : '';"
+        "  return v;"
+        "}"
+    )
+
+    if ref_data.get("frame_is_main", True):
+        frame = page.main_frame
+    else:
+        frame_idx = ref_data.get("frame_idx")
+        if frame_idx is None or frame_idx >= len(page.frames):
+            frame = page.main_frame
+        else:
+            frame = page.frames[frame_idx]
+
+    css = ref_data.get("css", "")
+    target_nth = ref_data.get("visible_nth", 0)
+    target_name = ref_data.get("name", "").lower()
+
+    if not css:
+        return None
+
+    # Primary: exact nth visible position — same as what the snapshot recorded
+    try:
+        locs = frame.locator(css).all()
+        visible_count = 0
+        for loc in locs:
+            try:
+                if not loc.is_visible():
+                    continue
+                if visible_count == target_nth:
+                    return loc
+                visible_count += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Fallback: name-based scan with the same CSS (DOM may have shifted slightly)
+    try:
+        locs = frame.locator(css).all()
+        for loc in locs:
+            try:
+                if not loc.is_visible():
+                    continue
+                el_name = (loc.evaluate(_NAME_JS) or "").lower()
+                if target_name and target_name in el_name:
+                    return loc
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    return None
+
 
 def _connect():
     """Start playwright and connect to existing Chrome via CDP.
@@ -652,8 +748,29 @@ def click(target: str = "", tab_index: int = 0, **kwargs) -> str:
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
-        locator = page.locator(target).first
-        locator.wait_for(state="visible", timeout=10000)
+        # Try main page first, then search all child iframes.
+        # Gmail compose, LinkedIn DMs, etc. live inside iframes —
+        # page.locator() alone never reaches them.
+        locator = None
+        try:
+            loc = page.locator(target).first
+            loc.wait_for(state="visible", timeout=3000)
+            locator = loc
+        except Exception:
+            pass
+        if locator is None:
+            for frame in page.frames:
+                if frame is page.main_frame:
+                    continue
+                try:
+                    loc = frame.locator(target).first
+                    loc.wait_for(state="visible", timeout=1500)
+                    locator = loc
+                    break
+                except Exception:
+                    continue
+        if locator is None:
+            return f"❌ Could not click '{target}': element not found on page or in any iframe."
         locator.click()
         return f"✅ Clicked: {target}\nURL after click: {page.url}"
     except Exception as e:
@@ -690,8 +807,29 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
-        el = page.locator(target).first
-        el.wait_for(state="visible", timeout=10000)
+        # Try main page first, then all child iframes.
+        # Gmail compose fields, LinkedIn DMs etc. live inside iframes —
+        # page.locator() alone never reaches them.
+        el = None
+        try:
+            loc = page.locator(target).first
+            loc.wait_for(state="visible", timeout=3000)
+            el = loc
+        except Exception:
+            pass
+        if el is None:
+            for frame in page.frames:
+                if frame is page.main_frame:
+                    continue
+                try:
+                    loc = frame.locator(target).first
+                    loc.wait_for(state="visible", timeout=1500)
+                    el = loc
+                    break
+                except Exception:
+                    continue
+        if el is None:
+            return f"❌ Could not type into '{target}': element not found on page or in any iframe."
         el.click()  # focus the element first
         if clear_first:
             # Use JavaScript editing commands — keyboard events (even element-level) still bubble
@@ -713,7 +851,7 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
                 el.press("Control+a")
                 el.press("Delete")
         el.type(text, delay=50)  # 50ms delay simulates human typing
-        # For tweet compose box: tell the agent exactly what to do next so it doesn't stop early
+        # Tell the agent what to do next so it doesn't stop early
         next_step = ""
         if "tweetTextarea" in target:
             post_btn = (
@@ -724,6 +862,25 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
             next_step = (
                 f"\n⚠️ Text entered but NOT posted yet — tweet is still a draft."
                 f"\nMANDATORY next step: click('{post_btn}') to publish."
+            )
+        elif target == '[name="to"]':
+            next_step = (
+                "\n⚠️ To field filled — email NOT sent yet."
+                "\nMANDATORY: continue to next steps:"
+                "\n  press_key('Tab')"
+                "\n  type_text('[name=\"subjectbox\"]', \"<subject>\")"
+                "\n  type_text('div[contenteditable=\"true\"][aria-multiline=\"true\"]', \"<body>\")"
+                "\n  press_key('Control+Enter')"
+            )
+        elif target == '[name="subjectbox"]':
+            next_step = (
+                "\n⚠️ Subject filled — email NOT sent yet."
+                "\nMANDATORY next step: type_text('div[contenteditable=\"true\"][aria-multiline=\"true\"]', \"<body text>\")"
+            )
+        elif 'contenteditable="true"' in target and 'aria-multiline="true"' in target:
+            next_step = (
+                "\n⚠️ Body filled — email NOT sent yet."
+                "\nMANDATORY next step: press_key('Control+Enter') to send."
             )
         return f"✅ Typed {len(text)} characters into: {target}{next_step}"
     except Exception as e:
@@ -1415,8 +1572,9 @@ def type_accessible(role: str, name: str = "", text: str = "", tab_index: int = 
 def click_ref(ref: str, tab_index: int = 0) -> str:
     """Click an element by its @eN reference from the last get_snapshot() call.
 
-    ref: a ref like '@e3' returned by get_snapshot().
-    Equivalent to agent-browser's `click @e3` command.
+    Uses the data-tc-ref tag set on the DOM element during snapshot.
+    No re-searching by name or accessibility tree — finds the exact same node.
+    Works on any site: Gmail, LinkedIn, Twitter, anything.
 
     Example:
       get_snapshot()          → see '@e3 button "Compose"'
@@ -1427,20 +1585,44 @@ def click_ref(ref: str, tab_index: int = 0) -> str:
             f"❌ Unknown ref '{ref}'. Call get_snapshot() first to refresh element refs.\n"
             f"Known refs: {', '.join(sorted(_ref_cache.keys())[:10]) or 'none yet'}"
         )
-    role, name = _ref_cache[ref]
-    result = click_accessible(role, name, tab_index)
-    return result.replace(
-        f"Could not click {role} \"{name}\"",
-        f"Could not click ref {ref} ({role} \"{name}\")"
-    )
+    ref_data = _ref_cache[ref]
+    role = ref_data["role"]
+    name = ref_data["name"]
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, tab_index)
+        # Locate by the data-tc-ref tag stamped onto the DOM node during snapshot
+        if ref_data.get("frame_is_main", True):
+            frame = page.main_frame
+        else:
+            fidx = ref_data.get("frame_idx")
+            frame = page.frames[fidx] if fidx is not None and fidx < len(page.frames) else page.main_frame
+        locator = frame.locator(f'[data-tc-ref="{ref}"]')
+        locator.click()
+        page.wait_for_timeout(700)
+        header = f"✅ Clicked {ref} ({role} \"{name}\")\nURL after click: {page.url}"
+        snapshot = _snapshot_page(page)
+        return header + "\n\n" + snapshot
+    except Exception as e:
+        return (
+            f"❌ Could not click ref {ref} ({role} \"{name}\"): {e}\n"
+            f"Tip: call get_snapshot() to refresh refs — the tag may have expired after a page re-render."
+        )
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
 
 
 def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
     """Fill a field by its @eN reference from the last get_snapshot() call.
 
-    ref: a ref like '@e7' returned by get_snapshot().
-    text: text to fill (clears existing content first).
-    Equivalent to agent-browser's `fill @e7 "text"` command.
+    Uses the data-tc-ref tag set on the DOM element during snapshot.
+    No re-searching by name or accessibility tree — finds the exact same node.
+    Works on any site: Gmail compose, LinkedIn DMs, anything.
 
     Example:
       get_snapshot()                      → see '@e7 textbox "To"'
@@ -1451,12 +1633,39 @@ def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
             f"❌ Unknown ref '{ref}'. Call get_snapshot() first to refresh element refs.\n"
             f"Known refs: {', '.join(sorted(_ref_cache.keys())[:10]) or 'none yet'}"
         )
-    role, name = _ref_cache[ref]
-    result = type_accessible(role, name, text, tab_index)
-    return result.replace(
-        f"Could not type into {role} \"{name}\"",
-        f"Could not fill ref {ref} ({role} \"{name}\")"
-    )
+    ref_data = _ref_cache[ref]
+    role = ref_data["role"]
+    name = ref_data["name"]
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, tab_index)
+        # Locate by the data-tc-ref tag stamped onto the DOM node during snapshot
+        if ref_data.get("frame_is_main", True):
+            frame = page.main_frame
+        else:
+            fidx = ref_data.get("frame_idx")
+            frame = page.frames[fidx] if fidx is not None and fidx < len(page.frames) else page.main_frame
+        locator = frame.locator(f'[data-tc-ref="{ref}"]')
+        locator.click()
+        try:
+            locator.fill(text)
+        except Exception:
+            # contenteditable fallback (Gmail body, rich-text editors)
+            locator.press("Control+a")
+            locator.type(text, delay=40)
+        return f"✅ Filled {ref} ({role} \"{name}\"): {text[:100]}{'...' if len(text) > 100 else ''}"
+    except Exception as e:
+        return (
+            f"❌ Could not fill ref {ref} ({role} \"{name}\"): {e}\n"
+            f"Tip: call get_snapshot() to refresh refs — the tag may have expired after a page re-render."
+        )
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
 
 
 def evaluate(js_code: str, tab_index: int = 0) -> str:
