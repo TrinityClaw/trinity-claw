@@ -863,7 +863,16 @@
             const t = _title ? ` title="${_title}"` : '';
             return `<a href="${href}"${t} target="_blank" rel="noopener noreferrer">${_text}</a>`;
         };
-        marked.setOptions({ renderer: _renderer });
+        // If AI wraps a URL in backticks, render it as a clickable link instead of <code>
+        _renderer.codespan = (token) => {
+            const content = token?.text ?? token;
+            if (/^https?:\/\/\S+$/.test(content.trim())) {
+                const url = content.trim();
+                return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
+            }
+            return `<code>${content}</code>`;
+        };
+        marked.setOptions({ renderer: _renderer, gfm: true });
     </script>
 </head>
 
