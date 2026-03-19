@@ -1,5 +1,7 @@
 import os
 import logging
+import random
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -55,7 +57,34 @@ DOC = (
     "tiktok_follow(username)→FOLLOW a TikTok user; "
     "send_gmail(to, subject, body, tab_index?)→COMPOSE AND SEND a new Gmail email in one step. "
     "⚠️ ALWAYS use send_gmail for Gmail. NEVER use click_accessible/type_accessible to fill compose fields manually — Gmail's compose window is in an iframe and requires this dedicated helper. "
-    "If a compose window is already open on screen, still call send_gmail() — it handles that case."
+    "If a compose window is already open on screen, still call send_gmail() — it handles that case. "
+
+    "=== STEALTH MODE — autonomous bot sessions with anti-detection + cookie persistence === "
+    "Use stealth_* functions when you need to log into a site programmatically (NOT via the user's real Chrome), "
+    "when a site detects headless browsers, or when you need saved login state across sessions. "
+    "Stealth sessions run their OWN Chromium with playwright-stealth patches — completely separate from CDP mode. "
+    "Cookies are saved to /app/memory/stealth_sessions/<session_name>/cookies.json and restored on next start. "
+
+    "stealth_start(session_name?, headless?)→LAUNCH stealth browser, load saved cookies. Call once before anything else; "
+    "stealth_goto(url, session_name?)→NAVIGATE to URL with human delay; "
+    "stealth_snapshot(session_name?)→GET @eN refs for all interactive elements (same pattern as get_snapshot()); "
+    "stealth_click_ref(ref, session_name?)→CLICK by @eN ref with human mouse movement, returns fresh snapshot; "
+    "stealth_fill_ref(ref, text, session_name?)→TYPE with human keystroke timing by @eN ref; "
+    "stealth_get_text(session_name?)→GET visible page text (up to 5000 chars); "
+    "stealth_screenshot(session_name?)→SCREENSHOT saved to /app/memory/browser_screenshots/; "
+    "stealth_scroll(direction?, session_name?)→SCROLL: up/down/top/bottom; "
+    "stealth_press(key, session_name?)→PRESS keyboard key: Enter, Tab, Control+Enter, etc.; "
+    "stealth_handle_captcha(session_name?, captcha_api_key?)→DETECT and solve CAPTCHA "
+    "(reCAPTCHA v2 auto-solved via 2captcha if key provided; image CAPTCHA returns screenshot path + instructions); "
+    "stealth_save(session_name?)→CHECKPOINT cookies to disk mid-session; "
+    "stealth_close(session_name?)→SAVE cookies and shut down session; "
+    "stealth_list_sessions()→LIST all active stealth sessions and their current URLs. "
+
+    "STEALTH INTERACTION PATTERN: "
+    "stealth_start('mysite') → stealth_goto(url, 'mysite') → stealth_snapshot('mysite') "
+    "→ stealth_click_ref('@e3', 'mysite') / stealth_fill_ref('@e7', text, 'mysite') "
+    "→ stealth_close('mysite'). "
+    "Multiple sessions run in parallel — use different session_name values."
 )
 
 SKILL_TIMEOUT = 60  # browser operations can take up to 60s
@@ -1735,3 +1764,512 @@ def evaluate(js_code: str, tab_index: int = 0) -> str:
                 pw.stop()
             except Exception:
                 pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEALTH BROWSER — autonomous Playwright sessions with anti-detection,
+# cookie persistence, human-like behaviour, and CAPTCHA handling.
+#
+# These are SEPARATE from the CDP functions above. Use them when:
+#   • You need to log into a site programmatically (not via the user's Chrome)
+#   • The target site detects headless/automated browsers
+#   • You need to save and restore login state across agent sessions
+#   • You need CAPTCHA handling
+#
+# Typical flow:
+#   stealth_start('instagram')        → launch browser, load saved cookies
+#   stealth_goto(url, 'instagram')    → navigate
+#   stealth_snapshot('instagram')     → see @eN refs
+#   stealth_click_ref('@e3', 'instagram')  → click
+#   stealth_fill_ref('@e7', 'text', 'instagram')  → type
+#   stealth_close('instagram')        → save cookies, shut down
+# ═══════════════════════════════════════════════════════════════════════════
+
+_stealth_sessions: dict = {}       # session_name → {pw, browser, context, page}
+_stealth_ref_caches: dict = {}     # session_name → ref_cache dict (per-session)
+_STEALTH_SESSIONS_DIR = Path("/app/memory/stealth_sessions")
+
+
+def _stealth_human_delay(min_s: float = 0.5, max_s: float = 1.8):
+    time.sleep(random.uniform(min_s, max_s))
+
+
+def _stealth_get(session_name: str) -> dict:
+    """Return the active session dict or raise a clear error."""
+    if session_name not in _stealth_sessions:
+        raise RuntimeError(
+            f"No active stealth session '{session_name}'. "
+            f"Call stealth_start('{session_name}') first."
+        )
+    return _stealth_sessions[session_name]
+
+
+def stealth_start(session_name: str = "default", headless: bool = True) -> str:
+    """Launch a stealth Playwright browser with saved-cookie persistence.
+
+    Starts its own Chromium — completely separate from the user's real Chrome.
+    Cookies are loaded from /app/memory/stealth_sessions/<session_name>/cookies.json
+    so the next run starts already logged in (no re-login needed).
+
+    Args:
+        session_name: Name for this session (e.g. 'instagram', 'linkedin_bot').
+                      Use different names to run multiple independent sessions.
+        headless:     True = no visible window (default). False = show browser for debugging.
+
+    Returns:
+        str: Confirmation with stealth status and cookie load status.
+    """
+    if session_name in _stealth_sessions:
+        return f"✅ Stealth session '{session_name}' is already active."
+
+    try:
+        from playwright.sync_api import sync_playwright
+        try:
+            from playwright_stealth import stealth_sync
+            _has_stealth = True
+        except ImportError:
+            _has_stealth = False
+
+        session_dir = _STEALTH_SESSIONS_DIR / session_name
+        session_dir.mkdir(parents=True, exist_ok=True)
+        cookie_file = session_dir / "cookies.json"
+
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(
+            headless=headless,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+        )
+
+        # Load saved cookies if they exist
+        cookies_loaded = False
+        if cookie_file.exists():
+            import json as _json
+            cookies = _json.loads(cookie_file.read_text())
+            if cookies:
+                context.add_cookies(cookies)
+                cookies_loaded = True
+
+        page = context.new_page()
+        if _has_stealth:
+            stealth_sync(page)
+
+        _stealth_sessions[session_name] = {
+            "pw": pw, "browser": browser, "context": context, "page": page,
+        }
+        _stealth_ref_caches[session_name] = {}
+
+        stealth_note = "" if _has_stealth else " ⚠️ playwright-stealth not installed — basic mode"
+        cookies_note = f"cookies loaded from {cookie_file}" if cookies_loaded else "no saved cookies (fresh session)"
+        return f"✅ Stealth session '{session_name}' started ({cookies_note}){stealth_note}"
+
+    except Exception as e:
+        return f"❌ stealth_start failed: {e}"
+
+
+def stealth_list_sessions() -> str:
+    """List all currently active stealth browser sessions.
+
+    Returns:
+        str: Session names and their current URLs.
+    """
+    if not _stealth_sessions:
+        return "No active stealth sessions. Call stealth_start(session_name) to begin."
+    lines = ["Active stealth sessions:"]
+    for name, sess in _stealth_sessions.items():
+        try:
+            url = sess["page"].url
+        except Exception:
+            url = "unknown"
+        lines.append(f"  • {name} — {url}")
+    return "\n".join(lines)
+
+
+def stealth_goto(url: str, session_name: str = "default") -> str:
+    """Navigate the stealth browser to a URL.
+
+    Args:
+        url:          Full URL including https://.
+        session_name: Target session (default: 'default').
+
+    Returns:
+        str: Page title and final URL after navigation.
+    """
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        _stealth_human_delay(0.8, 2.0)
+        return f"✅ Navigated to {page.url}\nTitle: {page.title()}"
+    except Exception as e:
+        return f"❌ stealth_goto failed: {e}"
+
+
+def stealth_snapshot(session_name: str = "default") -> str:
+    """Get an @eN ref snapshot of all interactive elements in the stealth browser.
+
+    Works exactly like get_snapshot() for CDP sessions — call this first when
+    arriving on a new page, then use stealth_click_ref / stealth_fill_ref with
+    the returned refs. No CSS selectors needed.
+
+    Args:
+        session_name: Target session (default: 'default').
+
+    Returns:
+        str: Snapshot listing every interactive element with its @eN ref, role, and label.
+    """
+    global _ref_cache
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+        result = _snapshot_page(page)
+        # Copy global ref cache into the per-session cache so CDP and stealth
+        # sessions do not overwrite each other's refs.
+        _stealth_ref_caches[session_name] = dict(_ref_cache)
+        return result
+    except Exception as e:
+        return f"❌ stealth_snapshot failed: {e}"
+
+
+def stealth_click_ref(ref: str, session_name: str = "default") -> str:
+    """Click an element by @eN ref in the stealth browser with human-like mouse movement.
+
+    Use stealth_snapshot() first to get refs. Returns a fresh snapshot after
+    clicking so you can see what changed without calling stealth_snapshot() again.
+
+    Args:
+        ref:          The @eN ref from stealth_snapshot() (e.g. '@e3').
+        session_name: Target session (default: 'default').
+
+    Returns:
+        str: Confirmation + updated snapshot.
+    """
+    global _ref_cache
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+        cache = _stealth_ref_caches.get(session_name, {})
+
+        if ref not in cache:
+            return (
+                f"❌ Ref {ref} not found in session '{session_name}'. "
+                f"Call stealth_snapshot('{session_name}') to refresh refs."
+            )
+
+        info = cache[ref]
+        locator = page.locator(f'[data-tc-ref="{ref}"]').first
+        locator.scroll_into_view_if_needed()
+
+        box = locator.bounding_box()
+        if box:
+            page.mouse.move(
+                box["x"] + box["width"] * random.uniform(0.3, 0.7),
+                box["y"] + box["height"] * random.uniform(0.3, 0.7),
+            )
+            _stealth_human_delay(0.1, 0.4)
+
+        locator.click()
+        _stealth_human_delay(0.4, 1.2)
+
+        # Return fresh snapshot
+        result = _snapshot_page(page)
+        _stealth_ref_caches[session_name] = dict(_ref_cache)
+        role = info.get("role", "")
+        name = info.get("name", "")
+        return f"✅ Clicked {ref} ({role} \"{name}\")\n\n{result}"
+    except Exception as e:
+        return f"❌ stealth_click_ref failed: {e}"
+
+
+def stealth_fill_ref(ref: str, text: str, session_name: str = "default") -> str:
+    """Type text into a field by @eN ref in the stealth browser with human-like keystroke timing.
+
+    Use stealth_snapshot() first to get refs.
+
+    Args:
+        ref:          The @eN ref from stealth_snapshot() (e.g. '@e5').
+        text:         The text to type.
+        session_name: Target session (default: 'default').
+
+    Returns:
+        str: Confirmation showing the first 100 chars typed.
+    """
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+        cache = _stealth_ref_caches.get(session_name, {})
+
+        if ref not in cache:
+            return (
+                f"❌ Ref {ref} not found in session '{session_name}'. "
+                f"Call stealth_snapshot('{session_name}') to refresh refs."
+            )
+
+        info = cache[ref]
+        locator = page.locator(f'[data-tc-ref="{ref}"]').first
+        locator.scroll_into_view_if_needed()
+        locator.click()
+        _stealth_human_delay(0.2, 0.5)
+
+        # Clear then type character-by-character with human timing
+        locator.fill("")
+        for char in text:
+            page.keyboard.type(char, delay=random.randint(60, 150))
+
+        _stealth_human_delay(0.3, 0.8)
+        role = info.get("role", "")
+        name = info.get("name", "")
+        preview = text[:100] + ("..." if len(text) > 100 else "")
+        return f"✅ Typed into {ref} ({role} \"{name}\"): {preview}"
+    except Exception as e:
+        return f"❌ stealth_fill_ref failed: {e}"
+
+
+def stealth_get_text(session_name: str = "default") -> str:
+    """Get visible text from the stealth browser page (up to 5000 chars).
+
+    Args:
+        session_name: Target session (default: 'default').
+
+    Returns:
+        str: Visible page text.
+    """
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+        text = page.inner_text("body")
+        text = " ".join(text.split())[:5000]
+        return f"✅ Page text ({page.url}):\n{text}"
+    except Exception as e:
+        return f"❌ stealth_get_text failed: {e}"
+
+
+def stealth_screenshot(session_name: str = "default") -> str:
+    """Take a screenshot of the stealth browser page.
+
+    Saved to /app/memory/browser_screenshots/stealth_<session>_<timestamp>.png
+
+    Args:
+        session_name: Target session (default: 'default').
+
+    Returns:
+        str: Path to the saved screenshot.
+    """
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+        _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = _SCREENSHOT_DIR / f"stealth_{session_name}_{ts}.png"
+        page.screenshot(path=str(path))
+        return f"✅ Screenshot saved: {path}"
+    except Exception as e:
+        return f"❌ stealth_screenshot failed: {e}"
+
+
+def stealth_scroll(direction: str = "down", session_name: str = "default") -> str:
+    """Scroll the stealth browser page.
+
+    Args:
+        direction:    'up', 'down', 'top', or 'bottom'.
+        session_name: Target session (default: 'default').
+
+    Returns:
+        str: Confirmation.
+    """
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+        d = direction.lower()
+        if d == "down":
+            page.mouse.wheel(0, 500)
+        elif d == "up":
+            page.mouse.wheel(0, -500)
+        elif d == "bottom":
+            page.keyboard.press("End")
+        elif d == "top":
+            page.keyboard.press("Home")
+        _stealth_human_delay(0.3, 0.7)
+        return f"✅ Scrolled {direction}"
+    except Exception as e:
+        return f"❌ stealth_scroll failed: {e}"
+
+
+def stealth_press(key: str, session_name: str = "default") -> str:
+    """Press a keyboard key in the stealth browser.
+
+    Examples: 'Enter', 'Tab', 'Escape', 'Control+Enter', 'Control+a'.
+
+    Args:
+        key:          Key or key combination to press.
+        session_name: Target session (default: 'default').
+
+    Returns:
+        str: Confirmation.
+    """
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+        page.keyboard.press(key)
+        _stealth_human_delay(0.2, 0.6)
+        return f"✅ Pressed {key}"
+    except Exception as e:
+        return f"❌ stealth_press failed: {e}"
+
+
+def stealth_handle_captcha(session_name: str = "default", captcha_api_key: str = "") -> str:
+    """Detect and attempt to solve a CAPTCHA in the stealth browser.
+
+    Handles two types:
+    - reCAPTCHA v2: auto-solved via 2captcha if captcha_api_key is provided.
+    - Image CAPTCHA (text/characters): saves a screenshot and tells you the
+      input ref to use — read the image and call stealth_fill_ref() with the answer.
+
+    Args:
+        session_name:     Target session (default: 'default').
+        captcha_api_key:  Your 2captcha.com API key (optional, only for reCAPTCHA v2).
+
+    Returns:
+        str: Result or step-by-step instructions to complete the solve.
+    """
+    try:
+        sess = _stealth_get(session_name)
+        page = sess["page"]
+
+        # reCAPTCHA v2
+        if page.locator("iframe[src*='recaptcha']").count() > 0:
+            if captcha_api_key:
+                site_key_el = page.locator("[data-sitekey]").first
+                site_key = site_key_el.get_attribute("data-sitekey") if site_key_el else None
+                if site_key:
+                    token = _stealth_solve_recaptcha(captcha_api_key, site_key, page.url)
+                    if token:
+                        page.evaluate(
+                            f"document.getElementById('g-recaptcha-response').value='{token}'"
+                        )
+                        return "✅ reCAPTCHA v2 solved via 2captcha and token injected."
+                    return "❌ 2captcha solve timed out. Try again or solve manually."
+            return (
+                "⚠️ reCAPTCHA v2 detected. "
+                "Provide captcha_api_key='your_2captcha_key' to auto-solve, "
+                "or ask the user to solve it manually."
+            )
+
+        # Image CAPTCHA
+        if page.locator("img[src*='captcha'], img[alt*='captcha'], img[id*='captcha']").count() > 0:
+            _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = _SCREENSHOT_DIR / f"captcha_{session_name}_{ts}.png"
+            page.screenshot(path=str(path))
+            return (
+                f"⚠️ Image CAPTCHA detected. Screenshot saved: {path}\n"
+                f"1. Read the CAPTCHA characters from the screenshot.\n"
+                f"2. Call stealth_snapshot('{session_name}') to find the input field ref.\n"
+                f"3. Call stealth_fill_ref(ref, 'captcha_answer', '{session_name}') to submit."
+            )
+
+        return "✅ No CAPTCHA detected on this page."
+    except Exception as e:
+        return f"❌ stealth_handle_captcha failed: {e}"
+
+
+def _stealth_solve_recaptcha(api_key: str, site_key: str, page_url: str) -> str:
+    """Submit reCAPTCHA v2 to 2captcha.com and poll for the token."""
+    try:
+        import requests as _req
+        r = _req.post("http://2captcha.com/in.php", data={
+            "key": api_key, "method": "userrecaptcha",
+            "googlekey": site_key, "pageurl": page_url, "json": 1,
+        }, timeout=15).json()
+        captcha_id = r.get("request")
+        if not captcha_id or r.get("status") != 1:
+            return None
+        time.sleep(15)
+        for _ in range(12):
+            res = _req.get(
+                f"http://2captcha.com/res.php?key={api_key}"
+                f"&action=get&id={captcha_id}&json=1", timeout=10
+            ).json()
+            if res.get("status") == 1:
+                return res["request"]
+            time.sleep(5)
+    except Exception:
+        pass
+    return None
+
+
+def stealth_save(session_name: str = "default") -> str:
+    """Save the stealth session cookies to disk (checkpoint mid-session).
+
+    Cookies are also saved automatically on stealth_close(). Call this
+    during a long session to checkpoint login state in case of a crash.
+
+    Args:
+        session_name: Target session to save.
+
+    Returns:
+        str: Confirmation with cookie count and file path.
+    """
+    try:
+        sess = _stealth_get(session_name)
+        cookies = sess["context"].cookies()
+        session_dir = _STEALTH_SESSIONS_DIR / session_name
+        session_dir.mkdir(parents=True, exist_ok=True)
+        cookie_file = session_dir / "cookies.json"
+        import json as _json
+        cookie_file.write_text(_json.dumps(cookies, indent=2))
+        return f"✅ Saved {len(cookies)} cookies for session '{session_name}' → {cookie_file}"
+    except Exception as e:
+        return f"❌ stealth_save failed: {e}"
+
+
+def stealth_close(session_name: str = "default") -> str:
+    """Save cookies and shut down the stealth browser session.
+
+    Always call this when finished — it persists the login state so the next
+    stealth_start() with the same session_name begins already logged in.
+
+    Args:
+        session_name: Target session to close.
+
+    Returns:
+        str: Confirmation.
+    """
+    if session_name not in _stealth_sessions:
+        return f"No active stealth session '{session_name}' to close."
+    try:
+        sess = _stealth_sessions[session_name]
+        # Save cookies before closing
+        try:
+            cookies = sess["context"].cookies()
+            session_dir = _STEALTH_SESSIONS_DIR / session_name
+            session_dir.mkdir(parents=True, exist_ok=True)
+            import json as _json
+            (session_dir / "cookies.json").write_text(_json.dumps(cookies, indent=2))
+        except Exception:
+            pass
+        try:
+            sess["browser"].close()
+        except Exception:
+            pass
+        try:
+            sess["pw"].stop()
+        except Exception:
+            pass
+        del _stealth_sessions[session_name]
+        _stealth_ref_caches.pop(session_name, None)
+        return f"✅ Stealth session '{session_name}' closed and cookies saved."
+    except Exception as e:
+        return f"❌ stealth_close failed: {e}"
