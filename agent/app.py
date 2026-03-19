@@ -2130,21 +2130,28 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         except Exception:
             pass
 
-    # Load recent lessons from lessons.jsonl to prevent repeating mistakes
+    # Load lessons: deduplicated by skill+error_type (most recent fix wins), sorted newest first
     _lessons_lines = []
     try:
         _lessons_path = "/app/memory/lessons.jsonl"
         with open(_lessons_path, encoding="utf-8") as _f:
             _raw_lessons = [l.strip() for l in _f if l.strip()]
-        for _raw in _raw_lessons[-15:]:  # last 15 lessons only
+        _seen_keys: dict = {}
+        for _raw in reversed(_raw_lessons):  # reverse so first-seen = most recent
             try:
                 _l = json.loads(_raw)
                 if _l.get("fix_applied"):
-                    _lessons_lines.append(
-                        f"- [{_l.get('skill', '?')}] {_l.get('error_type', '?')}: fix → {_l['fix_applied']}"
-                    )
+                    _key = f"{_l.get('skill','?')}:{_l.get('error_type','?')}"
+                    if _key not in _seen_keys:
+                        _seen_keys[_key] = _l
             except Exception:
                 pass
+        # Sort by timestamp descending, cap at 20
+        _deduped = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:20]
+        for _l in _deduped:
+            _lessons_lines.append(
+                f"- [{_l.get('skill', '?')}] {_l.get('error_type', '?')}: fix → {_l['fix_applied']}"
+            )
     except Exception:
         pass
     _lessons_block = "\n".join(_lessons_lines) if _lessons_lines else "None yet."
@@ -2191,6 +2198,37 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
     except Exception:
         _daily_memory_block = "No journal entries yet."
+
+    # On new sessions (first message): run daily_review and auto-apply safe fixes
+    _skill_health_section = ""
+    if len(history) == 0:
+        try:
+            from agent.skills.core import self_improvement as _si
+            _dr_result = _si.daily_review()
+            # Auto-apply safe fixes (bare_except, missing_timeout) for dynamic skills
+            _auto_fixed = []
+            _safe_types = ("bare_except", "missing_timeout")
+            _dyn_dir = Path("/app/skills/dynamic")
+            if _dyn_dir.exists():
+                for _dp in sorted(_dyn_dir.glob("*.py")):
+                    if _dp.name.startswith("_"):
+                        continue
+                    _sn = _dp.stem
+                    try:
+                        _analysis = _si.analyze_skill_code(_sn)
+                        _fixed_types = set()
+                        for _issue in _analysis.get("issues", []):
+                            if _issue["type"] in _safe_types and _issue["type"] not in _fixed_types:
+                                _si.fix(_sn, _issue["type"], "all")
+                                _auto_fixed.append(f"  • {_sn}: {_issue['type']}")
+                                _fixed_types.add(_issue["type"])
+                    except Exception:
+                        pass
+            if _auto_fixed:
+                _dr_result += "\n\n✅ Auto-fixed at session start:\n" + "\n".join(_auto_fixed)
+            _skill_health_section = f"\n## SKILL HEALTH (reviewed this session)\n\n{_dr_result}\n"
+        except Exception as _dr_err:
+            print(f"⚠️  daily_review failed at session start: {_dr_err}")
 
     # IMPROVED SYSTEM PROMPT
     system_prompt = f"""{_identity_content + chr(10) + chr(10) if _identity_content else ""}You are TrinityClaw, an intelligent AI agent with persistent memory and skill execution capabilities.
@@ -2303,7 +2341,7 @@ When the user states or implies a preference (response length, tone, language, f
 </LEARNED_LESSONS>
 
 Before invoking any skill, scan this list. If a past mistake applies, apply the known fix proactively.
-
+{_skill_health_section}
 ## DAILY JOURNAL & USER PROFILE (What I know from recent days)
 
 <DAILY_MEMORY>
