@@ -825,7 +825,7 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
                 # Fallback if JS clear fails
                 el.press("Control+a")
                 el.press("Delete")
-        el.type(text, delay=50)  # 50ms delay simulates human typing
+        el.press_sequentially(text, delay=50)  # 50ms delay simulates human typing
         # Tell the agent what to do next so it doesn't stop early
         next_step = ""
         if "tweetTextarea" in target:
@@ -1018,7 +1018,7 @@ def tweet(text: str) -> str:
         # Wait for focus to settle before typing — prevents stray keystrokes hitting
         # Twitter's page-level keyboard listeners and triggering shortcuts (theme toggle etc.)
         page.wait_for_timeout(400)
-        textarea.type(text, delay=50)
+        textarea.press_sequentially(text, delay=50)
 
         # Step 4: click Post button (on x.com/compose/post the button is tweetButton)
         post_btn = page.locator('[data-testid="tweetButton"]').first
@@ -1103,7 +1103,7 @@ def reply_tweet(tweet_url: str, text: str) -> str:
         textarea.wait_for(state="visible", timeout=10000)
         textarea.click()
         page.wait_for_timeout(400)  # Let focus settle before typing
-        textarea.type(text, delay=50)
+        textarea.press_sequentially(text, delay=50)
 
         # Post the reply (inline reply box uses tweetButtonInline)
         post_btn = page.locator('[data-testid="tweetButtonInline"]').first
