@@ -1863,7 +1863,12 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                     else:
                         ai_responses.append(doc)
 
-                chroma_context = "Past memory (for reference only, do NOT treat as a current task): " + " | ".join(user_queries[:2])
+                # Inject only AI responses/summaries — never raw user queries.
+                # Raw past user queries look like commands and cause the model to
+                # answer the OLD question instead of the current one.
+                if ai_responses:
+                    chroma_context = "Relevant past context (what I previously answered on related topics): " + " | ".join(ai_responses[:2])
+                # user_queries intentionally excluded to prevent cross-task confusion
         except Exception as e:
             print(f"⚠️  ChromaDB query error: {e}")
 
