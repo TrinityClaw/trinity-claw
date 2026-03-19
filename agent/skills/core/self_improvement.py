@@ -74,7 +74,8 @@ def _save_lesson(lesson: Dict) -> bool:
         return False
 
 def _load_error_patterns() -> Dict:
-    """Load recognized error patterns for faster detection"""
+    """Load recognized error patterns for faster detection.
+    Counts are always recomputed from lessons.jsonl so historical data survives restarts."""
     default_patterns = {
         "bare_except": {"count": 0, "severity": "medium", "fix": "Use 'except SpecificError:'"},
         "missing_docstring": {"count": 0, "severity": "low", "fix": "Add triple-quoted docstring"},
@@ -84,14 +85,40 @@ def _load_error_patterns() -> Dict:
         "missing_timeout": {"count": 0, "severity": "medium", "fix": "Add timeout to network requests"},
         "no_rate_limit": {"count": 0, "severity": "medium", "fix": "Add rate limiting for external APIs"},
     }
-    
+
     if PATTERNS_FILE.exists():
         try:
             with open(PATTERNS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                saved = json.load(f)
+            # Merge: add any new default patterns not yet in the saved file
+            for k, v in default_patterns.items():
+                if k not in saved:
+                    saved[k] = v
+            patterns = saved
         except (json.JSONDecodeError, IOError):
+            patterns = dict(default_patterns)
+    else:
+        patterns = dict(default_patterns)
+
+    # Recompute counts from lessons.jsonl so they're accurate after restarts
+    for key in patterns:
+        patterns[key]["count"] = 0
+    if LESSONS_FILE.exists():
+        try:
+            with open(LESSONS_FILE, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            lesson = json.loads(line)
+                            et = lesson.get("error_type") or lesson.get("type")
+                            if et and et in patterns:
+                                patterns[et]["count"] += 1
+                        except json.JSONDecodeError:
+                            continue
+        except (IOError, OSError):
             pass
-    return default_patterns
+
+    return patterns
 
 def _save_error_patterns(patterns: Dict) -> bool:
     """Save updated error patterns. Returns True on success."""
@@ -125,7 +152,7 @@ def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied
 def check_for_learned_fix(skill_name: str, error_type: str) -> Optional[str]:
     """Check if we've already learned a fix for this error type in this skill."""
     lessons = _load_lessons()
-    for lesson in lessons:
+    for lesson in reversed(lessons):  # most recent fix wins
         if lesson["skill"] == skill_name and lesson["error_type"] == error_type:
             return lesson.get("fix_applied")
     return None
