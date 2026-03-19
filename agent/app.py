@@ -2392,7 +2392,8 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
         # Local/Ollama mode falls back to the legacy XML skill-tag system.
         tools = _build_tools_schema() if model_source != "local" else []
 
-        _continuation_pushes = 0  # how many "stop describing, act!" pushes sent so far
+        _continuation_pushes = 0        # cloud: how many "stop describing, act!" pushes sent so far
+        _local_continuation_pushes = 0  # local: same, for Ollama/tag path
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             print(f"🔁 Agent iteration {iteration}/{MAX_ITERATIONS}")
@@ -2469,6 +2470,36 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                         # retry instruction fires instead of injecting a fake brief.
 
                 if not execution_log:
+                    # Mirror of cloud _PLAN_SIGNALS: if the local model wrote
+                    # planning text instead of a skill tag, push it to act.
+                    # Only fires when at least one skill already ran this request
+                    # (i.e. we are mid-task, not a direct-answer turn).
+                    _LOCAL_PLAN_SIGNALS = (
+                        "i will", "i'll", "let me", "i need to", "i'm going to",
+                        "i should", "next i", "will call", "now i'll",
+                        "i'll now", "i'll call", "then i'll", "step 2", "step 3",
+                        "next step", "going to call", "i am going to",
+                    )
+                    _looks_like_local_plan = (
+                        _local_continuation_pushes < 2
+                        and bool(all_execution_logs)
+                        and len(ai_reply.strip()) > 40
+                        and any(sig in ai_reply.lower() for sig in _LOCAL_PLAN_SIGNALS)
+                    )
+                    if _looks_like_local_plan:
+                        _local_continuation_pushes += 1
+                        print(f"⚠️  Iteration {iteration}: local model described plan without tag — push #{_local_continuation_pushes}")
+                        messages.append({"role": "assistant", "content": ai_reply})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Stop describing. Emit the skill tag NOW. "
+                                "Syntax: <skill:NAME.FUNC>args</skill:NAME.FUNC>  "
+                                "No text. Just the tag."
+                            ),
+                        })
+                        continue
+
                     print(f"✅ Agent loop complete after {iteration} iteration(s)")
                     ai_reply = executed_reply
                     # Fallback: Qwen and other local models sometimes produce an empty
@@ -2597,9 +2628,10 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                     else:
                         pending_note = (
                             f"{_done_note}{_fail_note}"
-                            " Look at the original request. What has NOT been done yet?"
-                            " If ALL steps are done → give the user a one-line confirmation. DO NOT emit any more skill tags."
-                            " If NOT done → OUTPUT THE NEXT SKILL TAG IMMEDIATELY. No text. Just the tag."
+                            " Re-read the original user request."
+                            " For EACH required action, check: does a confirmed ✅ result already exist above?"
+                            " If ANY required action has no ✅ yet → OUTPUT ITS SKILL TAG NOW. Zero text before the tag."
+                            " Only write a final text reply when EVERY required action has a confirmed ✅."
                         )
                 # Build brief injection for the continuation message.
                 brief_injection = ""
