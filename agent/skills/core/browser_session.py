@@ -42,6 +42,7 @@ DOC = (
     "press_key(key, tab_index?)→press keyboard key: Enter, Tab, Control+Enter, Escape, etc.; "
     "wait_for(selector, tab_index?, timeout_ms?)→wait for CSS selector to appear; "
     "new_tab(url?)→open a new tab; "
+    "close_tab(tab_index?)→close a tab by index (use list_tabs() to see indexes first); "
     "evaluate(js_code, tab_index?)→run JavaScript; "
 
     "=== SINGLE-CALL HELPERS (use these for specific platforms) === "
@@ -75,26 +76,6 @@ _INTERACTIVE_ROLES = {
     "menuitemcheckbox", "menuitemradio", "treeitem", "switch",
 }
 
-
-def _format_a11y_tree(node: dict, depth: int = 0, lines: list = None, count: list = None) -> list:
-    """Recursively format an accessibility tree node into readable lines.
-    Only includes interactive roles with non-empty names. Max 250 items.
-    """
-    if lines is None:
-        lines = []
-    if count is None:
-        count = [0]
-    if count[0] >= 250:
-        return lines
-    role = (node.get("role") or "").lower()
-    name = (node.get("name") or "").strip()
-    if role in _INTERACTIVE_ROLES and name:
-        indent = "  " * depth
-        lines.append(f"{indent}{role} \"{name}\"")
-        count[0] += 1
-    for child in node.get("children") or []:
-        _format_a11y_tree(child, depth + 1, lines, count)
-    return lines
 
 
 def _collect_a11y_nodes(node: dict, results: list, limit: int = 250) -> None:
@@ -230,7 +211,26 @@ def _snapshot_page(page) -> str:
             sections.append((label, items))
 
     if not sections:
-        return "⚠️ Snapshot empty — page may still be loading."
+        # Fallback: Playwright's accessibility.snapshot() — catches elements that have ARIA
+        # roles but no standard CSS hook (some SPA widgets, shadow DOM fragments, etc.)
+        try:
+            tree = page.accessibility.snapshot()
+            if tree:
+                a11y_items = []
+                _collect_a11y_nodes(tree, a11y_items)
+                if a11y_items:
+                    return (
+                        f"📋 Page Snapshot (a11y fallback) — {page.url}\n"
+                        f"Title: {page.title()}\n"
+                        + "─" * 50 + "\n"
+                        + "\n".join(f"  {role} \"{name}\"" for role, name in a11y_items) + "\n"
+                        + "─" * 50 + "\n"
+                        "⚠️ CSS scan returned empty — no @eN refs available.\n"
+                        "Use click_accessible(role, name) / type_accessible(role, name, text) to interact."
+                    )
+        except Exception:
+            pass
+        return "⚠️ Snapshot empty — page may still be loading. Try scroll() or wait a moment and retry."
 
     output_parts = []
     for label, items in sections:
@@ -418,84 +418,6 @@ def _find_in_frames(page, role: str, name: str, exact: bool = False):
     )
 
 
-def _locate_by_ref(page, ref_data: dict):
-    """Re-locate an element using the exact DOM path stored during get_snapshot().
-
-    Uses frame_idx + css + visible_nth — the identical strategy the snapshot used.
-    This avoids any re-search by name or accessibility tree: it replays the precise
-    CSS selector and nth-visible-element position that produced the @eN ref.
-
-    Falls back to name-based CSS scan if the DOM position has shifted since snapshot.
-    Returns a Playwright Locator or None if the element cannot be found.
-    """
-    _NAME_JS = (
-        "el => {"
-        "  const a = el.getAttribute('aria-label');"
-        "  if (a && a.trim()) return a.trim();"
-        "  const t = el.getAttribute('title');"
-        "  if (t && t.trim()) return t.trim();"
-        "  const p = el.getAttribute('placeholder');"
-        "  if (p && p.trim()) return p.trim();"
-        "  if (el.labels && el.labels[0]) {"
-        "    const l = el.labels[0].innerText.trim();"
-        "    if (l) return l;"
-        "  }"
-        "  const tx = el.innerText ? el.innerText.trim().slice(0,120) : '';"
-        "  if (tx) return tx;"
-        "  const v = el.value ? String(el.value).trim().slice(0,120) : '';"
-        "  return v;"
-        "}"
-    )
-
-    if ref_data.get("frame_is_main", True):
-        frame = page.main_frame
-    else:
-        frame_idx = ref_data.get("frame_idx")
-        if frame_idx is None or frame_idx >= len(page.frames):
-            frame = page.main_frame
-        else:
-            frame = page.frames[frame_idx]
-
-    css = ref_data.get("css", "")
-    target_nth = ref_data.get("visible_nth", 0)
-    target_name = ref_data.get("name", "").lower()
-
-    if not css:
-        return None
-
-    # Primary: exact nth visible position — same as what the snapshot recorded
-    try:
-        locs = frame.locator(css).all()
-        visible_count = 0
-        for loc in locs:
-            try:
-                if not loc.is_visible():
-                    continue
-                if visible_count == target_nth:
-                    return loc
-                visible_count += 1
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    # Fallback: name-based scan with the same CSS (DOM may have shifted slightly)
-    try:
-        locs = frame.locator(css).all()
-        for loc in locs:
-            try:
-                if not loc.is_visible():
-                    continue
-                el_name = (loc.evaluate(_NAME_JS) or "").lower()
-                if target_name and target_name in el_name:
-                    return loc
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    return None
-
 
 def _connect():
     """Start playwright and connect to existing Chrome via CDP.
@@ -569,7 +491,60 @@ def _get_page(browser, tab_index: int = 0):
             f"Tab index {tab_index} is out of range — only {len(pages)} tab(s) open. "
             f"Use list_tabs() to see available tabs."
         )
-    return pages[tab_index]
+    page = pages[tab_index]
+    try:
+        page.bring_to_front()  # ensure this tab is active before any action
+    except Exception:
+        pass
+    return page
+
+
+# ─────────────────────────────────────────────
+# OUTCOME VERIFICATION HELPER
+# ─────────────────────────────────────────────
+
+def _gmail_compose_warning(page) -> str:
+    """Return a redirect string when the agent navigated into a Gmail compose window.
+
+    If the agent manually clicked Compose instead of calling send_gmail(), this warning
+    stops it from continuing to fill fields one by one and redirects to the helper.
+    Returns a non-empty string only when on mail.google.com with compose= in the URL.
+    """
+    url = page.url or ""
+    if "mail.google.com" in url and "compose" in url:
+        return (
+            "\n\n🚨 Gmail compose window is now open."
+            "\nDo NOT fill fields manually — call send_gmail(to, subject, body) instead."
+            "\nsend_gmail() handles To / Subject / Body / Send in one step reliably."
+            "\nExample: send_gmail('user@example.com', 'Subject here', 'Body here')"
+        )
+    return ""
+
+
+def _page_state(page) -> str:
+    """Return current URL, title, and a short text snippet from the page.
+
+    Appended to every action function's return so the agent can verify the
+    outcome on ANY website without trusting a blind ✅. Lets the agent see
+    whether the page is in the expected state after a click, form submit, etc.
+    """
+    try:
+        url = page.url or "(blank)"
+        title = (page.title() or "(no title)")[:80]
+        try:
+            raw = page.locator("body").inner_text(timeout=3000)
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            snippet = "\n".join(lines[:12])  # first ~12 non-empty lines
+        except Exception:
+            snippet = "(could not read page text)"
+        return (
+            f"\n── Page state after action ──\n"
+            f"URL  : {url}\n"
+            f"Title: {title}\n"
+            f"Text : {snippet}"
+        )
+    except Exception:
+        return ""
 
 
 # ─────────────────────────────────────────────
@@ -933,7 +908,8 @@ def press_key(key: str, tab_index: int = 0) -> str:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
         page.keyboard.press(key.strip())
-        return f"✅ Pressed: {key}"
+        page.wait_for_timeout(400)  # let the action settle before reading state
+        return f"✅ Pressed: {key}" + _page_state(page)
     except Exception as e:
         return f"❌ {e}"
     finally:
@@ -973,9 +949,7 @@ def new_tab(url: str = "") -> str:
     """
     pw = None
     try:
-        from playwright.sync_api import sync_playwright
-        pw = sync_playwright().start()
-        browser = pw.chromium.connect_over_cdp(_CDP_URL)
+        pw, browser = _connect()
         if not browser.contexts:
             return "❌ No browser contexts found."
         context = browser.contexts[0]
@@ -984,6 +958,29 @@ def new_tab(url: str = "") -> str:
             page.goto(url.strip(), wait_until="domcontentloaded", timeout=30000)
             return f"✅ New tab opened: {page.url}\nTitle: {page.title()}"
         return "✅ New blank tab opened (tab index will be the last in list_tabs())"
+    except Exception as e:
+        return f"❌ {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def close_tab(tab_index: int = 0) -> str:
+    """Close a browser tab by its index.
+    Use list_tabs() first to confirm which tab you want to close.
+    Warning: closing the wrong tab can lose unsaved work — always check with list_tabs() first.
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, tab_index)
+        title = (page.title() or "(no title)")[:55]
+        url = page.url or "(blank)"
+        page.close()
+        return f"✅ Closed tab [{tab_index}]: {title}\n{url}"
     except Exception as e:
         return f"❌ {e}"
     finally:
@@ -1428,7 +1425,16 @@ def get_snapshot(tab_index: int = 0) -> str:
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
-        return _snapshot_page(page)
+        snapshot = _snapshot_page(page)
+        # Twitter: remind agent to use single-call helpers instead of manual snapshot clicks
+        url = page.url or ""
+        if "x.com" in url or "twitter.com" in url:
+            snapshot = (
+                "⚠️ On Twitter/X — use single-call helpers instead of manual snapshot interactions:\n"
+                "  tweet(text) → post  |  like_tweet(url) → like  |  reply_tweet(url, text) → reply  |  follow_user(username) → follow\n"
+                "Only use snapshot/click_ref for actions NOT covered by those helpers.\n\n"
+            ) + snapshot
+        return snapshot
     except Exception as e:
         return f"❌ {e}"
     finally:
@@ -1487,6 +1493,10 @@ def click_accessible(role: str, name: str = "", tab_index: int = 0, exact: bool 
         header = f"✅ Clicked {role} \"{actual_label}\"\nURL after click: {page.url}"
         if actual_label.lower().strip() != name.lower().strip():
             header += f"\n⚠️  Requested \"{name}\", matched \"{actual_label}\"."
+        # Gmail compose redirect — stop agent from filling fields manually
+        gmail_warn = _gmail_compose_warning(page)
+        if gmail_warn:
+            return header + gmail_warn
         # Auto-snapshot after every click — universal, works on any site
         snapshot = _snapshot_page(page)
         return header + "\n\n" + snapshot
@@ -1555,6 +1565,14 @@ def type_accessible(role: str, name: str = "", text: str = "", tab_index: int = 
         result = f"✅ Typed into {role} \"{actual_label}\": {text[:100]}{'...' if len(text) > 100 else ''}"
         if actual_label.lower().strip() != name.lower().strip():
             result += f"\n⚠️  You requested \"{name}\" but matched \"{actual_label}\" — verify this is the correct field. Call get_snapshot() to check field names."
+        # Gmail: one-time warning to use the dedicated helper instead of manual steps
+        if "mail.google.com" in (page.url or ""):
+            result += (
+                "\n⚠️ On Gmail — if you are composing an email, call send_gmail(to, subject, body) "
+                "instead of filling fields manually. It handles the full flow and sends reliably."
+            )
+        # Universal outcome check: let the agent see actual page state after every type action
+        result += _page_state(page)
         return result
     except Exception as e:
         return (
@@ -1599,15 +1617,33 @@ def click_ref(ref: str, tab_index: int = 0) -> str:
             fidx = ref_data.get("frame_idx")
             frame = page.frames[fidx] if fidx is not None and fidx < len(page.frames) else page.main_frame
         locator = frame.locator(f'[data-tc-ref="{ref}"]')
-        locator.click()
+        try:
+            locator.wait_for(state="visible", timeout=3000)
+            locator.click()
+        except Exception:
+            # data-tc-ref tag expired (DOM re-rendered) — fall back to role+name search.
+            # Use exact=False: cached name may have changed (e.g. Twitter "20 Likes. Like"
+            # → "21 Likes. Like" after DOM refresh). Partial match is more resilient.
+            try:
+                locator = _find_in_frames(page, role, name, exact=False)
+            except Exception:
+                # Last-word fallback: "20 Likes. Like" → "Like", handles Twitter-style labels
+                words = [w.strip(".,!?;:") for w in name.split() if w.strip(".,!?;:")]
+                last_word = words[-1] if words else name
+                locator = _find_in_frames(page, role, last_word, exact=False)
+            locator.click()
         page.wait_for_timeout(700)
         header = f"✅ Clicked {ref} ({role} \"{name}\")\nURL after click: {page.url}"
+        # Gmail compose redirect — stop agent from filling fields manually
+        gmail_warn = _gmail_compose_warning(page)
+        if gmail_warn:
+            return header + gmail_warn
         snapshot = _snapshot_page(page)
         return header + "\n\n" + snapshot
     except Exception as e:
         return (
             f"❌ Could not click ref {ref} ({role} \"{name}\"): {e}\n"
-            f"Tip: call get_snapshot() to refresh refs — the tag may have expired after a page re-render."
+            f"Tip: call get_snapshot() to refresh refs — the DOM may have changed since last snapshot."
         )
     finally:
         if pw:
@@ -1647,6 +1683,16 @@ def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
             fidx = ref_data.get("frame_idx")
             frame = page.frames[fidx] if fidx is not None and fidx < len(page.frames) else page.main_frame
         locator = frame.locator(f'[data-tc-ref="{ref}"]')
+        try:
+            locator.wait_for(state="visible", timeout=3000)
+        except Exception:
+            # data-tc-ref tag expired (DOM re-rendered) — partial match, same as click_ref
+            try:
+                locator = _find_in_frames(page, role, name, exact=False)
+            except Exception:
+                words = [w.strip(".,!?;:") for w in name.split() if w.strip(".,!?;:")]
+                last_word = words[-1] if words else name
+                locator = _find_in_frames(page, role, last_word, exact=False)
         locator.click()
         try:
             locator.fill(text)
@@ -1654,11 +1700,11 @@ def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
             # contenteditable fallback (Gmail body, rich-text editors)
             locator.press("Control+a")
             locator.type(text, delay=40)
-        return f"✅ Filled {ref} ({role} \"{name}\"): {text[:100]}{'...' if len(text) > 100 else ''}"
+        return f"✅ Filled {ref} ({role} \"{name}\"): {text[:100]}{'...' if len(text) > 100 else ''}" + _page_state(page)
     except Exception as e:
         return (
             f"❌ Could not fill ref {ref} ({role} \"{name}\"): {e}\n"
-            f"Tip: call get_snapshot() to refresh refs — the tag may have expired after a page re-render."
+            f"Tip: call get_snapshot() to refresh refs — the DOM may have changed since last snapshot."
         )
     finally:
         if pw:
