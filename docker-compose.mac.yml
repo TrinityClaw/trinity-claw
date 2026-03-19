@@ -6,11 +6,11 @@ version: '3.8'
 # Ollama runs NATIVELY on Mac for full Metal GPU acceleration.
 # Do NOT use --profile local here — Ollama is outside Docker.
 #
-# Setup steps on Mac:
-#   1. brew install ollama
-#   2. ollama pull qwen3.5:9b
-#   3. ollama serve          (keep running in background)
-#   4. docker compose -f docker-compose.mac.yml up -d
+# Setup: run the installer — it handles everything automatically.
+#   bash install-mac.sh && bash install.sh
+#
+# After install, TrinityClaw starts automatically on every Mac login.
+# Ollama is managed by: brew services start ollama (set up by installer)
 # ============================================================
 
 services:
@@ -67,7 +67,6 @@ services:
       - CHROMA_HOST=chroma
       - CHROMA_PORT=8000
       - LITELLM_MASTER_KEY=sk-1234567890
-      - MODEL_SOURCE=local
       - PYTHONUNBUFFERED=1
     volumes:
       - "./memory:/app/memory:rw"
