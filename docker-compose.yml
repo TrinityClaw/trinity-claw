@@ -94,7 +94,6 @@ services:
       - CHROMA_HOST=chroma
       - CHROMA_PORT=8000
       - LITELLM_MASTER_KEY=sk-1234567890
-      - MODEL_SOURCE=cloud
       - PYTHONUNBUFFERED=1
     volumes:
       - "./memory:/app/memory:rw"
