@@ -111,18 +111,29 @@ class UrlMonitor:
         )
         self.logger = logging.getLogger('UrlMonitor')
     
-    def add_url(self, url: str, friendly_name: str = "", frequency_minutes: int = 60, 
-                tags: List[str] = None, alert_on_changes: bool = True) -> Dict:
+    def add_url(self, url: str, friendly_name: str = "", frequency_minutes: int = 60,
+                tags: List[str] = None, alert_on_changes: bool = True, frequency: int = None) -> Dict:
         """Add a new URL to monitor."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
+        # Accept 'frequency' as alias for 'frequency_minutes'
+        if frequency is not None:
+            frequency_minutes = frequency
+
+        # Robustly parse to int — extract first number, default 60 on failure
+        try:
+            frequency_minutes = int(frequency_minutes)
+        except (ValueError, TypeError):
+            m = re.search(r'\d+', str(frequency_minutes))
+            frequency_minutes = int(m.group()) if m else 60
+
         tags_str = ",".join(tags) if tags else ""
-        
+
         try:
             cursor.execute('''
-                INSERT OR REPLACE INTO url_metadata 
-                (url, friendly_name, check_frequency_minutes, alert_on_changes, 
+                INSERT OR REPLACE INTO url_metadata
+                (url, friendly_name, check_frequency_minutes, alert_on_changes,
                  tags, created_at, last_check, next_check, is_active)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (url, friendly_name, frequency_minutes, alert_on_changes,
@@ -263,10 +274,15 @@ class UrlMonitor:
         """Get monitoring history for a specific URL."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 10
+
         cursor.execute('''
-            SELECT * FROM url_checks 
-            WHERE url = ? 
+            SELECT * FROM url_checks
+            WHERE url = ?
             ORDER BY check_time DESC LIMIT ?
         ''', (url, limit))
         
@@ -355,9 +371,14 @@ class UrlMonitor:
         """Get recent URL changes."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 10
+
         cursor.execute('''
-            SELECT * FROM url_changes 
+            SELECT * FROM url_changes
             ORDER BY detected_at DESC LIMIT ?
         ''', (limit,))
         
