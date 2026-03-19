@@ -24,6 +24,7 @@ faster-whisper        # Local Whisper transcription (/transcribe endpoint, no AP
 Pillow                # Image resizing before sending to vision API (avoids size-limit hallucinations)
 pytesseract           # OCR — extract text from images (requires tesseract-ocr system package)
 playwright            # Full browser automation (browser_* functions in web skill)
+playwright-stealth    # Anti-detection patches for Playwright (stealth_* functions in browser_session)
 google-api-python-client  # Google Calendar API
 google-auth-httplib2      # Google auth HTTP transport
 google-auth-oauthlib      # Google OAuth 2.0 flow
