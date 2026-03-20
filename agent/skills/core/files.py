@@ -28,6 +28,8 @@ def _is_sensitive(p: Path) -> bool:
     name = p.name
     if name in _BLOCKED_READ_NAMES:
         return True
+    if name.startswith(".env"):   # covers .env.local, .env.production, etc.
+        return True
     for suffix in _BLOCKED_READ_SUFFIXES:
         if name.endswith(suffix):
             return True
