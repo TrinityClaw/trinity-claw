@@ -18,7 +18,7 @@ DOC = (
     "delete(title)→remove note; "
     "export_all()→JSON dump of all notes; "
     "write_daily_entry(summary, learned, user_insights?, next_steps?)→save today's learning journal; "
-    "get_journal(days?)→retrieve last N days of journal entries (default 7); "
+    "get_journal(days=7)→retrieve last N days of journal entries; pass an integer e.g. get_journal(7); "
     "get_today()→get today's journal entry; "
     "update_user_model(insight)→append a new insight about the user to the persistent profile; "
     "get_user_model()→retrieve all accumulated user insights."
@@ -247,7 +247,10 @@ def write_daily_entry(summary: str, learned: str, user_insights: str = "", next_
 def get_journal(days: int = 7) -> str:
     """Return journal entries for the last N days, newest first."""
     try:
-        days = int(days)
+        try:
+            days = int(str(days).strip())
+        except (ValueError, TypeError):
+            days = 7
         cutoff = (date.today() - timedelta(days=days)).isoformat()
         entries = _load_journal()
         recent = [e for e in entries.values() if e["date"] >= cutoff]
