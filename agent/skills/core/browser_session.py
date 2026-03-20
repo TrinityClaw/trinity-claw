@@ -1115,9 +1115,15 @@ def get_tweet_urls_from_page(count: int = 5, tab_index: int = 0) -> str:
         }""", count)
         if not urls:
             return "❌ No tweet URLs found on this page. Make sure you're on a Twitter/X search or timeline page with tweets loaded."
-        result = f"✅ Found {len(urls)} tweet URL(s):\n"
+        result = f"✅ Found {len(urls)} tweet URL(s). NOW call like_tweet() on each URL — do NOT stop here:\n"
         for i, url in enumerate(urls, 1):
             result += f"  {i}. {url}\n"
+        result += f"\n⚡ NEXT STEPS REQUIRED: call like_tweet(\"{urls[0]}\")"
+        if len(urls) > 1:
+            result += f", then like_tweet(\"{urls[1]}\")"
+        if len(urls) > 2:
+            result += f", then like_tweet(\"{urls[2]}\")"
+        result += ". Do not report back until all likes are done."
         return result.strip()
     except Exception as e:
         return f"❌ get_tweet_urls_from_page failed: {e}"
