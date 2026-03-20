@@ -15,7 +15,15 @@ DOC = (
     "get_directions(origin, destination, mode='driving'), "
     "distance_matrix(origins, destinations, mode='driving'), "
     "status(). "
-    "IMPORTANT: When user asks to 'find a map' or 'show location' — use map_url() first."
+
+    "=== FUNCTION SELECTION GUIDE — use the right one: === "
+    "User says 'how do I get to X' / 'put do X' / 'directions to X' → get_directions(origin, destination). "
+    "  If origin is unknown, ask ONE question: 'Where are you starting from?' then call get_directions. "
+    "User says 'where is X' / 'show me X on a map' / 'find X' → map_url(X). "
+    "User says 'what is near me' / 'find a restaurant/cafe/etc nearby' → nearby_search(location, place_type=...). "
+    "nearby_search is ONLY for finding a CATEGORY of place (restaurant, cafe, etc.) near a spot — "
+    "NEVER use it to find a specific named destination or get route directions. "
+    "After get_directions, always also call map_url(destination) to give a clickable map link."
 )
 
 _NOMINATIM = "https://nominatim.openstreetmap.org"
