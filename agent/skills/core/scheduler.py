@@ -11,10 +11,28 @@ from pathlib import Path
 NAME = 'scheduler'
 DOC = 'Schedule agent prompts to run once or recurring. Natural language: "tomorrow at 3pm", "in 2 hours", "every 1h"'
 
-_TASKS_FILE = Path("/app/memory/scheduled_tasks.json")
+_TASKS_FILE    = Path("/app/memory/scheduled_tasks.json")
+_ACTIVITY_LOG  = Path("/app/memory/activity_log.jsonl")
 _lock = threading.Lock()
 _running = False
 _thread = None
+
+
+def _append_activity(source: str, action: str, result: str):
+    """Append one line to the shared activity log (best-effort, never raises)."""
+    try:
+        _ACTIVITY_LOG.parent.mkdir(parents=True, exist_ok=True)
+        entry = json.dumps({
+            "ts":     datetime.now().isoformat(timespec="seconds"),
+            "source": source,
+            "action": action[:120],
+            "result": result[:200],
+            "ok":     not result.startswith("❌"),
+        })
+        with _ACTIVITY_LOG.open("a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
@@ -208,8 +226,10 @@ def _run():
                         print(f"[scheduler] firing: {name}")
                         result = _dispatch(t['prompt'], name)
                         print(f"[scheduler] {name} → {result[:80]}")
-                        t['last_run']  = now.isoformat()
-                        t['run_count'] = t.get('run_count', 0) + 1
+                        t['last_run']    = now.isoformat()
+                        t['last_result'] = result[:200]
+                        t['run_count']   = t.get('run_count', 0) + 1
+                        _append_activity(f"scheduler:{name}", t['prompt'][:80], result)
                         changed = True
                         if t['type'] == 'once':
                             to_delete.append(name)
@@ -336,10 +356,14 @@ def list_tasks() -> str:
         next_run = datetime.fromisoformat(t['next_run'])
         kind     = "🔁 recurring" if t['type'] == 'recurring' else "1️⃣  once"
         ivl      = f" every {_human_interval(t['interval_seconds'])}" if t['type'] == 'recurring' else ""
+        last_result = t.get('last_result', '')
+        last_ok     = "✅" if last_result and not last_result.startswith("❌") else ("❌" if last_result else "—")
+        last_run_str = f"  last run: {t['last_run']} {last_ok} {last_result[:80]}\n" if last_result else ""
         lines.append(
             f"\n  {kind}{ivl} | {name}\n"
             f"  next: {next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)}) | "
             f"runs so far: {t.get('run_count', 0)}\n"
+            f"{last_run_str}"
             f"  prompt: \"{t['prompt'][:80]}{'...' if len(t['prompt']) > 80 else ''}\""
         )
     return "\n".join(lines)
@@ -364,6 +388,38 @@ def status() -> str:
         f"Check interval: 30s | "
         f"Storage: {_TASKS_FILE}"
     )
+
+
+def get_activity_log(hours: int = 24) -> str:
+    """Show what the agent did in the last N hours (scheduled + manual tasks).
+    Reads from /app/memory/activity_log.jsonl. Default: last 24 hours."""
+    try:
+        if not _ACTIVITY_LOG.exists():
+            return "📭 No activity logged yet."
+        cutoff = datetime.now() - timedelta(hours=hours)
+        entries = []
+        for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                ts = datetime.fromisoformat(e["ts"])
+                if ts >= cutoff:
+                    entries.append(e)
+            except Exception:
+                continue
+        if not entries:
+            return f"📭 No activity in the last {hours}h."
+        lines = [f"📋 Activity log — last {hours}h ({len(entries)} entries):"]
+        for e in entries:
+            icon = "✅" if e.get("ok") else "❌"
+            lines.append(f"  {e['ts']}  {icon}  [{e['source']}]  {e['action'][:60]}")
+            if not e.get("ok"):
+                lines.append(f"       ↳ {e['result'][:100]}")
+        return "\n".join(lines)
+    except Exception as ex:
+        return f"❌ get_activity_log error: {ex}"
 
 
 def parse_preview(when: str) -> str:

@@ -21,10 +21,13 @@ DOC = (
     "get_journal(days=7)→retrieve last N days of journal entries; pass an integer e.g. get_journal(7); "
     "get_today()→get today's journal entry; "
     "update_user_model(insight)→append a new insight about the user to the persistent profile; "
-    "get_user_model()→retrieve all accumulated user insights."
+    "get_user_model()→retrieve all accumulated user insights; "
+    "log_activity(action, result, source?)→log a completed manual task to the activity log (source defaults to 'manual'); "
+    "get_activity_log(hours?)→show what the agent did in the last N hours, both scheduled and manual (default 24h)."
 )
 
-_LOGS_FILE = Path("/app/memory/session_logs.jsonl")
+_LOGS_FILE    = Path("/app/memory/session_logs.jsonl")
+_ACTIVITY_LOG = Path("/app/memory/activity_log.jsonl")
 
 NOTES_FILE = Path("/app/memory/notes.json")
 JOURNAL_FILE = Path("/app/memory/daily_journal.jsonl")
@@ -328,3 +331,63 @@ def get_user_model() -> str:
         return "\n".join(result)
     except Exception as e:
         return f"❌ Error reading user model: {e}"
+
+
+# ── Activity Log ───────────────────────────────────────────────────────────────
+
+def log_activity(action: str, result: str, source: str = "manual") -> str:
+    """Log a completed manual task to the shared activity log.
+    Call this after finishing any significant user-requested task.
+    action: short description of what was done (e.g. 'liked 2 AI tweets')
+    result: outcome summary (e.g. '✅ Done' or '❌ failed: ...')
+    source: who triggered it (default 'manual')"""
+    try:
+        _ACTIVITY_LOG.parent.mkdir(parents=True, exist_ok=True)
+        entry = json.dumps({
+            "ts":     datetime.now().isoformat(timespec="seconds"),
+            "source": source,
+            "action": action[:120],
+            "result": result[:200],
+            "ok":     not result.startswith("❌"),
+        })
+        with _ACTIVITY_LOG.open("a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+        return f"✅ Activity logged: {action[:60]}"
+    except Exception as e:
+        return f"❌ log_activity error: {e}"
+
+
+def get_activity_log(hours: int = 24) -> str:
+    """Show what the agent did in the last N hours (scheduled + manual tasks).
+    Returns a formatted list of all logged actions with ✅/❌ status."""
+    try:
+        try:
+            hours = int(str(hours).strip())
+        except (ValueError, TypeError):
+            hours = 24
+        if not _ACTIVITY_LOG.exists():
+            return "📭 No activity logged yet."
+        cutoff = datetime.now() - timedelta(hours=hours)
+        entries = []
+        for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                ts = datetime.fromisoformat(e["ts"])
+                if ts >= cutoff:
+                    entries.append(e)
+            except Exception:
+                continue
+        if not entries:
+            return f"📭 No activity in the last {hours}h."
+        lines = [f"📋 Activity log — last {hours}h ({len(entries)} entries):"]
+        for e in entries:
+            icon = "✅" if e.get("ok") else "❌"
+            lines.append(f"  {e['ts']}  {icon}  [{e['source']}]  {e['action'][:70]}")
+            if not e.get("ok"):
+                lines.append(f"       ↳ {e['result'][:100]}")
+        return "\n".join(lines)
+    except Exception as ex:
+        return f"❌ get_activity_log error: {ex}"
