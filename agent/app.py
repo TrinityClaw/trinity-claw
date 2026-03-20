@@ -2010,7 +2010,10 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
             "\n## SKILL USAGE REMINDER\n\n"
             "You CANNOT read files, save data, browse the web, or perform any external action without a skill tag.\n"
             "Every action needs a tag. Syntax: <skill:SKILLNAME.FUNCTIONNAME>arg1,arg2</skill:SKILLNAME.FUNCTIONNAME>\n"
-            f"{_skill_index_line}\n"
+            f"{_skill_index_line}\n\n"
+            "CRITICAL RULE: Never say 'I will do X' — just DO it. Output the skill tag immediately.\n"
+            "For multi-step tasks: after each skill result, output the NEXT skill tag without waiting.\n"
+            "Only write a text reply when ALL steps are done and all results are in context.\n"
         )
         # Only inject the website build workflow when it's actually relevant.
         if _is_web_task:
@@ -2477,20 +2480,25 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                         # retry instruction fires instead of injecting a fake brief.
 
                 if not execution_log:
-                    # Mirror of cloud _PLAN_SIGNALS: if the local model wrote
-                    # planning text instead of a skill tag, push it to act.
-                    # Only fires when at least one skill already ran this request
-                    # (i.e. we are mid-task, not a direct-answer turn).
+                    # If the local model wrote a plan instead of a skill tag, push it to act.
+                    # Fires on ANY iteration — including the first — so "I will check X" on
+                    # iteration 1 (all_execution_logs still empty) still gets a push.
                     _LOCAL_PLAN_SIGNALS = (
+                        # English
                         "i will", "i'll", "let me", "i need to", "i'm going to",
                         "i should", "next i", "will call", "now i'll",
                         "i'll now", "i'll call", "then i'll", "step 2", "step 3",
                         "next step", "going to call", "i am going to",
+                        "first i", "first, i", "to do this",
+                        # Serbian (Latin)
+                        "provjerit", "pogledat", "učinit", "hajde da",
+                        "trebam", "moram", "sada ću", "sad ću", "ću da",
+                        "prvo ću", "zatim ću", "korak", "proveri", "pogledam",
+                        "iskoristit", "koristit", "pozovem", "pozvaću",
                     )
                     _looks_like_local_plan = (
-                        _local_continuation_pushes < 2
-                        and bool(all_execution_logs)
-                        and len(ai_reply.strip()) > 40
+                        _local_continuation_pushes < 3
+                        and len(ai_reply.strip()) > 30
                         and any(sig in ai_reply.lower() for sig in _LOCAL_PLAN_SIGNALS)
                     )
                     if _looks_like_local_plan:
@@ -2500,9 +2508,11 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
                         messages.append({
                             "role": "user",
                             "content": (
-                                "Stop describing. Emit the skill tag NOW. "
-                                "Syntax: <skill:NAME.FUNC>args</skill:NAME.FUNC>  "
-                                "No text. Just the tag."
+                                "You described a plan but did not execute it. "
+                                "Output the skill tag NOW — no introduction, no explanation.\n"
+                                "Example: <skill:notes.list_notes></skill:notes.list_notes>\n"
+                                "Example: <skill:web.search>current gold price</skill:web.search>\n"
+                                "Write ONLY the tag. Nothing else."
                             ),
                         })
                         continue
