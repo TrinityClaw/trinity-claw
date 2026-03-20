@@ -1743,12 +1743,11 @@ def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
                 pass
 
 
-def evaluate(js_code: str, tab_index: int = 0) -> str:
+def _evaluate(js_code: str, tab_index: int = 0) -> str:
     """Execute JavaScript in the current page and return the result.
 
-    Useful for reading DOM values, triggering events, or extracting structured data.
-    Example: evaluate('document.title')
-    Example: evaluate('document.querySelectorAll("article").length')
+    NOT exposed to the LLM — internal use only. Arbitrary JS execution
+    from untrusted web content is a prompt-injection vector.
     """
     pw = None
     try:
