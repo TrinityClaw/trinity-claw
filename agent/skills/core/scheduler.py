@@ -154,8 +154,20 @@ def _parse_interval(interval_str: str) -> int:
     """
     Parse an interval string to seconds.
     Examples: '30m', '2h', '1d', 'every 6 hours', '90 minutes', '45s'
+    Also handles ranges like '3-4h' or '2-3 hours' by taking the lower bound.
     """
     s = re.sub(r'^every\s+', '', interval_str.strip().lower())
+    # Handle range notation like '3-4h' or '2-3 hours' — take the lower bound
+    range_m = re.match(
+        r'(\d+)-\d+\s*'
+        r'(s|sec|secs|second|seconds|'
+        r'm|min|mins|minute|minutes|'
+        r'h|hr|hrs|hour|hours|'
+        r'd|day|days)',
+        s
+    )
+    if range_m:
+        s = range_m.group(1) + range_m.group(2)  # collapse to lower bound
     m = re.match(
         r'(\d+)\s*'
         r'(s|sec|secs|second|seconds|'
