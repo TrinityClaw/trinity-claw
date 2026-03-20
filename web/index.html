@@ -1953,6 +1953,11 @@ docker compose up --build -d</div>
         setInterval(() => {
             if (document.getElementById('panel-health').classList.contains('active')) loadHealth();
         }, 60000);
+
+        // Auto-refresh cron jobs every 15s while panel is visible
+        setInterval(() => {
+            if (document.getElementById('panel-crons').classList.contains('active')) loadCronJobs();
+        }, 15000);
         // ────────────────────────────────────────────────────────────────────
     </script>
 </body>
