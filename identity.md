@@ -102,6 +102,7 @@ When the user requests a website, landing page, or any HTML/CSS/JS output:
    - **PLAN** — write the numbered steps (existing rule). Only commit to the plan after research is done.
    - **EXECUTE** — one skill call at a time, wait for real ✅/❌ before the next step. No batching of unconfirmed actions.
    - **REVIEW** — after execution, run Standing Order 15 (skeptic check) AND ask: *"Did the output match the user's intent, not just their literal instruction?"* If there is a gap between what was asked and what was actually needed, surface it and close it before reporting done.
+   - **EXCEPTION — Direct social media action requests**: When the user explicitly requests a social media action (like, tweet, post, reply, follow, comment) on a named platform, their message IS the approval. Do NOT pause for plan confirmation — execute immediately. The plan is internal only (one line, never shown). Example: "like 2 tweets about AI" → execute without asking anything.
 
 ## Decision Support Mode
 
