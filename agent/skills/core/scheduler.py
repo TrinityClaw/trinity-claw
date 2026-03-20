@@ -9,7 +9,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 NAME = 'scheduler'
-DOC = 'Schedule agent prompts to run once or recurring. Natural language: "tomorrow at 3pm", "in 2 hours", "every 1h"'
+DOC = (
+    'Schedule agent prompts to run once or recurring. Natural language: "tomorrow at 3pm", "in 2 hours", "every 1h". '
+    'Functions: schedule(name, when, prompt), schedule_recurring(name, every, prompt), '
+    'list_tasks()→all tasks with truncated prompt preview, '
+    'get_task(name)→FULL task details including complete prompt — use this when user asks to see or edit a task, '
+    'edit_task_prompt(name, new_prompt)→replace a task\'s prompt without changing its schedule, '
+    'remove(name), clear(), status(), parse_preview(when), get_activity_log(hours=24). '
+    'IMPORTANT: list_tasks() truncates prompts. Always use get_task(name) when the user wants to read or edit a specific task.'
+)
 
 _TASKS_FILE    = Path("/app/memory/scheduled_tasks.json")
 _ACTIVITY_LOG  = Path("/app/memory/activity_log.jsonl")
@@ -367,6 +375,49 @@ def list_tasks() -> str:
             f"  prompt: \"{t['prompt'][:80]}{'...' if len(t['prompt']) > 80 else ''}\""
         )
     return "\n".join(lines)
+
+
+def get_task(name: str) -> str:
+    """Get the FULL details of a scheduled task by name, including its complete prompt.
+    Use this when the user wants to see or edit a task's prompt — list_tasks() truncates it."""
+    tasks = _load()
+    if name not in tasks:
+        return f"❌ Task '{name}' not found. Use list_tasks() to see available tasks."
+    t = tasks[name]
+    next_run = datetime.fromisoformat(t['next_run'])
+    kind = "recurring" if t['type'] == 'recurring' else "once"
+    ivl  = f" every {_human_interval(t['interval_seconds'])}" if t['type'] == 'recurring' else ""
+    last_result = t.get('last_result', 'never run yet')
+    lines = [
+        f"📋 Task: {name}",
+        f"  Type:      {kind}{ivl}",
+        f"  Next run:  {next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)})",
+        f"  Run count: {t.get('run_count', 0)}",
+        f"  Last run:  {t.get('last_run', 'never')}",
+        f"  Last result: {last_result}",
+        f"  Created:   {t.get('created', 'unknown')}",
+        f"",
+        f"  Full prompt:",
+        f"  {t['prompt']}",
+    ]
+    return "\n".join(lines)
+
+
+def edit_task_prompt(name: str, new_prompt: str) -> str:
+    """Replace the prompt of an existing scheduled task without changing its schedule.
+    Use this when the user wants to edit what a task does."""
+    with _lock:
+        tasks = _load()
+        if name not in tasks:
+            return f"❌ Task '{name}' not found. Use list_tasks() to see available tasks."
+        old_prompt = tasks[name]['prompt']
+        tasks[name]['prompt'] = new_prompt
+        _save(tasks)
+    return (
+        f"✅ Prompt updated for task '{name}'.\n"
+        f"  Old: {old_prompt[:100]}{'...' if len(old_prompt) > 100 else ''}\n"
+        f"  New: {new_prompt[:100]}{'...' if len(new_prompt) > 100 else ''}"
+    )
 
 
 def clear() -> str:
