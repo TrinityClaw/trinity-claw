@@ -49,7 +49,10 @@ DOC = (
 
     "=== SINGLE-CALL HELPERS (use these for specific platforms) === "
     "tweet(text)→POST A TWEET in one step. USE THIS for Twitter — never chain manually; "
-    "like_tweet(tweet_url)→LIKE a tweet; "
+    "like_tweet(tweet_url)→LIKE a tweet. MUST be a specific tweet URL (https://x.com/user/status/ID) — NOT a search or timeline URL; "
+    "get_tweet_urls_from_page(count?)→GET up to N tweet URLs from the current search/timeline page. "
+    "Call this after goto(search_url) to get specific tweet URLs, THEN call like_tweet(url) on each one. "
+    "Workflow for 'like 2 tweets about AI': goto(search_url) → get_tweet_urls_from_page(2) → like_tweet(url1) → like_tweet(url2); "
     "reply_tweet(tweet_url, text)→REPLY to a tweet; "
     "follow_user(username)→FOLLOW a Twitter user; "
     "tiktok_like(video_url)→LIKE a TikTok video; "
@@ -1079,10 +1082,59 @@ def tweet(text: str) -> str:
                 pass
 
 
+def get_tweet_urls_from_page(count: int = 5, tab_index: int = 0) -> str:
+    """Extract tweet URLs from the current Twitter/X search results or timeline page.
+
+    Use this after goto(search_url) to get specific tweet URLs before calling like_tweet().
+    Returns up to `count` tweet URLs (https://x.com/user/status/ID format).
+
+    Workflow example:
+      goto("https://x.com/search?q=ai&f=live")
+      get_tweet_urls_from_page(2)     → returns list of tweet URLs
+      like_tweet(url1)
+      like_tweet(url2)
+    """
+    pw = None
+    try:
+        pw, browser = _connect()
+        page = _get_page(browser, tab_index)
+        page.wait_for_timeout(2000)  # let Twitter JS render
+        urls = page.evaluate("""(count) => {
+            const anchors = Array.from(document.querySelectorAll('a[href*="/status/"]'));
+            const seen = new Set();
+            const results = [];
+            for (const a of anchors) {
+                const match = a.href.match(/https:\\/\\/(?:x|twitter)\\.com\\/[^/]+\\/status\\/\\d+/);
+                if (match && !seen.has(match[0])) {
+                    seen.add(match[0]);
+                    results.push(match[0]);
+                    if (results.length >= count) break;
+                }
+            }
+            return results;
+        }""", count)
+        if not urls:
+            return "❌ No tweet URLs found on this page. Make sure you're on a Twitter/X search or timeline page with tweets loaded."
+        result = f"✅ Found {len(urls)} tweet URL(s):\n"
+        for i, url in enumerate(urls, 1):
+            result += f"  {i}. {url}\n"
+        return result.strip()
+    except Exception as e:
+        return f"❌ get_tweet_urls_from_page failed: {e}"
+    finally:
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
 def like_tweet(tweet_url: str) -> str:
     """Like a tweet — complete workflow in one call.
 
-    tweet_url: full URL of the tweet (https://x.com/user/status/ID).
+    tweet_url: MUST be a specific tweet URL (https://x.com/user/status/ID).
+    If you are on a search/timeline page, call get_tweet_urls_from_page() first
+    to get specific tweet URLs, then pass each one here.
     Navigates to the tweet and clicks the Like button.
     """
     pw = None
@@ -1092,10 +1144,11 @@ def like_tweet(tweet_url: str) -> str:
         if not tweet_url.startswith(("http://", "https://")):
             tweet_url = "https://" + tweet_url
         page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)  # let Twitter's JS render the tweet
         like_btn = page.locator('[data-testid="like"]').first
-        like_btn.wait_for(state="visible", timeout=10000)
+        like_btn.wait_for(state="visible", timeout=30000)
         like_btn.click()
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
         return f"✅ Liked tweet: {tweet_url}"
     except Exception as e:
         return f"❌ Could not like tweet: {e}"
@@ -1461,6 +1514,9 @@ def get_snapshot(tab_index: int = 0) -> str:
             snapshot = (
                 "⚠️ On Twitter/X — use single-call helpers instead of manual snapshot interactions:\n"
                 "  tweet(text) → post  |  like_tweet(url) → like  |  reply_tweet(url, text) → reply  |  follow_user(username) → follow\n"
+                "  get_tweet_urls_from_page(count) → get specific tweet URLs from this search/timeline page\n"
+                "⚠️ like_tweet() requires a SPECIFIC tweet URL (https://x.com/user/status/ID).\n"
+                "   If you are on a search/timeline page, call get_tweet_urls_from_page(N) first, then like_tweet(url) on each result.\n"
                 "Only use snapshot/click_ref for actions NOT covered by those helpers.\n\n"
             ) + snapshot
         return snapshot
