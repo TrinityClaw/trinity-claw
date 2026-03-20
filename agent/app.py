@@ -2114,14 +2114,20 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
             "Always overwrite the whole note — don't append partial updates."
         )
 
-    # Auto-load user preferences from notes.json
+    # Auto-load user preferences from notes.json and build notes index
     _pref_content = ""
+    _notes_index = ""
     try:
         _notes_path = "/app/memory/notes.json"
         with open(_notes_path) as _f:
             _notes_data = json.load(_f)
         if "user_preferences" in _notes_data:
             _pref_content = _notes_data["user_preferences"].get("content", "")
+        if _notes_data:
+            _note_titles = list(_notes_data.keys())
+            _notes_index = f"Saved notes ({len(_note_titles)} total): " + ", ".join(f'"{t}"' for t in _note_titles[:30])
+            if len(_note_titles) > 30:
+                _notes_index += f" ... and {len(_note_titles) - 30} more"
     except Exception:
         pass
 
@@ -2168,7 +2174,7 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _journal_path = Path("/app/memory/daily_journal.jsonl")
         _user_model_path = Path("/app/memory/user_model.json")
         _today_str = _date.today().isoformat()
-        _cutoff_str = (_date.today() - _timedelta(days=3)).isoformat()
+        _cutoff_str = (_date.today() - _timedelta(days=7)).isoformat()
         _journal_entries = {}
         if _journal_path.exists():
             for _jline in _journal_path.read_text(encoding="utf-8").splitlines():
@@ -2239,14 +2245,15 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
     system_prompt = f"""{_identity_content + chr(10) + chr(10) if _identity_content else ""}You are TrinityClaw, an intelligent AI agent with persistent memory and skill execution capabilities.
 
 ENVIRONMENT:
+- Today's date: {_today_str}
 - Working directory: `/app/`
 - Core skills: `/app/skills/core/` (read-only)
 - Dynamic skills: `/app/skills/dynamic/` (where you create new skills)
 - Memory Architecture:
   1. **Short-Term Context**: This current conversation session.
-  2. **Daily Journal**: Last 3 days of work summaries + user profile — always visible in `<DAILY_MEMORY>` below.
+  2. **Daily Journal**: Last 7 days of work summaries + user profile — always visible in `<DAILY_MEMORY>` below.
   3. **Long-Term Chat History**: Old conversations are semantically indexed. When a user asks about the past, relevant old chats appear in the `<RETRIEVED_MEMORY>` block below automatically.
-  4. **Preferences**: `/app/memory/notes.json` (explicitly saved facts/preferences).
+  4. **Notes**: `/app/memory/notes.json` — {_notes_index if _notes_index else "no notes saved yet"}. Use `notes.list_notes()` to see all, `notes.load(title)` to read one, `notes.search(keyword)` to find by content.
 
 ## YOUR TOOLS
 
