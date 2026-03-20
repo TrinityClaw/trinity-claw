@@ -9,6 +9,7 @@ Per-domain rate limiting avoids triggering anti-scraping blocks.
 
 import json
 import hashlib
+import html
 import time
 import re
 import os
@@ -647,10 +648,10 @@ def run_check() -> str:
             if priority == "high":
                 _send_telegram_alert(
                     f"🔴 <b>Competitive Intel Alert</b>\n\n"
-                    f"<b>{name}</b> has changed\n"
+                    f"<b>{html.escape(name)}</b> has changed\n"
                     f"Priority: HIGH | Similarity: {similarity:.0%}\n"
-                    f"URL: {url}\n\n"
-                    f"Now: {current_excerpt[:300]}"
+                    f"URL: {html.escape(url)}\n\n"
+                    f"Now: {html.escape(current_excerpt[:300])}"
                 )
 
         except Exception as exc:

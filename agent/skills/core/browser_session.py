@@ -1789,6 +1789,50 @@ _stealth_ref_caches: dict = {}     # session_name → ref_cache dict (per-sessio
 _STEALTH_SESSIONS_DIR = Path("/app/memory/stealth_sessions")
 
 
+def _cookie_cipher():
+    """Return a Fernet cipher for cookie encryption, or None if cryptography is unavailable."""
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        return None
+    raw = os.getenv("COOKIE_ENCRYPTION_KEY", "").strip()
+    if raw:
+        key = raw.encode()
+    else:
+        key_file = _STEALTH_SESSIONS_DIR / ".cookie.key"
+        if key_file.exists():
+            key = key_file.read_bytes().strip()
+        else:
+            key = Fernet.generate_key()
+            _STEALTH_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            key_file.write_bytes(key)
+    return Fernet(key)
+
+
+def _cookies_write(cookie_file: Path, cookies: list) -> None:
+    """Write cookies to disk, encrypted if cryptography is available."""
+    import json as _json
+    data = _json.dumps(cookies, indent=2).encode()
+    cipher = _cookie_cipher()
+    if cipher:
+        cookie_file.write_bytes(cipher.encrypt(data))
+    else:
+        cookie_file.write_bytes(data)
+
+
+def _cookies_read(cookie_file: Path) -> list:
+    """Read cookies from disk; decrypts if needed, falls back to plaintext for migration."""
+    import json as _json
+    raw = cookie_file.read_bytes()
+    cipher = _cookie_cipher()
+    if cipher:
+        try:
+            return _json.loads(cipher.decrypt(raw))
+        except Exception:
+            pass  # legacy plaintext file — fall through
+    return _json.loads(raw.decode())
+
+
 def _stealth_human_delay(min_s: float = 0.5, max_s: float = 1.8):
     time.sleep(random.uniform(min_s, max_s))
 
@@ -1855,8 +1899,7 @@ def stealth_start(session_name: str = "default", headless: bool = True) -> str:
         # Load saved cookies if they exist
         cookies_loaded = False
         if cookie_file.exists():
-            import json as _json
-            cookies = _json.loads(cookie_file.read_text())
+            cookies = _cookies_read(cookie_file)
             if cookies:
                 context.add_cookies(cookies)
                 cookies_loaded = True
@@ -2227,8 +2270,7 @@ def stealth_save(session_name: str = "default") -> str:
         session_dir = _STEALTH_SESSIONS_DIR / session_name
         session_dir.mkdir(parents=True, exist_ok=True)
         cookie_file = session_dir / "cookies.json"
-        import json as _json
-        cookie_file.write_text(_json.dumps(cookies, indent=2))
+        _cookies_write(cookie_file, cookies)
         return f"✅ Saved {len(cookies)} cookies for session '{session_name}' → {cookie_file}"
     except Exception as e:
         return f"❌ stealth_save failed: {e}"
@@ -2255,8 +2297,7 @@ def stealth_close(session_name: str = "default") -> str:
             cookies = sess["context"].cookies()
             session_dir = _STEALTH_SESSIONS_DIR / session_name
             session_dir.mkdir(parents=True, exist_ok=True)
-            import json as _json
-            (session_dir / "cookies.json").write_text(_json.dumps(cookies, indent=2))
+            _cookies_write(session_dir / "cookies.json", cookies)
         except Exception:
             pass
         try:
