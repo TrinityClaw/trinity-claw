@@ -8,13 +8,13 @@ load_dotenv()
 AGENT_URL = "http://localhost:8001"
 ASCII_ART = """
 ╔════════════════════════════════════════╗
-║       ✨ TRINITY CLAW v1.0 ✨          ║
+║       ✨ TRINITY CLAW v1.3 ✨          ║
 ║                                        ║
 ║   Advanced AI Agent with Memory        ║
-║   Powered by Kimi K2 + LiteLLM         ║
+║   Powered by Ollama + LiteLLM         ║
 ╚════════════════════════════════════════╝
 
-[TrinityClaw v1.0] :: Connected
+[TrinityClaw v1.3] :: Connected
 """
 
 def main():
