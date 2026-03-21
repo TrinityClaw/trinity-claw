@@ -497,6 +497,15 @@
             border-radius: var(--radius-md);
             width: fit-content;
         }
+        .typing-status {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            padding: 8px 12px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            font-style: italic;
+        }
         .dot {
             width: 5px;
             height: 5px;
@@ -1409,6 +1418,14 @@ docker compose up --build -d</div>
             }
         }
 
+        function _updateTypingStatus(text) {
+            const indicator = document.getElementById('typing-indicator');
+            if (!indicator) return;
+            const content = indicator.querySelector('.content');
+            if (content) content.innerHTML = `<span class="typing-status">${text}</span>`;
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
         function renderExecutionLog(logs) {
             if (!logs || logs.length === 0) return null;
             const wrap = document.createElement('div');
@@ -1558,8 +1575,9 @@ docker compose up --build -d</div>
             toggleTyping(true);
             _abortController = new AbortController();
             _setSendBtnStop();
+            const executionLog = [];
             try {
-                const response = await fetch(`${agentUrl}/chat`, {
+                const response = await fetch(`${agentUrl}/chat/stream`, {
                     method: 'POST',
                     headers: getAuthHeaders(),
                     body: JSON.stringify({
@@ -1572,13 +1590,50 @@ docker compose up --build -d</div>
                     signal: _abortController.signal
                 });
 
-                toggleTyping(false);
-                const data = await response.json();
-
-                if (response.ok) {
-                    addMessage(data.reply || "No response content", 'agent', null, data.execution_log);
-                } else {
+                if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
+                    toggleTyping(false);
                     addMessage(`⚠️ Backend Error: ${data.detail || 'Unknown error'}`, 'agent');
+                    return;
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let finalReply = null;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const raw = line.slice(6).trim();
+                        if (!raw) continue;
+                        try {
+                            const evt = JSON.parse(raw);
+                            if (evt.type === 'iteration') {
+                                _updateTypingStatus(`Thinking… step ${evt.n}/${evt.max}`);
+                            } else if (evt.type === 'skill') {
+                                _updateTypingStatus(`Using ${evt.skill}…`);
+                                executionLog.push({ skill: evt.skill, function: evt.function, status: evt.status });
+                            } else if (evt.type === 'reply') {
+                                finalReply = evt.reply;
+                                toggleTyping(false);
+                                addMessage(finalReply || 'No response content', 'agent', null, executionLog.length ? executionLog : null);
+                            } else if (evt.type === 'error') {
+                                toggleTyping(false);
+                                addMessage(`⚠️ ${evt.message || 'Unknown error'}`, 'agent');
+                            }
+                        } catch {}
+                    }
+                }
+
+                if (finalReply === null) {
+                    toggleTyping(false);
+                    addMessage('⚠️ No response received.', 'agent');
                 }
             } catch (e) {
                 toggleTyping(false);
