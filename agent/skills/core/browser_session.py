@@ -1364,7 +1364,7 @@ def tiktok_follow(username: str) -> str:
                 pass
 
 
-def _find_gmail_compose(page):
+def _find_gmail_compose(page, timeout_ms: int = 2000):
     """Return the frame (or page) that contains the Gmail compose window.
 
     Gmail renders its compose dialog inside an <iframe>. This function checks
@@ -1373,14 +1373,15 @@ def _find_gmail_compose(page):
     """
     # Try main page first (some Gmail versions don't use an iframe)
     try:
-        page.locator('[name="subjectbox"]').first.wait_for(state="visible", timeout=2000)
+        page.locator('[name="subjectbox"]').first.wait_for(state="visible", timeout=timeout_ms)
         return page
     except Exception:
         pass
     # Search all child frames (Gmail compose iframe)
+    per_frame = max(timeout_ms // max(len(page.frames), 1), 500)
     for frame in page.frames:
         try:
-            frame.locator('[name="subjectbox"]').first.wait_for(state="visible", timeout=800)
+            frame.locator('[name="subjectbox"]').first.wait_for(state="visible", timeout=per_frame)
             return frame
         except Exception:
             continue
@@ -1410,17 +1411,23 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
             page.wait_for_timeout(1000)
 
         # Step 2: click Compose only if no compose window is already open.
-        # Avoids opening a second compose window when the agent called goto() first.
-        ctx = _find_gmail_compose(page)
+        # If URL already has "compose" in it (agent used goto(#compose)), wait up to 5s
+        # for the compose iframe to finish loading before deciding to click Compose again.
+        current_url = page.url or ""
+        if "compose" in current_url:
+            ctx = _find_gmail_compose(page, timeout_ms=5000)
+        else:
+            ctx = _find_gmail_compose(page, timeout_ms=1500)
+
         if ctx is None:
             compose_btn = page.locator('[gh="cm"]').first
             compose_btn.wait_for(state="visible", timeout=10000)
             compose_btn.click()
-            page.wait_for_timeout(800)  # let compose dialog open and iframe load
+            page.wait_for_timeout(1200)  # let compose dialog open and iframe load
 
         # Step 3: find the compose context — Gmail renders compose inside an <iframe>.
-        # _find_gmail_compose() searches main page + all child frames for [name="subjectbox"].
-        ctx = _find_gmail_compose(page)
+        # Give it up to 8s total since some machines are slow to load the compose iframe.
+        ctx = _find_gmail_compose(page, timeout_ms=8000)
         if ctx is None:
             return (
                 "❌ Could not find Gmail compose window after clicking Compose.\n"
@@ -1428,29 +1435,26 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
                 "Tip: call browser_session.screenshot() to see the current state."
             )
 
-        # Step 4: fill To field — Gmail's To field is a token/chip input that ignores
-        # programmatic fill(). Must type() character by character so Gmail registers
-        # keystrokes, then confirm with Tab to create the recipient chip.
-        to_typed = False
-        try:
-            to_el = ctx.get_by_role("textbox").first
-            to_el.wait_for(state="visible", timeout=5000)
-            to_el.click()
-            page.wait_for_timeout(100)
-            to_el.type(to, delay=40)   # type slowly so Gmail processes each character
-            page.keyboard.press("Tab") # confirm as recipient chip
-            page.wait_for_timeout(400) # wait for chip to form
-            to_typed = True
-        except Exception:
-            pass
-        if not to_typed:
-            # Last resort: compose opens with focus on To — type via keyboard directly
-            page.keyboard.type(to, delay=40)
-            page.keyboard.press("Tab")
-            page.wait_for_timeout(400)
+        # Step 4: fill To field.
+        # DO NOT use ctx.get_by_role("textbox").first — when ctx is the main page,
+        # that finds the Gmail search bar (first textbox on the page), not the To field.
+        #
+        # Reliable strategy: click [name="subjectbox"] (guaranteed in compose, not search),
+        # Shift+Tab backwards into the To field, then type. All keyboard events stay in
+        # the correct frame because focus was set by clicking inside the compose frame.
+        subject_anchor = ctx.locator('[name="subjectbox"]').first
+        subject_anchor.wait_for(state="visible", timeout=5000)
+        subject_anchor.click()
+        page.wait_for_timeout(150)
+        subject_anchor.press("Shift+Tab")  # move focus up to To field within compose
+        page.wait_for_timeout(200)
+        page.keyboard.type(to, delay=40)   # type email into To field
+        page.wait_for_timeout(200)
+        page.keyboard.press("Tab")         # confirm as recipient chip
+        page.wait_for_timeout(600)         # wait for chip to form
         page.wait_for_timeout(200)
 
-        # Step 5: fill Subject — [name="subjectbox"] is an HTML attribute, language-independent
+        # Step 5: fill Subject — click [name="subjectbox"] directly (language-independent)
         subject_el = ctx.locator('[name="subjectbox"]').first
         subject_el.wait_for(state="visible", timeout=5000)
         subject_el.click()
@@ -1542,9 +1546,25 @@ def get_snapshot(tab_index: int = 0) -> str:
     try:
         pw, browser = _connect()
         page = _get_page(browser, tab_index)
-        snapshot = _snapshot_page(page)
-        # Twitter: remind agent to use single-call helpers instead of manual snapshot clicks
         url = page.url or ""
+
+        # Gmail compose: STOP the agent from filling fields manually.
+        # Return only the send_gmail instruction — never expose @eN refs for compose fields.
+        # The agent seeing refs like '@e57 textbox "To recipients"' will always try to fill
+        # them manually one by one and fail. Intercept here before the snapshot runs.
+        if "mail.google.com" in url and "compose" in url:
+            return (
+                "🚨 Gmail compose window is open.\n"
+                "DO NOT fill fields manually with fill_ref or click_ref.\n"
+                "Call send_gmail(to, subject, body) — it handles everything in one step.\n\n"
+                "Example:\n"
+                "  send_gmail('recipient@example.com', 'Subject here', 'Body text here')\n\n"
+                "send_gmail() opens compose (if needed), fills To/Subject/Body correctly, and sends."
+            )
+
+        snapshot = _snapshot_page(page)
+
+        # Twitter: remind agent to use single-call helpers instead of manual snapshot clicks
         if "x.com" in url or "twitter.com" in url:
             snapshot = (
                 "⚠️ On Twitter/X — use single-call helpers instead of manual snapshot interactions:\n"
@@ -1792,6 +1812,30 @@ def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
     ref_data = _ref_cache[ref]
     role = ref_data["role"]
     name = ref_data["name"]
+
+    # Hard stop: redirect to send_gmail if the agent tries to manually fill compose fields.
+    # Filling via refs fails on Gmail's token inputs — send_gmail is the only reliable path.
+    _name_lower = name.lower()
+    if any(k in _name_lower for k in ("to", "subject", "body", "recipients", "bcc", "cc")):
+        pw_check = None
+        try:
+            pw_check, _br = _connect()
+            _pg = _get_page(_br, tab_index)
+            if "mail.google.com" in (_pg.url or "") and "compose" in (_pg.url or ""):
+                return (
+                    "🚨 STOP — do not fill Gmail compose fields manually via fill_ref.\n"
+                    "Call send_gmail(to, subject, body) — it handles all fields and sends reliably.\n"
+                    "Example: send_gmail('recipient@example.com', 'Subject here', 'Body text')"
+                )
+        except Exception:
+            pass
+        finally:
+            if pw_check:
+                try:
+                    pw_check.stop()
+                except Exception:
+                    pass
+
     pw = None
     try:
         pw, browser = _connect()
