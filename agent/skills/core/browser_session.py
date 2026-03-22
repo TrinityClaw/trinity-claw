@@ -528,6 +528,13 @@ def _get_page(browser, tab_index: int = 0):
         page.bring_to_front()  # ensure this tab is active before any action
     except Exception:
         pass
+    try:
+        # Playwright's CDP connect resets prefers-color-scheme emulation, causing
+        # sites like Twitter to flash light/dark repeatedly on every agent call.
+        # Restore dark mode to match the user's real Chrome setting.
+        page.emulate_media(color_scheme="dark")
+    except Exception:
+        pass
     return page
 
 
