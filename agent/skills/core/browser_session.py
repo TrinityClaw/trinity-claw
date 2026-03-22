@@ -1409,12 +1409,14 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
             page.goto("https://mail.google.com/mail/u/0/#inbox", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(1000)
 
-        # Step 2: click Compose to open a new compose window.
-        # [gh="cm"] is language-independent and always present in Gmail.
-        compose_btn = page.locator('[gh="cm"]').first
-        compose_btn.wait_for(state="visible", timeout=10000)
-        compose_btn.click()
-        page.wait_for_timeout(800)  # let compose dialog open and iframe load
+        # Step 2: click Compose only if no compose window is already open.
+        # Avoids opening a second compose window when the agent called goto() first.
+        ctx = _find_gmail_compose(page)
+        if ctx is None:
+            compose_btn = page.locator('[gh="cm"]').first
+            compose_btn.wait_for(state="visible", timeout=10000)
+            compose_btn.click()
+            page.wait_for_timeout(800)  # let compose dialog open and iframe load
 
         # Step 3: find the compose context — Gmail renders compose inside an <iframe>.
         # _find_gmail_compose() searches main page + all child frames for [name="subjectbox"].
@@ -1426,23 +1428,26 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
                 "Tip: call browser_session.screenshot() to see the current state."
             )
 
-        # Step 4: fill To field via get_by_role — works across iframes, language-independent.
-        # The To field is always the first textbox in the compose dialog.
-        # get_by_role() on the detected frame (ctx) handles iframe scope automatically.
+        # Step 4: fill To field — Gmail's To field is a token/chip input that ignores
+        # programmatic fill(). Must type() character by character so Gmail registers
+        # keystrokes, then confirm with Tab to create the recipient chip.
         to_typed = False
         try:
             to_el = ctx.get_by_role("textbox").first
             to_el.wait_for(state="visible", timeout=5000)
             to_el.click()
-            to_el.fill(to)
-            page.keyboard.press("Tab")
+            page.wait_for_timeout(100)
+            to_el.type(to, delay=40)   # type slowly so Gmail processes each character
+            page.keyboard.press("Tab") # confirm as recipient chip
+            page.wait_for_timeout(400) # wait for chip to form
             to_typed = True
         except Exception:
             pass
         if not to_typed:
             # Last resort: compose opens with focus on To — type via keyboard directly
-            page.keyboard.type(to, delay=30)
+            page.keyboard.type(to, delay=40)
             page.keyboard.press("Tab")
+            page.wait_for_timeout(400)
         page.wait_for_timeout(200)
 
         # Step 5: fill Subject — [name="subjectbox"] is an HTML attribute, language-independent
@@ -1471,15 +1476,32 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
 
         # Step 7: send via Ctrl+Enter
         page.keyboard.press("Control+Enter")
+        page.wait_for_timeout(1500)  # let Gmail process and show any error dialog
 
-        # Wait for compose window to close (URL leaves compose=new when sent)
+        # Check for Gmail error dialogs before declaring success
         try:
-            page.wait_for_url(
-                lambda url: "compose" not in url,
-                timeout=8000,
-            )
+            error_el = page.locator('[data-view-id], [role="alertdialog"], .aC7')
+            for err in error_el.all():
+                txt = (err.inner_text() or "").strip()
+                if txt and err.is_visible():
+                    return (
+                        f"❌ Gmail error after sending: \"{txt}\"\n"
+                        f"The email was NOT sent. Screenshot the page to investigate."
+                    )
         except Exception:
-            page.wait_for_timeout(2000)
+            pass
+
+        # Also check if compose window is still open with a [Send] button visible — means it failed
+        try:
+            still_open = page.locator('[gh="cm"], [data-tooltip="Send"], button[aria-label*="Send"]').first
+            if still_open.is_visible(timeout=1000):
+                return (
+                    "❌ Compose window is still open after sending — email was NOT sent.\n"
+                    "Possible cause: recipient chip not confirmed, or a dialog blocked the send.\n"
+                    "Call browser_session.screenshot() to see the current state."
+                )
+        except Exception:
+            pass
 
         return (
             f"✅ Email sent!\n"
