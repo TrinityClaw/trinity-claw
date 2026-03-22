@@ -320,16 +320,16 @@ def schedule(name: str, when: str, prompt: str) -> str:
     )
 
 
-def schedule_recurring(name: str, interval: str, prompt: str) -> str:
+def schedule_recurring(name: str, every: str, prompt: str) -> str:
     """
     Schedule a prompt to run REPEATEDLY on an interval.
 
-    name     — unique identifier for this task
-    interval — how often: '30m', '2h', '1d', 'every 6 hours'
-    prompt   — what the agent should do each time
+    name   — unique identifier for this task
+    every  — how often: '30m', '2h', '1d', 'every 6 hours'
+    prompt — what the agent should do each time
     """
     try:
-        secs = _parse_interval(interval)
+        secs = _parse_interval(every)
     except ValueError as e:
         return f"❌ {e}"
 
