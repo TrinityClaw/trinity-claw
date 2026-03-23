@@ -86,6 +86,8 @@ SESSION_MAX_MESSAGES = 40        # 20 turns (user + assistant pairs)
 SESSION_TIMEOUT_MINUTES = 120    # auto-expire after 2h inactivity
 SESSION_SUMMARY_KEEP = 10        # recent messages to keep verbatim after rolling summary
 JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds this
+TOOL_RESULT_PRUNE_CHARS = 300    # prune tool results longer than this in older turns
+TOOL_RESULT_PROTECT_RECENT = 4   # always keep the last N tool results verbatim
 session_store: Dict[str, Dict] = {}
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
@@ -893,8 +895,62 @@ def load_past_context(n_messages: int = 5) -> str:
         print(f"⚠️  Error loading JSONL: {e}")
         return "No prior conversations yet."
 
-def summarize_messages(messages: List[Dict]) -> str:
-    """Call the LLM to produce a concise bullet-point summary of a message list."""
+def _prune_tool_results(messages: List[Dict]) -> List[Dict]:
+    """Replace content of old, large tool results with a short placeholder.
+
+    Always preserves the last TOOL_RESULT_PROTECT_RECENT tool results verbatim so
+    the model retains full context for the most recent actions. Older results that
+    exceed TOOL_RESULT_PRUNE_CHARS are replaced to save tokens without losing
+    the fact that the tool was called.
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    protect_set = set(tool_indices[-TOOL_RESULT_PROTECT_RECENT:])
+    pruned = []
+    for i, msg in enumerate(messages):
+        if (
+            msg.get("role") == "tool"
+            and i not in protect_set
+            and isinstance(msg.get("content"), str)
+            and len(msg["content"]) > TOOL_RESULT_PRUNE_CHARS
+        ):
+            msg = {**msg, "content": f"[tool result pruned — {len(msg['content'])} chars]"}
+        pruned.append(msg)
+    return pruned
+
+
+def _sanitize_orphaned_tool_pairs(messages: List[Dict]) -> List[Dict]:
+    """Remove tool-result messages that have no matching assistant tool_call.
+
+    When the rolling buffer trims old messages, assistant messages that carried
+    tool_calls can end up in the summarized head while the corresponding tool-result
+    messages land in the kept tail. Sending an orphaned tool-result to the API
+    causes an error. This pass removes them.
+    """
+    # Collect all tool_call_ids that are referenced by assistant messages in the list.
+    valid_call_ids: set = set()
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in (msg.get("tool_calls") or []):
+                tc_id = tc.get("id") if isinstance(tc, dict) else None
+                if tc_id:
+                    valid_call_ids.add(tc_id)
+
+    cleaned = []
+    for msg in messages:
+        if msg.get("role") == "tool":
+            call_id = msg.get("tool_call_id")
+            if call_id and call_id not in valid_call_ids:
+                continue  # drop orphan
+        cleaned.append(msg)
+    return cleaned
+
+
+def summarize_messages(messages: List[Dict], existing_summary: str = "") -> str:
+    """Call the LLM to produce a structured summary of a message list.
+
+    If *existing_summary* is provided the model updates it incrementally rather
+    than regenerating from scratch, preserving information from earlier compressions.
+    """
     if not messages:
         return ""
 
@@ -911,16 +967,36 @@ def summarize_messages(messages: List[Dict]) -> str:
     if not transcript_parts:
         return ""
 
+    transcript_text = "\n\n".join(transcript_parts)
+
+    if existing_summary:
+        # Iterative update: give the model the previous summary + new turns so it
+        # can extend/correct rather than regenerate from scratch.
+        system_instruction = (
+            "You are updating an existing conversation summary with new turns.\n"
+            "Rewrite the summary under these five headings — keep it concise:\n"
+            "**Goal** | **Progress** | **Decisions** | **Files/Resources** | **Next Steps**\n\n"
+            "Preserve everything from the previous summary that is still relevant, "
+            "and incorporate the new information. Do not lose earlier decisions or context."
+        )
+        user_content = (
+            f"PREVIOUS SUMMARY:\n{existing_summary}\n\n"
+            f"NEW TURNS TO INCORPORATE:\n{transcript_text}"
+        )
+    else:
+        # First compression: generate a structured summary from scratch.
+        system_instruction = (
+            "Summarize the following conversation under these five headings — keep it concise:\n"
+            "**Goal** | **Progress** | **Decisions** | **Files/Resources** | **Next Steps**\n\n"
+            "Preserve key facts, user preferences, decisions made, files touched, "
+            "and any unresolved questions. This summary will be injected as context "
+            "for a future AI agent turn."
+        )
+        user_content = transcript_text
+
     prompt = [
-        {
-            "role": "system",
-            "content": (
-                "Summarize the following conversation in 3-5 bullet points. "
-                "Preserve key facts, user preferences, decisions made, and unresolved questions. "
-                "Be concise — this summary will be injected as context for a future message."
-            )
-        },
-        {"role": "user", "content": "\n\n".join(transcript_parts)}
+        {"role": "system", "content": system_instruction},
+        {"role": "user",   "content": user_content},
     ]
 
     try:
@@ -1072,15 +1148,44 @@ def get_session_history(session_id: str) -> List[Dict]:
     return entry["messages"]
 
 def save_session_history(session_id: str, messages: List[Dict]):
-    """Persist updated history for a session, summarizing oldest turns if over the cap."""
+    """Persist updated history for a session, compressing oldest turns if over the cap.
+
+    Compression pipeline:
+      1. Prune large tool results in older turns to placeholders.
+      2. Split into head (to summarise) + tail (to keep verbatim).
+      3. Summarise the head — iteratively updating any existing summary so
+         information is never lost across multiple compression cycles.
+      4. Sanitise orphaned tool-call/result pairs so the API never sees a
+         tool-result message whose matching assistant tool_call was trimmed away.
+    """
     if not session_id:
         return
+
+    # Phase 1 — prune large tool results in old turns before anything else.
+    messages = _prune_tool_results(messages)
+
     if len(messages) > SESSION_MAX_MESSAGES:
         tail = messages[-SESSION_SUMMARY_KEEP:]
-        head = [m for m in messages[:-SESSION_SUMMARY_KEEP] if m.get("role") != "system"]
-        if head:
-            print(f"📝 Summarizing {len(head)} messages for session {session_id[:12]}...")
-            summary_text = summarize_messages(head)
+        head = messages[:-SESSION_SUMMARY_KEEP]
+
+        # Phase 3 — check whether the head already starts with a prior summary so
+        # we can do an iterative update instead of a full regeneration.
+        existing_summary = ""
+        head_conv = []
+        for m in head:
+            if (
+                m.get("role") == "system"
+                and isinstance(m.get("content"), str)
+                and m["content"].startswith("[EARLIER CONVERSATION SUMMARY]")
+            ):
+                existing_summary = m["content"].replace("[EARLIER CONVERSATION SUMMARY]\n", "", 1)
+            else:
+                head_conv.append(m)
+
+        if head_conv:
+            print(f"📝 Compressing {len(head_conv)} messages for session {session_id[:12]}..."
+                  + (" (iterative update)" if existing_summary else ""))
+            summary_text = summarize_messages(head_conv, existing_summary=existing_summary)
             summary_msg = {
                 "role": "system",
                 "content": f"[EARLIER CONVERSATION SUMMARY]\n{summary_text}"
@@ -1088,6 +1193,10 @@ def save_session_history(session_id: str, messages: List[Dict]):
             messages = [summary_msg] + tail
         else:
             messages = tail
+
+        # Phase 4 — drop tool-result messages orphaned by the trim.
+        messages = _sanitize_orphaned_tool_pairs(messages)
+
     session_store[session_id] = {
         "messages": messages,
         "last_active": datetime.now()
