@@ -895,6 +895,62 @@ def load_past_context(n_messages: int = 5) -> str:
         print(f"⚠️  Error loading JSONL: {e}")
         return "No prior conversations yet."
 
+def _sanitize_external_content(text: str, source: str = "unknown") -> str:
+    """Scan externally-sourced text for prompt injection patterns before injecting
+    it into the system prompt.
+
+    Only applied to content that originates outside the agent's own logic:
+    - ChromaDB results (may contain scraped web / document content)
+    - lessons.jsonl fix_applied field (auto-written from skill error messages)
+
+    Does NOT touch user messages, identity.md, notes, journal, or skill results —
+    those are either trusted sources or user-controlled by design.
+
+    Returns the original text unchanged if clean, or a safe placeholder if a
+    pattern is detected, and prints a warning so the issue is visible in logs.
+    """
+    import unicodedata
+
+    if not text or not isinstance(text, str):
+        return text
+
+    # Strip invisible / directional Unicode characters that can hide injections.
+    _INVISIBLE = {
+        "\u200b", "\u200c", "\u200d", "\u200e", "\u200f",  # zero-width / LTR / RTL marks
+        "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",  # directional overrides
+        "\u2060", "\u2061", "\u2062", "\u2063", "\u2064",  # word joiner & invisible ops
+        "\ufeff",                                           # BOM / zero-width no-break
+    }
+    cleaned = "".join(ch for ch in text if ch not in _INVISIBLE)
+
+    # Classic prompt injection trigger phrases (case-insensitive).
+    _INJECTION_PATTERNS = [
+        r"ignore\s+(all\s+)?previous\s+instructions",
+        r"disregard\s+(all\s+)?previous",
+        r"new\s+instructions\s*:",
+        r"system\s+prompt\s+override",
+        r"you\s+are\s+now\s+(?!trinityclaw)",   # allow "you are now TrinityClaw"
+        r"forget\s+(everything|all)\s+(you|above)",
+        r"act\s+as\s+(?!an?\s+assistant)",       # allow "act as an assistant"
+        r"jailbreak",
+        r"dan\s+mode",
+        r"prompt\s+injection",
+        r"override\s+your\s+(instructions|programming|rules)",
+        r"reveal\s+(your\s+)?(system\s+prompt|instructions|api\s+key)",
+        r"print\s+(your\s+)?(system\s+prompt|instructions)",
+        r"exfiltrate",
+    ]
+
+    import re
+    for pattern in _INJECTION_PATTERNS:
+        if re.search(pattern, cleaned, re.IGNORECASE):
+            print(f"🛡️  Injection pattern blocked in [{source}]: matched /{pattern}/")
+            return f"[content blocked: injection pattern detected in {source}]"
+
+    # Return the invisible-char-stripped version (harmless cleanup even if no pattern matched).
+    return cleaned
+
+
 def _prune_tool_results(messages: List[Dict]) -> List[Dict]:
     """Replace content of old, large tool results with a short placeholder.
 
@@ -1976,7 +2032,8 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                 # Raw past user queries look like commands and cause the model to
                 # answer the OLD question instead of the current one.
                 if ai_responses:
-                    chroma_context = "Relevant past context (what I previously answered on related topics): " + " | ".join(ai_responses[:2])
+                    _safe_responses = [_sanitize_external_content(r, source="chromadb") for r in ai_responses[:2]]
+                    chroma_context = "Relevant past context (what I previously answered on related topics): " + " | ".join(_safe_responses)
                 # user_queries intentionally excluded to prevent cross-task confusion
         except Exception as e:
             print(f"⚠️  ChromaDB query error: {e}")
@@ -2303,8 +2360,9 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         # Sort by timestamp descending, cap at 20
         _deduped = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:20]
         for _l in _deduped:
+            _safe_fix = _sanitize_external_content(_l["fix_applied"], source="lessons.jsonl")
             _lessons_lines.append(
-                f"- [{_l.get('skill', '?')}] {_l.get('error_type', '?')}: fix → {_l['fix_applied']}"
+                f"- [{_l.get('skill', '?')}] {_l.get('error_type', '?')}: fix → {_safe_fix}"
             )
     except Exception:
         pass
