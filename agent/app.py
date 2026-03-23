@@ -1621,6 +1621,30 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
         except json.JSONDecodeError:
             arguments = {}
 
+        # Coerce string "true"/"false" → bool, "1"/"2" → int, etc., based on
+        # the actual function signature. Some LLMs send "true" instead of true
+        # even when the schema says boolean (e.g. Playwright headless param).
+        _coerce_func = getattr(skills.get(skill_name), func_name, None) if func_name else None
+        if callable(_coerce_func):
+            try:
+                import inspect as _ci
+                _csig = _ci.signature(_coerce_func)
+                _CMAP = {
+                    bool:  lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("true", "1", "yes"),
+                    int:   lambda v: v if isinstance(v, int) else int(v),
+                    float: lambda v: v if isinstance(v, float) else float(v),
+                }
+                for _cpname, _cparam in _csig.parameters.items():
+                    if _cpname in arguments and _cparam.annotation is not _ci.Parameter.empty:
+                        _cfn = _CMAP.get(_cparam.annotation)
+                        if _cfn:
+                            try:
+                                arguments[_cpname] = _cfn(arguments[_cpname])
+                            except (ValueError, TypeError):
+                                pass
+            except (ValueError, TypeError):
+                pass
+
         result = call_skill_improved(skill_name, func_name, **arguments)
 
         # Treat skill-level ok:False as an error even if no exception was raised
