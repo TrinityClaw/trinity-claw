@@ -1992,13 +1992,14 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
         funcs_meta = meta.get("functions", [])
         funcs = ", ".join([f["name"] for f in funcs_meta])
         skill_names_list.append(name)
+        # For heavy skills, check if the message is relevant before going verbose.
+        # Applied to both local and cloud models.
+        _is_heavy = name in _HEAVY_SKILL_KEYWORDS
+        _is_relevant = (
+            not _is_heavy
+            or bool(_msg_words & _HEAVY_SKILL_KEYWORDS[name])
+        )
         if _local_model:
-            # For heavy skills, check if the message is relevant before going verbose.
-            _is_heavy = name in _HEAVY_SKILL_KEYWORDS
-            _is_relevant = (
-                not _is_heavy
-                or bool(_msg_words & _HEAVY_SKILL_KEYWORDS[name])
-            )
             if _is_relevant:
                 # Verbose format: show the exact XML call for each function so local models
                 # don't have to guess the syntax from the examples block alone.
@@ -2019,7 +2020,11 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                     f"[SKILL: {name}] {meta.get('doc', 'No doc')} (functions: {funcs})"
                 )
         else:
-            available_skills.append(f"- {name}: {meta.get('doc', 'No doc')} (functions: {funcs})")
+            if _is_relevant:
+                available_skills.append(f"- {name}: {meta.get('doc', 'No doc')} (functions: {funcs})")
+            else:
+                # Compact for cloud too: just name + doc, no function listing.
+                available_skills.append(f"- {name}: {meta.get('doc', 'No doc')}")
 
     skills_doc = "\n".join(available_skills)
     _skill_index_line = "Skills you have: " + ", ".join(skill_names_list)
