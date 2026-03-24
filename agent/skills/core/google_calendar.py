@@ -161,8 +161,7 @@ def authorize(code: str = "") -> str:
         auth_url = auth_uri + "?" + _urlencode(params)
         return (
             "🔐 Google Calendar — Authorization Step 1 of 2\n\n"
-            "Open this URL in your browser (copy the FULL URL — do not truncate it):\n\n"
-            f"```\n{auth_url}\n```\n\n"
+            f"[Click here to authorize Google Calendar]({auth_url})\n\n"
             "Then:\n"
             "  1. Sign in with your Google account\n"
             "  2. Click Allow\n"
