@@ -122,6 +122,162 @@ def _collect_a11y_nodes(node: dict, results: list, limit: int = 250) -> None:
         _collect_a11y_nodes(child, results, limit)
 
 
+# ─── Cookie / GDPR consent auto-dismisser ─────────────────────────────────────
+# Called before every get_snapshot() and after every goto() so the agent never
+# sees consent modal elements mixed in with the actual page elements.
+# Works for all websites without any per-site configuration.
+#
+# Safety guarantee: the function ONLY acts when it first identifies a consent
+# banner CONTAINER element (by known framework IDs or generic cookie/gdpr
+# class patterns). Accept buttons are only searched INSIDE that container.
+# If no container is found the function exits immediately — zero side effects,
+# zero delay on normal pages.
+
+_CONSENT_CONTAINER_JS = """
+() => {
+    // Known consent management framework container selectors
+    const knownContainers = [
+        '#onetrust-banner-sdk',
+        '#onetrust-consent-sdk',
+        '#CybotCookiebotDialog',
+        '#CybotCookiebotDialogBody',
+        '#cookie-notice',
+        '#cookie-law-info-bar',
+        '#cookiebanner',
+        '#cookie-banner',
+        '#consent-banner',
+        '#gdpr-banner',
+        '#gdpr-cookie-notice',
+        '#qc-cmp2-container',
+        '.cc-window',
+        '.cc-banner',
+        '[id="didomi-popup"]',
+        '[id="didomi-notice"]',
+        '[data-nosnippet="cookiebanner"]',
+        '[id*="usercentrics"]',
+        '.CookieConsent',
+        '#cookie-consent-banner',
+        '[class*="cookie-banner"]',
+        '[class*="consent-banner"]',
+        '[id*="cookie-overlay"]',
+        '[class*="cookie-overlay"]',
+        '[id*="cookie-modal"]',
+        '[class*="cookie-modal"]',
+        '[id*="gdpr-modal"]',
+        '[class*="gdpr-modal"]',
+    ];
+
+    // Accept button text patterns (multilingual, lowercased)
+    const acceptTexts = [
+        'accept all', 'accept all cookies', 'allow all', 'allow all cookies',
+        'agree to all', 'i accept', 'i agree', 'got it', 'ok, i agree',
+        'prihvati sve', 'prihvati',
+        'alle akzeptieren', 'alle cookies akzeptieren', 'zustimmen',
+        'tout accepter', 'accepter tout',
+        'aceptar todo', 'aceptar todas',
+        'alles accepteren', 'akkoord',
+        'accetta tutto', 'accetta',
+        'zaakceptuj wszystkie',
+        'přijmout vše',
+        'prijať všetky',
+        'accepta tot',
+        'összes elfogadása',
+        'aceitar tudo',
+        'acceptera alla',
+        'godta alle',
+        'hyväksy kaikki',
+        'tümünü kabul et',
+        'принять все',
+    ];
+
+    const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+
+    // Step 1: find a visible consent container
+    let container = null;
+    for (const sel of knownContainers) {
+        try {
+            const el = document.querySelector(sel);
+            if (el) {
+                const r = el.getBoundingClientRect();
+                if (r.width > 0 || r.height > 0) { container = el; break; }
+            }
+        } catch(e) {}
+    }
+
+    // Step 2 (fallback): if no known container, look for a fixed/sticky
+    // overlay whose id or class contains cookie/consent/gdpr
+    if (!container) {
+        const pattern = /cookie|consent|gdpr|privacy-notice/i;
+        const candidates = document.querySelectorAll(
+            '[id*="cookie"],[id*="consent"],[id*="gdpr"],' +
+            '[class*="cookie"],[class*="consent"],[class*="gdpr"]'
+        );
+        for (const el of candidates) {
+            const style = window.getComputedStyle(el);
+            const pos = style.position;
+            if ((pos === 'fixed' || pos === 'sticky') && style.display !== 'none' && style.visibility !== 'hidden') {
+                const r = el.getBoundingClientRect();
+                if (r.width > 50 && r.height > 30) { container = el; break; }
+            }
+        }
+    }
+
+    if (!container) return null;
+
+    // Step 3: find and click the best accept button inside the container
+    const btns = container.querySelectorAll(
+        'button:not([disabled]), [role="button"]:not([disabled]), a[href="#"], a[href="javascript:void(0)"]'
+    );
+    for (const btn of btns) {
+        const txt = norm(btn.getAttribute('aria-label') || btn.innerText || btn.textContent);
+        for (const t of acceptTexts) {
+            if (txt === t || txt.startsWith(t)) {
+                btn.click();
+                return txt;
+            }
+        }
+    }
+
+    // Step 4: if no accept-text match, try the primary/first-visible button in the container
+    // (covers sites where button text is just "OK" or an icon)
+    const primarySels = [
+        'button[class*="primary"]', 'button[class*="accept"]', 'button[class*="agree"]',
+        'button[class*="allow"]', '[role="button"][class*="primary"]',
+        'button[data-action*="accept"]', 'a[class*="accept"]',
+    ];
+    for (const sel of primarySels) {
+        const el = container.querySelector(sel);
+        if (el) {
+            const r = el.getBoundingClientRect();
+            if (r.width > 0) { el.click(); return el.innerText || sel; }
+        }
+    }
+
+    return null;
+}
+"""
+
+
+def _dismiss_cookie_consent(page) -> bool:
+    """Silently dismiss a cookie/GDPR consent banner if one is present.
+
+    Safe by design: only acts when a consent banner CONTAINER is identified.
+    Accept buttons are searched exclusively inside that container.
+    If no banner is found the function returns False immediately with zero delay.
+
+    Returns True if a consent button was found and clicked.
+    """
+    try:
+        result = page.evaluate(_CONSENT_CONTAINER_JS)
+        if result:
+            # Wait briefly for the banner to animate out and DOM to settle
+            page.wait_for_timeout(700)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _snapshot_page(page) -> str:
     """Build a snapshot using Playwright CSS locators (proven reliable on any site).
 
@@ -656,6 +812,7 @@ def goto(url: str, tab_index: int = 0) -> str:
         if url and not url.startswith(("http://", "https://", "file://", "about:")):
             url = "https://" + url
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        _dismiss_cookie_consent(page)
         return f"✅ Navigated to: {page.url}\nTitle: {page.title()}"
     except Exception as e:
         return f"❌ {e}"
@@ -1562,6 +1719,7 @@ def get_snapshot(tab_index: int = 0) -> str:
                 "send_gmail() opens compose (if needed), fills To/Subject/Body correctly, and sends."
             )
 
+        _dismiss_cookie_consent(page)
         snapshot = _snapshot_page(page)
 
         # Twitter: remind agent to use single-call helpers instead of manual snapshot clicks
