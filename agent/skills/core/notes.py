@@ -23,7 +23,9 @@ DOC = (
     "update_user_model(insight)→append a new insight about the user to the persistent profile; "
     "get_user_model()→retrieve all accumulated user insights; "
     "log_activity(action, result, source?)→log a completed manual task to the activity log (source defaults to 'manual'); "
-    "get_activity_log(hours?)→show what the agent did in the last N hours, both scheduled and manual (default 24h)."
+    "get_activity_log(hours?)→show what the agent did in the last N hours, both scheduled and manual (default 24h); "
+    "append(title, content)→add content to an existing note without overwriting it (creates note if it does not exist yet); "
+    "end_day(summary, next_steps?)→wrap the day: writes today's journal entry with auto-pulled activity log and returns a full day overview."
 )
 
 _LOGS_FILE    = Path("/app/memory/session_logs.jsonl")
@@ -355,6 +357,76 @@ def log_activity(action: str, result: str, source: str = "manual") -> str:
         return f"✅ Activity logged: {action[:60]}"
     except Exception as e:
         return f"❌ log_activity error: {e}"
+
+
+def append(title: str, content: str) -> str:
+    """Add content to the bottom of an existing note without overwriting it.
+    Creates the note if it does not exist yet."""
+    try:
+        notes = _load_notes()
+        if title in notes:
+            notes[title]["content"] = notes[title]["content"] + "\n\n" + content
+            notes[title]["updated"] = datetime.now().isoformat()
+            action = "Appended to"
+        else:
+            notes[title] = {
+                "content": content,
+                "created": datetime.now().isoformat(),
+                "updated": datetime.now().isoformat(),
+                "tags":    [],
+            }
+            action = "Created"
+        _save_notes(notes)
+        return f"✅ {action} note '{title}' ({len(content)} chars added)"
+    except Exception as e:
+        return f"❌ Error appending to note: {e}"
+
+
+def end_day(summary: str, next_steps: str = "") -> str:
+    """Wrap up the day: writes today's journal entry with a full activity summary.
+    Automatically pulls today's activity log so nothing important is missed."""
+    try:
+        today = date.today().isoformat()
+
+        # Collect today's activity log entries (midnight → now)
+        activity_lines = []
+        if _ACTIVITY_LOG.exists():
+            midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                    if datetime.fromisoformat(e["ts"]) >= midnight:
+                        icon = "✅" if e.get("ok") else "❌"
+                        activity_lines.append(f"{icon} {e['action'][:80]}")
+                except Exception:
+                    continue
+
+        activity_block = "\n".join(activity_lines) if activity_lines else "No logged activity today."
+        learned = f"Tasks today ({len(activity_lines)}):\n{activity_block}"
+
+        # Write (or append to) today's journal entry
+        journal_result = write_daily_entry(
+            summary=summary,
+            learned=learned,
+            next_steps=next_steps,
+        )
+
+        lines = [
+            f"🌙 Day wrapped — {today}",
+            "=" * 42,
+            f"Summary: {summary}",
+            "",
+            learned,
+        ]
+        if next_steps:
+            lines += ["", f"Tomorrow: {next_steps}"]
+        lines += ["", journal_result]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Error in end_day: {e}"
 
 
 def get_activity_log(hours: int = 24) -> str:
