@@ -1865,6 +1865,27 @@ def _resize_image_for_llm(data_url: str, max_px: int = 768) -> str:
         print(f"⚠️  Image resize failed ({e}), sending original — may exceed NIM limits")
         return data_url  # safe fallback — use original if PIL is unavailable
 
+def _is_claude_model(model_name: str = "trinity-default") -> bool:
+    """Return True if the active model is Anthropic Claude (supports prompt caching).
+
+    Checks the model_name string first, then falls back to reading
+    litellm_config.yaml when the name is the generic 'trinity-default' alias.
+    """
+    name_lower = (model_name or "").lower()
+    if "claude" in name_lower or "anthropic" in name_lower:
+        return True
+    if "trinity-default" in name_lower or not model_name:
+        try:
+            import yaml
+            with open("/app/litellm_config.yaml", "r", encoding="utf-8") as _f:
+                _cfg = yaml.safe_load(_f)
+            configured = _cfg["model_list"][0]["litellm_params"].get("model", "")
+            return "claude" in configured.lower() or "anthropic" in configured.lower()
+        except Exception:
+            return False
+    return False
+
+
 def _call_llm(
     messages: list,
     model_source: str,
@@ -1925,6 +1946,28 @@ def _call_llm(
             # Swap plain text last user message for the multi-modal version
             cloud_messages = cloud_messages[:-1] + [
                 {**cloud_messages[-1], "content": cloud_image_content}
+            ]
+        # Anthropic prompt caching: mark the system message with cache_control so
+        # the large static system prompt is cached server-side across iterations of
+        # the agent loop.  The system message is identical on every iteration (only
+        # the conversation history appended after it grows), so iterations 2+ get a
+        # cache hit and skip re-tokenising thousands of tokens.
+        # Safe to skip for non-Claude models — they ignore unknown content fields.
+        if _is_claude_model(model_name):
+            cloud_messages = [
+                {
+                    **m,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": m["content"],
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+                if m.get("role") == "system" and isinstance(m.get("content"), str)
+                else m
+                for m in cloud_messages
             ]
         payload = {"model": model_name, "messages": cloud_messages, "temperature": 0.2}
         if tools:
