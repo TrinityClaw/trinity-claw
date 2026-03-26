@@ -101,6 +101,10 @@ logger = logging.getLogger(__name__)
 # Lets click_ref / fill_ref target elements without re-specifying role+name.
 _ref_cache: dict = {}
 
+# Tracks the most recent Playwright instance so it can be stopped at the
+# start of the NEXT call — cleans up without a per-function finally block.
+_current_pw = None
+
 # Roles considered "interactive" for get_snapshot output
 _INTERACTIVE_ROLES = {
     "button", "link", "textbox", "checkbox", "radio", "combobox",
@@ -437,6 +441,75 @@ def _snapshot_page(page) -> str:
     )
 
 
+def _incremental_snapshot(page, pre_cache: dict, pre_url: str) -> str:
+    """Return a diff snapshot after an action — only what changed on the page.
+
+    Runs _snapshot_page() internally, then diffs against pre_cache to show only
+    new/gone elements. Falls back to the full snapshot when:
+      • The URL changed (navigation happened)
+      • >40% of elements changed (major DOM rewrite, e.g. SPA page transition)
+      • pre_cache was empty (first snapshot on this page)
+
+    Benefit: greatly reduces agent context noise after simple clicks like
+    opening a dropdown or toggling a state, where most elements stay unchanged.
+    """
+    post_url = page.url or ""
+    full = _snapshot_page(page)          # updates _ref_cache in-place
+    post_cache = dict(_ref_cache)
+
+    # Navigation → always return full snapshot
+    if post_url != pre_url:
+        return full
+
+    pre_names = {(v["role"], v["name"]) for v in pre_cache.values()}
+    post_names = {(v["role"], v["name"]) for v in post_cache.values()}
+
+    new_items = [
+        (ref, d["role"], d["name"])
+        for ref, d in post_cache.items()
+        if (d["role"], d["name"]) not in pre_names
+    ]
+    gone_names = [
+        (d["role"], d["name"])
+        for d in pre_cache.values()
+        if (d["role"], d["name"]) not in post_names
+    ]
+
+    total_changes = len(new_items) + len(gone_names)
+    threshold = max(len(pre_cache), len(post_cache), 1) * 0.4
+
+    # Too many changes or empty baseline → full snapshot is more useful
+    if not pre_cache or total_changes > threshold:
+        return full
+
+    if not new_items and not gone_names:
+        return (
+            f"📋 No page changes — {post_url}\n"
+            f"Title: {page.title()}\n"
+            + "─" * 50 + "\n"
+            + f"({len(post_cache)} elements unchanged)\n"
+            "Use click_ref('@eN') / fill_ref('@eN', text)"
+        )
+
+    parts = [
+        f"📋 Page Changes — {post_url}",
+        f"Title: {page.title()}",
+        "─" * 50,
+    ]
+    if new_items:
+        parts.append(f"✨ New ({len(new_items)}):")
+        for ref, role, name in new_items:
+            parts.append(f"  {ref}  {role} \"{name}\"")
+    if gone_names:
+        parts.append(f"❌ Gone ({len(gone_names)}):")
+        for role, name in gone_names[:10]:
+            parts.append(f"  {role} \"{name}\"")
+    unchanged = len(post_cache) - len(new_items)
+    parts.append(f"({unchanged} elements unchanged — call get_snapshot() to see all)")
+    parts.append("Use click_ref('@eN') / fill_ref('@eN', text)")
+    return "\n".join(parts)
+
+
 def _filter_snapshot_lines(snapshot_text: str, limit: int = 250) -> list:
     """Extract only interactive element lines from Playwright's aria_snapshot() YAML output.
 
@@ -609,8 +682,8 @@ def _find_in_frames(page, role: str, name: str, exact: bool = False):
 
 def _connect():
     """Start playwright and connect to existing Chrome via CDP.
-    Returns (pw, browser). Caller MUST call pw.stop() in a finally block.
-    Chrome itself keeps running after pw.stop() — only the control channel closes.
+    Returns (pw, browser). Used internally by _get_connection() only.
+    Chrome itself keeps running — only the CDP control channel is opened.
 
     Uses a Host-header spoof to bypass Chrome's DNS-rebinding protection when
     connecting through the netsh portproxy (host.docker.internal:9223 → 127.0.0.1:9222).
@@ -652,6 +725,25 @@ def _connect():
             f"listenaddress=0.0.0.0 listenport=9223 connectaddress=127.0.0.1 connectport=9222\n"
             f"Error: {e}"
         )
+
+
+def _get_connection():
+    """Return a fresh (pw, browser) pair for each call.
+
+    Stops the previous Playwright instance before creating a new one so only
+    one CDP connection is ever active, with no per-function finally block needed.
+    Raises ConnectionError if Chrome is unreachable.
+    """
+    global _current_pw
+    if _current_pw is not None:
+        try:
+            _current_pw.stop()
+        except Exception:
+            pass
+        _current_pw = None
+    pw, browser = _connect()
+    _current_pw = pw
+    return pw, browser
 
 
 def _get_page(browser, tab_index: int = 0):
@@ -748,9 +840,8 @@ def _page_state(page) -> str:
 
 def list_tabs() -> str:
     """List all open browser tabs with their index, title, and URL."""
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         rows = []
         for ctx in browser.contexts:
             for i, page in enumerate(ctx.pages):
@@ -765,21 +856,14 @@ def list_tabs() -> str:
         return "🗂️  Open Tabs\n" + "─" * 50 + "\n" + "\n".join(rows)
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def screenshot(tab_index: int = 0) -> str:
     """Take a screenshot of the specified tab.
     Returns the saved file path so you can use image_viewer.view_image() to inspect it.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -793,21 +877,14 @@ def screenshot(tab_index: int = 0) -> str:
         )
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def goto(url: str, tab_index: int = 0) -> str:
     """Navigate to a URL in the specified tab.
     Waits for the DOM to load before returning.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         if url and not url.startswith(("http://", "https://", "file://", "about:")):
             url = "https://" + url
@@ -816,21 +893,14 @@ def goto(url: str, tab_index: int = 0) -> str:
         return f"✅ Navigated to: {page.url}\nTitle: {page.title()}"
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def get_text(tab_index: int = 0) -> str:
     """Get the visible text content of the current page.
     Strips empty lines and collapses whitespace. Returns up to 5000 chars.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         raw = page.locator("body").inner_text()
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
@@ -846,12 +916,6 @@ def get_text(tab_index: int = 0) -> str:
         )
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def get_html(tab_index: int = 0, selector: str = "") -> str:
@@ -863,9 +927,8 @@ def get_html(tab_index: int = 0, selector: str = "") -> str:
     if isinstance(tab_index, str) and not str(tab_index).strip().lstrip("-").isdigit():
         selector = tab_index
         tab_index = 0
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         if selector.strip():
             html = page.locator(selector.strip()).first.inner_html(timeout=20000)
@@ -882,12 +945,6 @@ def get_html(tab_index: int = 0, selector: str = "") -> str:
         )
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def click(target: str = "", tab_index: int = 0, **kwargs) -> str:
@@ -915,9 +972,8 @@ def click(target: str = "", tab_index: int = 0, **kwargs) -> str:
             f"Provide a CSS selector like '[data-testid=\"SideNav_NewTweet_Button\"]'. "
             f"To target a specific tab, use the tab_index parameter instead."
         )
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         # Try main page first, then search all child iframes.
         # Gmail compose, LinkedIn DMs, etc. live inside iframes —
@@ -946,12 +1002,6 @@ def click(target: str = "", tab_index: int = 0, **kwargs) -> str:
         return f"✅ Clicked: {target}\nURL after click: {page.url}"
     except Exception as e:
         return f"❌ Could not click '{target}': {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_index: int = 0, **kwargs) -> str:
@@ -974,9 +1024,8 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
     # Coerce clear_first — LLM sometimes passes the string 'False' which is truthy
     if isinstance(clear_first, str):
         clear_first = clear_first.strip().lower() not in ("false", "0", "no")
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         # Try main page first, then all child iframes.
         # Gmail compose fields, LinkedIn DMs etc. live inside iframes —
@@ -1056,21 +1105,14 @@ def type_text(target: str = "", text: str = "", clear_first: bool = True, tab_in
         return f"✅ Typed {len(text)} characters into: {target}{next_step}"
     except Exception as e:
         return f"❌ Could not type into '{target}': {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def scroll(direction: str = "down", tab_index: int = 0) -> str:
     """Scroll the page.
     direction: 'up' | 'down' (600px step) | 'top' | 'bottom'
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         direction = direction.strip().lower()
         scroll_map = {
@@ -1085,12 +1127,6 @@ def scroll(direction: str = "down", tab_index: int = 0) -> str:
         return f"✅ Scrolled {direction}"
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def press_key(key: str, tab_index: int = 0) -> str:
@@ -1099,21 +1135,14 @@ def press_key(key: str, tab_index: int = 0) -> str:
     Examples: 'Enter', 'Escape', 'Tab', 'Control+Enter', 'ArrowDown', 'Backspace'
     Useful for submitting forms, dismissing dialogs, or navigating dropdowns.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         page.keyboard.press(key.strip())
         page.wait_for_timeout(400)  # let the action settle before reading state
         return f"✅ Pressed: {key}" + _page_state(page)
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def wait_for(selector: str, tab_index: int = 0, timeout_ms: int = 10000) -> str:
@@ -1123,29 +1152,21 @@ def wait_for(selector: str, tab_index: int = 0, timeout_ms: int = 10000) -> str:
     selector: CSS selector to wait for.
     timeout_ms: max wait time in milliseconds (default 10000 = 10 seconds).
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         page.locator(selector).first.wait_for(state="visible", timeout=int(timeout_ms))
         return f"✅ Element is visible: {selector}"
     except Exception as e:
         return f"❌ Element '{selector}' did not appear within {timeout_ms}ms: {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def new_tab(url: str = "") -> str:
     """Open a new tab in your existing Chrome browser.
     Optionally navigate to a URL immediately.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         if not browser.contexts:
             return "❌ No browser contexts found."
         context = browser.contexts[0]
@@ -1156,12 +1177,6 @@ def new_tab(url: str = "") -> str:
         return "✅ New blank tab opened (tab index will be the last in list_tabs())"
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def close_tab(tab_index: int = 0) -> str:
@@ -1169,9 +1184,8 @@ def close_tab(tab_index: int = 0) -> str:
     Use list_tabs() first to confirm which tab you want to close.
     Warning: closing the wrong tab can lose unsaved work — always check with list_tabs() first.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         title = (page.title() or "(no title)")[:55]
         url = page.url or "(blank)"
@@ -1179,12 +1193,6 @@ def close_tab(tab_index: int = 0) -> str:
         return f"✅ Closed tab [{tab_index}]: {title}\n{url}"
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def tweet(text: str) -> str:
@@ -1194,9 +1202,8 @@ def tweet(text: str) -> str:
     and clicks the Post button. Returns ✅ with confirmation or ❌ with error.
     Use this instead of chaining goto + click + type_text + click separately.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, 0)
 
         # Step 1: navigate to home
@@ -1238,12 +1245,6 @@ def tweet(text: str) -> str:
         )
     except Exception as e:
         return f"❌ Could not post tweet: {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def get_tweet_urls_from_page(count: int = 5, tab_index: int = 0) -> str:
@@ -1258,9 +1259,8 @@ def get_tweet_urls_from_page(count: int = 5, tab_index: int = 0) -> str:
       like_tweet(url1)
       like_tweet(url2)
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         page.wait_for_timeout(2000)  # let Twitter JS render
         urls = page.evaluate("""(count) => {
@@ -1291,12 +1291,6 @@ def get_tweet_urls_from_page(count: int = 5, tab_index: int = 0) -> str:
         return result.strip()
     except Exception as e:
         return f"❌ get_tweet_urls_from_page failed: {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def like_tweet(tweet_url: str) -> str:
@@ -1307,9 +1301,8 @@ def like_tweet(tweet_url: str) -> str:
     to get specific tweet URLs, then pass each one here.
     Navigates to the tweet and clicks the Like button.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, 0)
         if not tweet_url.startswith(("http://", "https://")):
             tweet_url = "https://" + tweet_url
@@ -1322,12 +1315,6 @@ def like_tweet(tweet_url: str) -> str:
         return f"✅ Liked tweet: {tweet_url}"
     except Exception as e:
         return f"❌ Could not like tweet: {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def reply_tweet(tweet_url: str, text: str) -> str:
@@ -1337,9 +1324,8 @@ def reply_tweet(tweet_url: str, text: str) -> str:
     text: the reply text to post.
     Navigates to the tweet, clicks Reply, types the text, and posts.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, 0)
         if not tweet_url.startswith(("http://", "https://")):
             tweet_url = "https://" + tweet_url
@@ -1369,12 +1355,6 @@ def reply_tweet(tweet_url: str, text: str) -> str:
         )
     except Exception as e:
         return f"❌ Could not reply to tweet: {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def follow_user(username: str) -> str:
@@ -1383,9 +1363,8 @@ def follow_user(username: str) -> str:
     username: Twitter handle with or without @ (e.g. 'elonmusk' or '@elonmusk').
     Navigates to their profile and clicks Follow. Skips if already following.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, 0)
         username = username.strip().lstrip("@")
         page.goto(f"https://x.com/{username}", wait_until="domcontentloaded", timeout=30000)
@@ -1403,12 +1382,6 @@ def follow_user(username: str) -> str:
         return f"✅ Now following @{username} (https://x.com/{username})"
     except Exception as e:
         return f"❌ Could not follow @{username}: {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def tiktok_like(video_url: str) -> str:
@@ -1417,9 +1390,8 @@ def tiktok_like(video_url: str) -> str:
     video_url: full URL of the video (https://www.tiktok.com/@user/video/ID).
     Navigates to the video, waits for SPA hydration, and clicks the Like button.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, 0)
         if not video_url.startswith(("http://", "https://")):
             video_url = "https://" + video_url
@@ -1435,12 +1407,6 @@ def tiktok_like(video_url: str) -> str:
             f"❌ Could not like TikTok video: {e}\n"
             f"Tip: run get_html(selector=\"main\") to find the current like button selector."
         )
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def tiktok_comment(video_url: str, text: str) -> str:
@@ -1450,9 +1416,8 @@ def tiktok_comment(video_url: str, text: str) -> str:
     text: the comment text to post.
     Navigates to the video, types the comment in the input, and posts it.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, 0)
         if not video_url.startswith(("http://", "https://")):
             video_url = "https://" + video_url
@@ -1479,12 +1444,6 @@ def tiktok_comment(video_url: str, text: str) -> str:
             f"❌ Could not post TikTok comment: {e}\n"
             f"Tip: run get_html(selector=\"main\") to find the current comment selector."
         )
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def tiktok_follow(username: str) -> str:
@@ -1493,9 +1452,8 @@ def tiktok_follow(username: str) -> str:
     username: TikTok handle with or without @ (e.g. 'username' or '@username').
     Navigates to their profile and clicks Follow. Skips if already following.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, 0)
         username = username.strip().lstrip("@")
         page.goto(f"https://www.tiktok.com/@{username}", wait_until="domcontentloaded", timeout=30000)
@@ -1513,12 +1471,6 @@ def tiktok_follow(username: str) -> str:
         return f"✅ Now following @{username} on TikTok (https://www.tiktok.com/@{username})"
     except Exception as e:
         return f"❌ Could not follow @{username} on TikTok: {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def _find_gmail_compose(page, timeout_ms: int = 2000):
@@ -1556,9 +1508,8 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
     Navigates to Gmail inbox, clicks Compose, fills To/Subject/Body, then sends with Ctrl+Enter.
     Use this instead of chaining goto + click + type_text + press_key for Gmail compose.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
 
         # Step 1: ensure we're on Gmail
@@ -1676,12 +1627,6 @@ def send_gmail(to: str, subject: str, body: str, tab_index: int = 0) -> str:
             f"Tip: call browser_session.screenshot() to see what's on screen, "
             f"or browser_session.get_html(selector=\"[role='main']\") to inspect the DOM."
         )
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def get_snapshot(tab_index: int = 0) -> str:
@@ -1699,9 +1644,8 @@ def get_snapshot(tab_index: int = 0) -> str:
       2. click_accessible("button", "Compose")
       3. type_accessible("textbox", "To", "user@example.com")
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         url = page.url or ""
 
@@ -1735,12 +1679,6 @@ def get_snapshot(tab_index: int = 0) -> str:
         return snapshot
     except Exception as e:
         return f"❌ {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def click_accessible(role: str, name: str = "", tab_index: int = 0, exact: bool = False) -> str:
@@ -1772,10 +1710,11 @@ def click_accessible(role: str, name: str = "", tab_index: int = 0, exact: bool 
             # Both args provided but role is invalid — try button as a safe default
             name = name or role
             role = "button"
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
+        pre_url = page.url or ""
+        pre_cache = dict(_ref_cache)
         locator = _find_in_frames(page, role, name, exact=exact)
         # Read back the actual element label before clicking for verification
         try:
@@ -1796,19 +1735,13 @@ def click_accessible(role: str, name: str = "", tab_index: int = 0, exact: bool 
         if gmail_warn:
             return header + gmail_warn
         # Auto-snapshot after every click — universal, works on any site
-        snapshot = _snapshot_page(page)
+        snapshot = _incremental_snapshot(page, pre_cache, pre_url)
         return header + "\n\n" + snapshot
     except Exception as e:
         return (
             f"❌ Could not click {role} \"{name}\": {e}\n"
             f"Tip: call get_snapshot() to see the correct element names on this page."
         )
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def type_accessible(role: str, name: str = "", text: str = "", tab_index: int = 0, exact: bool = False) -> str:
@@ -1839,9 +1772,8 @@ def type_accessible(role: str, name: str = "", text: str = "", tab_index: int = 
         else:
             name = name or role
             role = "textbox"
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         locator = _find_in_frames(page, role, name, exact=exact)
         # Read back the actual element label before typing for verification
@@ -1877,12 +1809,6 @@ def type_accessible(role: str, name: str = "", text: str = "", tab_index: int = 
             f"❌ Could not type into {role} \"{name}\": {e}\n"
             f"Tip: call get_snapshot() to see the correct field names on this page."
         )
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def click_ref(ref: str, tab_index: int = 0) -> str:
@@ -1904,10 +1830,11 @@ def click_ref(ref: str, tab_index: int = 0) -> str:
     ref_data = _ref_cache[ref]
     role = ref_data["role"]
     name = ref_data["name"]
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
+        pre_url = page.url or ""
+        pre_cache = dict(_ref_cache)
         # Locate by the data-tc-ref tag stamped onto the DOM node during snapshot
         if ref_data.get("frame_is_main", True):
             frame = page.main_frame
@@ -1936,19 +1863,13 @@ def click_ref(ref: str, tab_index: int = 0) -> str:
         gmail_warn = _gmail_compose_warning(page)
         if gmail_warn:
             return header + gmail_warn
-        snapshot = _snapshot_page(page)
+        snapshot = _incremental_snapshot(page, pre_cache, pre_url)
         return header + "\n\n" + snapshot
     except Exception as e:
         return (
             f"❌ Could not click ref {ref} ({role} \"{name}\"): {e}\n"
             f"Tip: call get_snapshot() to refresh refs — the DOM may have changed since last snapshot."
         )
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
@@ -1974,30 +1895,16 @@ def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
     # Hard stop: redirect to send_gmail if the agent tries to manually fill compose fields.
     # Filling via refs fails on Gmail's token inputs — send_gmail is the only reliable path.
     _name_lower = name.lower()
-    if any(k in _name_lower for k in ("to", "subject", "body", "recipients", "bcc", "cc")):
-        pw_check = None
-        try:
-            pw_check, _br = _connect()
-            _pg = _get_page(_br, tab_index)
-            if "mail.google.com" in (_pg.url or "") and "compose" in (_pg.url or ""):
+    try:
+        pw, browser = _get_connection()
+        page = _get_page(browser, tab_index)
+        if any(k in _name_lower for k in ("to", "subject", "body", "recipients", "bcc", "cc")):
+            if "mail.google.com" in (page.url or "") and "compose" in (page.url or ""):
                 return (
                     "🚨 STOP — do not fill Gmail compose fields manually via fill_ref.\n"
                     "Call send_gmail(to, subject, body) — it handles all fields and sends reliably.\n"
                     "Example: send_gmail('recipient@example.com', 'Subject here', 'Body text')"
                 )
-        except Exception:
-            pass
-        finally:
-            if pw_check:
-                try:
-                    pw_check.stop()
-                except Exception:
-                    pass
-
-    pw = None
-    try:
-        pw, browser = _connect()
-        page = _get_page(browser, tab_index)
         # Locate by the data-tc-ref tag stamped onto the DOM node during snapshot
         if ref_data.get("frame_is_main", True):
             frame = page.main_frame
@@ -2028,12 +1935,6 @@ def fill_ref(ref: str, text: str, tab_index: int = 0) -> str:
             f"❌ Could not fill ref {ref} ({role} \"{name}\"): {e}\n"
             f"Tip: call get_snapshot() to refresh refs — the DOM may have changed since last snapshot."
         )
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 def _evaluate(js_code: str, tab_index: int = 0) -> str:
@@ -2042,20 +1943,13 @@ def _evaluate(js_code: str, tab_index: int = 0) -> str:
     NOT exposed to the LLM — internal use only. Arbitrary JS execution
     from untrusted web content is a prompt-injection vector.
     """
-    pw = None
     try:
-        pw, browser = _connect()
+        pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
         result = page.evaluate(js_code)
         return f"✅ JS result:\n{result}"
     except Exception as e:
         return f"❌ JavaScript error: {e}"
-    finally:
-        if pw:
-            try:
-                pw.stop()
-            except Exception:
-                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
