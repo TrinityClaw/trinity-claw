@@ -315,7 +315,7 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 
 ---
 
-## Core Skills (24)
+## Core Skills (30)
 
 | Skill | Description | Functions |
 |-------|-------------|-----------|
@@ -343,6 +343,12 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 | `google_drive` | Google Drive file management — list, search, upload, download, create folders, delete. Uses same `gcal_credentials.json` as Calendar. | `authorize`, `list_files`, `search_files`, `get_file_info`, `create_folder`, `upload_file`, `upload_to_folder`, `download_file`, `delete_file`, `status` |
 | `meeting_notes` | Extract structured information from meeting transcripts or documents (PDF, DOCX, TXT, MD, or raw text). Uses LLM to produce summary, decisions, action items, attendees, and topics. | `extract`, `save_meeting` |
 | `youtube` | YouTube Data API — search videos and channels with view/subscriber metrics. Supports both OAuth and simple API key auth. | `authorize`, `activate`, `status`, `search_videos`, `search_channels` |
+| `autoimprove` | Autonomous self-improvement loops — web research, propose/apply/test cycles for dynamic skills, and queued patch suggestions for core skills | `research`, `run_experiment`, `run_loop`, `run_all`, `suggest_core`, `list_suggestions`, `apply_suggestion`, `schedule_nightly`, `report`, `status` |
+| `browser_session` | Attach to your existing logged-in Chrome via CDP — sees all sessions, cookies, and open tabs. Includes stealth headless sessions and built-in Twitter/X, TikTok, Gmail shortcuts. One-time setup: launch Chrome with `--remote-debugging-port=9222`. | `list_tabs`, `goto`, `get_snapshot`, `click_ref`, `fill_ref`, `click_accessible`, `type_accessible`, `scroll`, `press_key`, `wait_for`, `new_tab`, `close_tab`, `tweet`, `like_tweet`, `reply_tweet`, `follow_user`, `tiktok_like`, `tiktok_comment`, `tiktok_follow`, `send_gmail`, `stealth_start`, `stealth_goto`, `stealth_snapshot`, `stealth_click_ref`, `stealth_fill_ref`, `stealth_screenshot`, `stealth_scroll`, `stealth_press`, `stealth_save`, `stealth_close` |
+| `database` | SQLite structured data storage. Databases live in `/app/memory/databases/`. Parameterized queries — no SQL injection risk. | `create_table`, `drop_table`, `insert`, `upsert`, `update`, `delete_rows`, `select`, `count`, `list_databases`, `list_tables`, `describe`, `export_csv` |
+| `google_maps` | Maps & location — geocoding, directions, place search. No API key required (uses OpenStreetMap/Nominatim + OSRM). | `map_url`, `geocode`, `reverse_geocode`, `search_places`, `nearby_search`, `get_directions`, `distance_matrix`, `status` |
+| `weather_api` | Real-time weather, multi-day forecast (up to 16 days), and air quality. No API key required. | `get_weather`, `get_forecast`, `get_air_quality` |
+| `website_cloner` | Scrape a live website's design tokens (CSS variables, colors, fonts, section structure) and scaffold a `web_builder` project from them. | `extract_tokens`, `clone` |
 
 ---
 
