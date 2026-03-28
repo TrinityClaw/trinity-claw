@@ -909,6 +909,136 @@ curl -X POST http://localhost:8001/skill/call \
 
 ---
 
+## AutoImprove — Overnight Self-Improvement
+
+`autoimprove` is a dynamic skill that runs autoresearch-style loops while you sleep. It continuously audits your skills, auto-fixes safe issues, queues suggestions for your review, and can research any topic on the web.
+
+### How it works
+
+**Two-track system:**
+- **Dynamic skills** → auto-fix: snapshot → patch → test → keep or restore
+- **Core skills** → suggest only: audit → save patch to memory → you approve
+
+---
+
+### Quick start
+
+Tell Trinity:
+```
+autoimprove.status()
+```
+
+Put it on autopilot:
+```
+autoimprove.schedule_nightly("2am")
+```
+
+Check results in the morning:
+```
+autoimprove.report(1)
+autoimprove.list_suggestions()
+```
+
+---
+
+### Research — any topic
+
+`research()` is a general-purpose web research function. Give it any query and it searches the web, fetches the top pages, extracts key content, and saves findings to your notes automatically.
+
+```
+autoimprove.research("Python async best practices")
+autoimprove.research("how to improve Playwright reliability", depth="deep")
+autoimprove.research("latest trends in local LLM models", depth="deep", save=True)
+```
+
+**Parameters:**
+| Parameter | Options | Description |
+|-----------|---------|-------------|
+| `query` | any string | What to research — topic, question, error message, concept |
+| `depth` | `'quick'` (default) | 1 search + fetches top 2 pages (~15s) |
+| | `'deep'` | 3 search variations + fetches top 5 pages (~45s) |
+| `save` | `True` (default) | Saves findings to notes with a timestamped title |
+
+Results are always saved to `memory/notes.json` under `"Research — [query] — [date]"` so they persist across sessions and can be retrieved with `notes.search("research")`.
+
+---
+
+### Improvement loops
+
+| Loop | What it does | Modifies files? |
+|------|-------------|-----------------|
+| `daily_review` | Reads lessons.jsonl, surfaces recurring patterns | No |
+| `ast_audit` | Fixes `bare_except` and `missing_timeout` in dynamic skills | Yes (dynamic only) |
+| `error_reduce` | Targets the most-frequent error pattern across dynamic skills | Yes (dynamic only) |
+| `suggest_core` | Audits all 30+ core skills, queues patches for your approval | No |
+
+Run all loops at once:
+```
+autoimprove.run_all(5)       ← max 5 experiments per loop
+```
+
+Run a single loop:
+```
+autoimprove.run_loop("ast_audit", 10)
+autoimprove.run_loop("suggest_core", 30)
+```
+
+---
+
+### Core skill suggestions
+
+The nightly run scans all core skills and queues proposed fixes. Nothing is applied automatically — you review and approve each one.
+
+```
+# See what's pending
+autoimprove.list_suggestions()
+
+# See all (including applied and failed)
+autoimprove.list_suggestions("all")
+
+# Apply one approved suggestion to a core skill
+autoimprove.apply_suggestion("browser_session", "bare_except")
+autoimprove.apply_suggestion("web", "missing_timeout")
+```
+
+Each `apply_suggestion()` call:
+1. Snapshots the core skill file
+2. Applies the patch
+3. Runs a runtime smoke test
+4. Keeps the file if test passes, restores snapshot if it fails
+
+---
+
+### Single experiment
+
+Test one specific fix on a dynamic skill:
+```
+autoimprove.run_experiment("seo_analyzer", "bare_except")
+autoimprove.run_experiment("content_calendar", "missing_timeout")
+```
+
+---
+
+### View history
+
+```
+autoimprove.report(7)     ← last 7 days
+autoimprove.report(1)     ← last 24 hours (useful after a nightly run)
+autoimprove.report(30)    ← last month
+```
+
+---
+
+### Memory files
+
+| File | Contents |
+|------|----------|
+| `memory/improvement_log.jsonl` | Every experiment — outcome, scores, timestamps |
+| `memory/core_suggestions.jsonl` | Pending/applied/failed suggestions for core skills |
+| `memory/notes.json` | Research findings saved by `research()` |
+
+---
+
 ## Project Structure
 
 ```
@@ -953,7 +1083,8 @@ trinity-claw/
 │       │   ├── competitive_intel.py
 │       │   ├── google_drive.py
 │       │   ├── meeting_notes.py
-│       │   └── youtube.py
+│       │   ├── youtube.py
+│       │   └── autoimprove.py  # Autoresearch loops + web research (see AutoImprove section)
 │       └── dynamic/            # User skills (AI agent can read-write)
 │
 ├── config/
