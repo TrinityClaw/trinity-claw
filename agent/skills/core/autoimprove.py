@@ -29,7 +29,10 @@ DOC = (
     "Autoresearch-style overnight self-improvement loops — two-track system: "
     "DYNAMIC skills auto-fix (snapshot→patch→test→keep/restore); "
     "CORE skills suggest-only (audit→patch→save to memory→you approve). "
-    "run_experiment(skill_name, issue_type)→one cycle on a dynamic skill; "
+    "research(query, depth='quick', save=True)→general-purpose web research on ANY topic: "
+    "searches the web, fetches top pages, extracts key findings, saves to notes; "
+    "depth='deep' fetches more sources and runs related queries; "
+    "run_experiment(skill_name, issue_type)→one autoresearch cycle on a dynamic skill; "
     "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core; "
     "run_all(max_experiments=5)→all loops in sequence (overnight autopilot); "
     "suggest_core(max_skills=30)→audit core skills, save proposed patches to memory; "
@@ -129,6 +132,144 @@ def _import_skill(module_name: str):
             sys.path.insert(0, p)
     import importlib
     return importlib.import_module(module_name)
+
+
+# ── General-purpose research ───────────────────────────────────────────────────
+
+def research(query: str, depth: str = "quick", save: bool = True) -> str:
+    """
+    General-purpose web research on any topic.
+
+    Searches the web, fetches the top pages, pulls out key content, and returns
+    a structured research package. Optionally saves findings to notes so they
+    persist across sessions and feed into the agent's knowledge base.
+
+    Args:
+        query:  Anything you want to research — a topic, question, technology,
+                person, concept, error message, etc.
+        depth:  'quick' → 1 search + fetch top 2 results  (~15s)
+                'deep'  → 3 search variations + fetch top 5 results (~45s)
+        save:   If True, save findings to notes with a timestamped title.
+                Default True — results persist in memory/notes.json.
+
+    Returns:
+        Structured research summary with sources, key excerpts, and save path.
+
+    Examples (tell Trinity):
+        "Research the latest Python async best practices"
+        "Research how to improve browser automation reliability"
+        "Do a deep research on competitor pricing for SaaS tools"
+        "Research: what is Karpathy's autoresearch method?"
+    """
+    try:
+        web = _import_skill("web")
+    except ImportError as e:
+        return f"❌ web skill not available: {e}"
+
+    timestamp  = datetime.now().isoformat()
+    date_label = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # ── 1. Build search queries ────────────────────────────────────────────────
+    queries = [query]
+    if depth == "deep":
+        # Add focused variants to get broader coverage
+        queries += [
+            f"{query} best practices 2025",
+            f"{query} examples tutorial",
+        ]
+
+    # ── 2. Collect search results ──────────────────────────────────────────────
+    max_fetch  = 2 if depth == "quick" else 5
+    seen_urls: set = set()
+    sources:   List[Dict] = []
+
+    for q in queries:
+        if len(sources) >= max_fetch:
+            break
+        try:
+            raw = web.search(q)
+            # web.search returns a text block — extract URLs from it
+            urls_found = []
+            for line in (raw or "").splitlines():
+                line = line.strip()
+                if line.startswith("http://") or line.startswith("https://"):
+                    urls_found.append(line)
+                elif "http" in line:
+                    # Try to pull URLs embedded in text
+                    import re
+                    found = re.findall(r'https?://[^\s\)"\']+', line)
+                    urls_found.extend(found)
+            for url in urls_found:
+                if url not in seen_urls and len(sources) < max_fetch:
+                    seen_urls.add(url)
+                    sources.append({"url": url, "query": q, "content": None})
+        except Exception as e:
+            sources.append({"url": None, "query": q, "content": f"search error: {e}"})
+
+    # If search returned no parseable URLs, keep the raw text as a source
+    if not sources:
+        try:
+            raw = web.search(query)
+            sources.append({"url": None, "query": query, "content": raw})
+        except Exception as e:
+            return f"❌ Research failed — web.search error: {e}"
+
+    # ── 3. Fetch page content ──────────────────────────────────────────────────
+    for src in sources:
+        if src.get("url") and src["content"] is None:
+            try:
+                content = web.fetch(src["url"])
+                # Trim to keep context window manageable
+                src["content"] = (content or "")[:3000]
+            except Exception as e:
+                src["content"] = f"fetch error: {e}"
+
+    # ── 4. Build structured output ─────────────────────────────────────────────
+    lines = [
+        f"📚 Research: {query}",
+        f"   Depth: {depth}  |  Sources fetched: {len(sources)}  |  {date_label}",
+        "=" * 60,
+    ]
+
+    for i, src in enumerate(sources, 1):
+        lines.append(f"\n[Source {i}] {src.get('url') or '(search result)'}")
+        content = src.get("content") or ""
+        if content:
+            # Show first ~800 chars — enough to extract key info
+            preview = content.strip()[:800]
+            if len(content) > 800:
+                preview += f"\n... [{len(content) - 800} more chars]"
+            lines.append(preview)
+        lines.append("")
+
+    lines.append("=" * 60)
+    lines.append(f"Sources: {len(sources)} | Query: {query}")
+
+    result_text = "\n".join(lines)
+
+    # ── 5. Save to notes ───────────────────────────────────────────────────────
+    save_path = None
+    if save:
+        try:
+            notes = _import_skill("notes")
+            title = f"Research — {query[:60]} — {datetime.now().strftime('%Y-%m-%d')}"
+            notes.save(title, result_text, tags="research,autoimprove")
+            save_path = title
+        except Exception as e:
+            save_path = f"(save failed: {e})"
+
+    _log({
+        "timestamp":    timestamp,
+        "loop":         "research",
+        "outcome":      "RESEARCH",
+        "query":        query,
+        "depth":        depth,
+        "sources_found": len(sources),
+        "saved_as":     save_path,
+    })
+
+    footer = f"\n💾 Saved to notes: \"{save_path}\"" if save_path else ""
+    return result_text + footer
 
 
 # ── Core experiment runner (DYNAMIC skills only) ──────────────────────────────
@@ -833,6 +974,7 @@ def status() -> str:
         f"Last experiment    : {last_run}",
         "",
         "Commands:",
+        "  autoimprove.research('any topic', depth='deep')     → web research, saved to notes",
         "  autoimprove.run_all(5)                              → run all loops tonight",
         "  autoimprove.suggest_core()                          → scan all core skills now",
         "  autoimprove.list_suggestions()                      → review pending core fixes",
@@ -853,6 +995,7 @@ def status() -> str:
 __all__ = [
     "NAME",
     "DOC",
+    "research",
     "run_experiment",
     "run_loop",
     "run_all",
