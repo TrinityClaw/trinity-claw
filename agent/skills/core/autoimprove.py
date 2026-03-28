@@ -16,6 +16,7 @@ Available loops:
 """
 
 import json
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -29,9 +30,10 @@ DOC = (
     "Autoresearch-style overnight self-improvement loops — two-track system: "
     "DYNAMIC skills auto-fix (snapshot→patch→test→keep/restore); "
     "CORE skills suggest-only (audit→patch→save to memory→you approve). "
-    "research(query, depth='quick', save=True)→general-purpose web research on ANY topic: "
-    "searches the web, fetches top pages, extracts key findings, saves to notes; "
-    "depth='deep' fetches more sources and runs related queries; "
+    "research(query, depth='quick', save=True, max_iterations=None)→autoresearch-style loop: "
+    "search→measure coverage→refine query→repeat until convergence (≥72% term coverage) or cap; "
+    "depth='deep' runs 4 iterations with 4 sources each vs quick's 2×2; "
+    "coverage metric = 0.4×source_yield + 0.6×query_term_coverage; "
     "run_experiment(skill_name, issue_type)→one autoresearch cycle on a dynamic skill; "
     "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core; "
     "run_all(max_experiments=5)→all loops in sequence (overnight autopilot); "
@@ -134,32 +136,111 @@ def _import_skill(module_name: str):
     return importlib.import_module(module_name)
 
 
+# ── Research loop constants ────────────────────────────────────────────────────
+
+# Converge when ≥72% of query terms are covered by collected sources.
+# Mirrors autoresearch's val_bpb threshold — the single number that decides
+# whether to keep the current state or refine and try again.
+COVERAGE_THRESHOLD = 0.72
+
+_RESEARCH_STOP = frozenset({
+    "the", "a", "an", "is", "in", "of", "to", "for", "and", "or", "how",
+    "what", "why", "when", "are", "was", "has", "that", "this", "with",
+    "from", "have", "be", "it", "not", "on", "at", "by", "do", "did",
+    "can", "will", "would", "could", "should", "their", "they", "them",
+})
+
+# ── Research loop helpers ──────────────────────────────────────────────────────
+
+def _extract_urls(raw_search: str) -> List[str]:
+    """Extract URLs from a web.search() result string."""
+    urls = []
+    for line in (raw_search or "").splitlines():
+        line = line.strip()
+        if line.startswith("http://") or line.startswith("https://"):
+            urls.append(line)
+        elif "http" in line:
+            urls.extend(re.findall(r'https?://[^\s\)"\']+', line))
+    return urls
+
+
+def _score_coverage(query: str, sources: List[Dict]) -> float:
+    """
+    Coverage metric 0.0–1.0: how well collected sources answer the query.
+
+    0.4 × source yield  +  0.6 × query-term coverage in collected content.
+    Mirrors autoresearch's val_bpb — one number that drives keep/refine decisions.
+    """
+    if not sources:
+        return 0.0
+    successful = [
+        s for s in sources
+        if s.get("content") and not str(s["content"]).startswith("fetch error")
+    ]
+    yield_score = len(successful) / len(sources)
+
+    combined = " ".join(s.get("content", "") for s in successful).lower()
+    terms = [
+        t.lower() for t in re.findall(r'\w+', query)
+        if t.lower() not in _RESEARCH_STOP and len(t) > 3
+    ]
+    if not terms:
+        return yield_score
+    term_score = sum(1 for t in terms if t in combined) / len(terms)
+    return round(0.4 * yield_score + 0.6 * term_score, 3)
+
+
+def _missing_terms(query: str, sources: List[Dict]) -> List[str]:
+    """Return query keywords absent from all collected source content."""
+    terms = [
+        t.lower() for t in re.findall(r'\w+', query)
+        if t.lower() not in _RESEARCH_STOP and len(t) > 3
+    ]
+    combined = " ".join(
+        s.get("content", "") for s in sources
+        if s.get("content") and not str(s["content"]).startswith("fetch error")
+    ).lower()
+    return [t for t in terms if t not in combined]
+
+
+def _refine_query(base_query: str, iteration: int, missing: List[str]) -> str:
+    """Build next iteration's search query guided by uncovered terms."""
+    if missing:
+        return f"{base_query} {' '.join(missing[:3])}"
+    fallbacks = [
+        "data statistics examples",
+        "analysis findings research",
+        "current trends numbers",
+    ]
+    return f"{base_query} {fallbacks[min(iteration - 1, len(fallbacks) - 1)]}"
+
+
 # ── General-purpose research ───────────────────────────────────────────────────
 
-def research(query: str, depth: str = "quick", save=True) -> str:
+def research(query: str, depth: str = "quick", save=True, max_iterations=None) -> str:
     """
-    General-purpose web research on any topic.
+    Autoresearch-style web research loop on any topic.
 
-    Searches the web, fetches the top pages, pulls out key content, and returns
-    a structured research package. Optionally saves findings to notes so they
-    persist across sessions and feed into the agent's knowledge base.
+    Mirrors Karpathy's autoresearch: search → measure coverage → keep/refine →
+    repeat until convergence or iteration cap. Never pauses — runs autonomously.
+
+    Coverage metric (0.0–1.0):
+        0.4 × source yield  +  0.6 × query-term coverage across all fetched content
+    Convergence: stops when coverage ≥ 0.72 or iteration cap is reached.
 
     Args:
-        query:  Anything you want to research — a topic, question, technology,
-                person, concept, error message, etc.
-        depth:  'quick' → 1 search + fetch top 2 results  (~15s)
-                'deep'  → 3 search variations + fetch top 5 results (~45s)
-        save:   If True, save findings to notes with a timestamped title.
-                Default True — results persist in memory/notes.json.
+        query:          Topic, question, or measurable thing to investigate.
+        depth:          'quick' (2 iters, 2 sources/iter) | 'deep' (4 iters, 4 sources/iter)
+        save:           Persist findings to notes (default True)
+        max_iterations: Override iteration cap (default: 2 quick / 4 deep)
 
     Returns:
-        Structured research summary with sources, key excerpts, and save path.
+        Structured report with per-iteration coverage log and source excerpts.
 
-    Examples (tell Trinity):
-        "Research the latest Python async best practices"
-        "Research how to improve browser automation reliability"
-        "Do a deep research on competitor pricing for SaaS tools"
-        "Research: what is Karpathy's autoresearch method?"
+    Examples:
+        "Research competitor pricing for project management SaaS tools"
+        "Research current benchmark scores for Claude vs GPT-4 on coding tasks"
+        "Research what validation loss metrics matter for LLM fine-tuning"
     """
     try:
         web = _import_skill("web")
@@ -170,88 +251,142 @@ def research(query: str, depth: str = "quick", save=True) -> str:
     depth = str(depth).strip().lower()
     save  = str(save).strip().lower() not in ("false", "0", "no", "")
 
-    timestamp  = datetime.now().isoformat()
-    date_label = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if max_iterations is not None and str(max_iterations).strip().lower() not in ("none", "null", ""):
+        max_iters = int(str(max_iterations).strip())
+    else:
+        max_iters = 2 if depth == "quick" else 4
 
-    # ── 1. Build search queries ────────────────────────────────────────────────
-    queries = [query]
-    if depth == "deep":
-        # Add focused variants to get broader coverage
-        queries += [
-            f"{query} best practices 2025",
-            f"{query} examples tutorial",
-        ]
+    sources_per_iter = 2 if depth == "quick" else 4
+    timestamp        = datetime.now().isoformat()
+    date_label       = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # ── 2. Collect search results ──────────────────────────────────────────────
-    max_fetch  = 2 if depth == "quick" else 5
-    seen_urls: set = set()
-    sources:   List[Dict] = []
+    all_sources:   List[Dict] = []
+    seen_urls:     set        = set()
+    iter_log:      List[Dict] = []
+    current_query  = query
+    best_coverage  = 0.0
+    final_decision = "MAX_ITERS"
 
-    for q in queries:
-        if len(sources) >= max_fetch:
+    # ── Autoresearch loop ─────────────────────────────────────────────────────
+    for iteration in range(1, max_iters + 1):
+        iter_sources: List[Dict] = []
+
+        # 1. Search
+        try:
+            raw            = web.search(current_query)
+            candidate_urls = _extract_urls(raw)
+        except Exception as e:
+            iter_log.append({
+                "iter": iteration, "query": current_query,
+                "sources": 0, "coverage": best_coverage,
+                "decision": f"SEARCH_ERROR: {e}",
+            })
             break
-        try:
-            raw = web.search(q)
-            # web.search returns a text block — extract URLs from it
-            urls_found = []
-            for line in (raw or "").splitlines():
-                line = line.strip()
-                if line.startswith("http://") or line.startswith("https://"):
-                    urls_found.append(line)
-                elif "http" in line:
-                    # Try to pull URLs embedded in text
-                    import re
-                    found = re.findall(r'https?://[^\s\)"\']+', line)
-                    urls_found.extend(found)
-            for url in urls_found:
-                if url not in seen_urls and len(sources) < max_fetch:
-                    seen_urls.add(url)
-                    sources.append({"url": url, "query": q, "content": None})
-        except Exception as e:
-            sources.append({"url": None, "query": q, "content": f"search error: {e}"})
 
-    # If search returned no parseable URLs, keep the raw text as a source
-    if not sources:
-        try:
-            raw = web.search(query)
-            sources.append({"url": None, "query": query, "content": raw})
-        except Exception as e:
-            return f"❌ Research failed — web.search error: {e}"
+        # If search returned no parseable URLs, keep the raw text as a source
+        if not candidate_urls and not all_sources:
+            all_sources.append({"url": None, "content": raw, "iteration": iteration})
 
-    # ── 3. Fetch page content ──────────────────────────────────────────────────
-    for src in sources:
-        if src.get("url") and src["content"] is None:
-            try:
-                content = web.fetch(src["url"])
-                # Trim to keep context window manageable
-                src["content"] = (content or "")[:3000]
-            except Exception as e:
-                src["content"] = f"fetch error: {e}"
+        # 2. Fetch — skip already-seen URLs
+        for url in candidate_urls:
+            if url not in seen_urls and len(iter_sources) < sources_per_iter:
+                seen_urls.add(url)
+                try:
+                    content = web.fetch(url)
+                    iter_sources.append({
+                        "url":       url,
+                        "content":   (content or "")[:3000],
+                        "iteration": iteration,
+                    })
+                except Exception as e:
+                    iter_sources.append({
+                        "url":       url,
+                        "content":   f"fetch error: {e}",
+                        "iteration": iteration,
+                    })
 
-    # ── 4. Build structured output ─────────────────────────────────────────────
+        all_sources.extend(iter_sources)
+
+        # 3. Measure coverage — the single metric that drives all decisions
+        coverage = _score_coverage(query, all_sources)
+        missing  = _missing_terms(query, all_sources)
+        improved = coverage > best_coverage
+        best_coverage = max(best_coverage, coverage)
+
+        # 4. Keep / refine / stop  (mirrors autoresearch keep-or-revert logic)
+        if coverage >= COVERAGE_THRESHOLD:
+            decision       = "CONVERGED"
+            final_decision = "CONVERGED"
+        elif not improved and iteration > 1:
+            decision       = "NO_IMPROVEMENT — stopping early"
+            final_decision = "NO_IMPROVEMENT"
+        elif iteration == max_iters:
+            decision       = "MAX_ITERS"
+            final_decision = "MAX_ITERS"
+        else:
+            next_query = _refine_query(query, iteration, missing)
+            decision   = f"REFINE → \"{next_query}\""
+
+        iter_log.append({
+            "iter":     iteration,
+            "query":    current_query,
+            "sources":  len(iter_sources),
+            "total":    len(all_sources),
+            "coverage": coverage,
+            "decision": decision,
+            "missing":  missing[:5],
+        })
+
+        if final_decision in ("CONVERGED", "NO_IMPROVEMENT"):
+            break
+        if decision.startswith("REFINE"):
+            current_query = _refine_query(query, iteration, missing)
+
+    # ── Build report ──────────────────────────────────────────────────────────
+    conv_marker = (
+        "✅ converged" if final_decision == "CONVERGED"
+        else f"⚠️ {final_decision.lower().replace('_', ' ')}"
+    )
     lines = [
         f"📚 Research: {query}",
-        f"   Depth: {depth}  |  Sources fetched: {len(sources)}  |  {date_label}",
+        f"   {date_label} | {len(iter_log)} iteration(s) | "
+        f"coverage: {best_coverage:.0%} | {conv_marker}",
         "=" * 60,
+        "",
+        "── Iteration Log ──────────────────────────────────────────",
     ]
+    for e in iter_log:
+        status = (
+            "✅" if e["coverage"] >= COVERAGE_THRESHOLD
+            else ("🔄" if "REFINE" in e["decision"] else "—")
+        )
+        lines.append(
+            f"  iter {e['iter']} | cov {e['coverage']:.0%} | "
+            f"sources +{e['sources']} (total {e['total']}) | {status} {e['decision']}"
+        )
+        if e.get("missing"):
+            lines.append(f"           missing: {e['missing']}")
 
-    for i, src in enumerate(sources, 1):
-        lines.append(f"\n[Source {i}] {src.get('url') or '(search result)'}")
+    lines += ["", "── Sources ────────────────────────────────────────────────"]
+    for i, src in enumerate(all_sources, 1):
+        lines.append(
+            f"\n[{i}] iter {src.get('iteration', '?')} — {src.get('url') or '(search result)'}"
+        )
         content = src.get("content") or ""
         if content:
-            # Show first ~800 chars — enough to extract key info
             preview = content.strip()[:800]
             if len(content) > 800:
-                preview += f"\n... [{len(content) - 800} more chars]"
+                preview += f"\n  ... [{len(content) - 800} more chars truncated]"
             lines.append(preview)
-        lines.append("")
 
-    lines.append("=" * 60)
-    lines.append(f"Sources: {len(sources)} | Query: {query}")
-
+    lines += [
+        "",
+        "=" * 60,
+        f"Final coverage: {best_coverage:.0%} | Sources: {len(all_sources)} | Query: {query}",
+    ]
     result_text = "\n".join(lines)
 
-    # ── 5. Save to notes ───────────────────────────────────────────────────────
+    # ── Save to notes ─────────────────────────────────────────────────────────
     save_path = None
     if save:
         try:
@@ -263,13 +398,16 @@ def research(query: str, depth: str = "quick", save=True) -> str:
             save_path = f"(save failed: {e})"
 
     _log({
-        "timestamp":    timestamp,
-        "loop":         "research",
-        "outcome":      "RESEARCH",
-        "query":        query,
-        "depth":        depth,
-        "sources_found": len(sources),
-        "saved_as":     save_path,
+        "timestamp":      timestamp,
+        "loop":           "research",
+        "outcome":        "RESEARCH",
+        "query":          query,
+        "depth":          depth,
+        "iterations":     len(iter_log),
+        "final_coverage": best_coverage,
+        "converged":      final_decision == "CONVERGED",
+        "sources_found":  len(all_sources),
+        "saved_as":       save_path,
     })
 
     footer = f"\n💾 Saved to notes: \"{save_path}\"" if save_path else ""
