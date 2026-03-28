@@ -27,7 +27,8 @@ NAME = "self_improvement"  # Must match filename: self_improvement.py
 DOC = (
     "Self-healing and learning: analyze skills, record mistakes, auto-fix code, prevent repeat errors. "
     "Returns: audit(skill_name)→health report with issues; "
-    "fix(skill_name, issue_type, line_number)→apply fix at line (use 'all' to fix every occurrence at once); "
+    "fix(skill_name, issue_type, line_number)→apply fix at line (use 'all' to fix every occurrence); always runs verify_skill() after — reports evidence before claiming success; "
+    "verify_skill(skill_name)→run syntax+compile+metadata checks and return pass/fail evidence — call before declaring any fix complete; "
     "daily_review(skill_name?)→scan skill(s), summarize lessons learned, surface recurring patterns; "
     "record_mistake(skill, error_type, error_msg)→save lesson to lessons.jsonl; "
     "report()→system-wide improvement summary with top recurring issues."
@@ -390,36 +391,58 @@ def generate_patch(skill_name: str, issue_type: str, issue_line: int) -> Dict:
         "requires_review": issue_type not in ["bare_except", "missing_timeout"]
     }
 
+# ============================================================================
+# VERIFICATION GATE (superpowers: verification-before-completion)
+# Evidence before claims — no fix is complete without passing verification.
+# ============================================================================
+
+def _verify_syntax(source_code: str, skill_name: str) -> Dict:
+    """Parse and compile source_code. Returns {"ok": True} or {"ok": False, "error": ...}."""
+    try:
+        ast.parse(source_code)
+        compile(source_code, f"{skill_name}.py", "exec")
+        return {"ok": True}
+    except SyntaxError as e:
+        return {"ok": False, "error": f"SyntaxError at line {e.lineno}: {e.msg}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
-    """Apply a generated patch to the skill file."""
+    """Apply a generated patch to the skill file.
+
+    Verification gate: the patched source is parsed and compiled BEFORE the file
+    is written. If the result would be syntactically invalid the write is aborted
+    and the original file is left untouched.
+    """
     if patch.get("error"):
         return patch
-    
+
     path = SKILLS_DIR / f"{skill_name}.py"
     if not path.exists():
         path = CORE_SKILLS_DIR / f"{skill_name}.py"
         if not path.exists():
             return {"error": f"Skill '{skill_name}' not found"}
-    
+
     backup_path = None
-    
+
     if backup:
         try:
             backup_path = path.with_suffix(path.suffix + f".backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}")
             backup_path.write_text(path.read_text(encoding='utf-8'), encoding='utf-8')
         except (IOError, OSError):
             pass
-    
+
     try:
         lines = path.read_text(encoding='utf-8').split('\n')
     except (IOError, OSError) as e:
         return {"error": f"Could not read {skill_name}.py: {e}"}
-    
+
     line_idx = patch["line"] - 1
-    
+
     if line_idx < 0 or line_idx >= len(lines):
         return {"error": "Invalid line number in patch"}
-    
+
     if patch.get("proposed_fix"):
         if '\n' in patch["proposed_fix"]:
             indent = len(lines[line_idx]) - len(lines[line_idx].lstrip())
@@ -427,25 +450,44 @@ def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
             lines[line_idx:line_idx+1] = fix_lines
         else:
             lines[line_idx] = patch["proposed_fix"]
-    
+
+    # ── VERIFICATION GATE: check before writing ────────────────────────────────
+    new_source = '\n'.join(lines)
+    syntax_check = _verify_syntax(new_source, skill_name)
+    if not syntax_check["ok"]:
+        # Delete the backup we just created — nothing was deployed
+        if backup_path and backup_path.exists():
+            try:
+                backup_path.unlink()
+            except OSError:
+                pass
+        return {
+            "error": f"Patch aborted — would introduce syntax error: {syntax_check['error']}",
+            "original_preserved": True,
+            "patch_applied": False,
+            "verification": "FAILED",
+        }
+    # ── END VERIFICATION GATE ──────────────────────────────────────────────────
+
     try:
-        path.write_text('\n'.join(lines), encoding='utf-8')
+        path.write_text(new_source, encoding='utf-8')
     except (IOError, OSError) as e:
         return {"error": f"Could not write to {skill_name}.py: {e}"}
-    
+
     record_mistake(
         skill_name=skill_name,
         error_type=patch["issue_type"],
         error_msg=patch.get("original", ""),
         fix_applied=patch.get("proposed_fix", "")
     )
-    
+
     return {
         "success": True,
         "skill": skill_name,
         "patch_applied": patch["issue_type"],
         "backup_created": backup_path.name if backup_path else None,
-        "message": f"✅ Applied fix for {patch['issue_type']} in {skill_name}"
+        "verification": "PASSED",
+        "message": f"✅ Applied fix for {patch['issue_type']} in {skill_name} [verified]",
     }
 
 # ============================================================================
@@ -545,6 +587,57 @@ def learn_from_feedback(skill_name: str, feedback: str, was_helpful: bool) -> st
 # MAIN SKILL FUNCTIONS (User-facing - MUST be at module level)
 # ============================================================================
 
+def verify_skill(skill_name: str) -> str:
+    """Run verification checks on a skill and report evidence of its state.
+
+    Superpowers rule: evidence before claims — run this before declaring a fix complete.
+    Checks:
+      1. File is readable
+      2. Source parses as valid Python (ast.parse)
+      3. Source compiles without errors (compile)
+      4. Required skill metadata (NAME, DOC) is present
+    Returns a pass/fail verdict with specific evidence, not assumptions.
+    """
+    path = SKILLS_DIR / f"{skill_name}.py"
+    if not path.exists():
+        path = CORE_SKILLS_DIR / f"{skill_name}.py"
+        if not path.exists():
+            return f"❌ VERIFICATION FAILED: skill '{skill_name}' not found in dynamic or core directories"
+
+    try:
+        source = path.read_text(encoding='utf-8')
+    except (IOError, OSError) as e:
+        return f"❌ VERIFICATION FAILED: could not read {skill_name}.py — {e}"
+
+    syntax_check = _verify_syntax(source, skill_name)
+    if not syntax_check["ok"]:
+        return (
+            f"❌ VERIFICATION FAILED: {skill_name}.py has a syntax/compile error\n"
+            f"   {syntax_check['error']}\n"
+            f"⚠️  This file may be broken — restore from .backup.* before using."
+        )
+
+    issues = []
+    if "NAME = " not in source:
+        issues.append("missing NAME metadata")
+    if "DOC = " not in source:
+        issues.append("missing DOC metadata")
+
+    if issues:
+        return (
+            f"⚠️  VERIFICATION PARTIAL: {skill_name}.py compiles OK but has issues:\n"
+            + "\n".join(f"   • {i}" for i in issues)
+        )
+
+    line_count = source.count('\n') + 1
+    return (
+        f"✅ VERIFICATION PASSED: {skill_name}.py\n"
+        f"   • Syntax  : valid (ast.parse + compile)\n"
+        f"   • Metadata: NAME and DOC present\n"
+        f"   • Lines   : {line_count}"
+    )
+
+
 def audit(skill_name: str) -> str:
     """Analyze a skill and return health report."""
     return get_skill_health_report(skill_name)
@@ -568,7 +661,10 @@ def _fix_all(skill_name: str, issue_type: str) -> str:
             skipped.append(f"  Line {issue['line']}: {patch['error']}")
         elif patch.get("safe_to_apply"):
             r = apply_patch(skill_name, patch)
-            results.append(f"  Line {issue['line']}: {r.get('message', '⚠️ applied')}")
+            if r.get("error"):
+                skipped.append(f"  Line {issue['line']}: {r['error']}")
+            else:
+                results.append(f"  Line {issue['line']}: {r.get('message', '⚠️ applied')}")
         else:
             skipped.append(f"  Line {issue['line']}: requires manual review — {patch.get('note', '')}")
 
@@ -577,11 +673,21 @@ def _fix_all(skill_name: str, issue_type: str) -> str:
         summary += "\n" + "\n".join(results)
     if skipped:
         summary += "\n⚠️ Skipped:\n" + "\n".join(skipped)
+
+    # ── VERIFICATION GATE: evidence before claims ──────────────────────────────
+    if results:
+        verification = verify_skill(skill_name)
+        summary += f"\n\n{verification}"
+
     return summary
 
 
 def fix(skill_name: str, issue_type: str, line_number: str) -> str:
-    """Auto-fix a specific issue in a skill. Pass line_number='all' to fix every occurrence."""
+    """Auto-fix a specific issue in a skill. Pass line_number='all' to fix every occurrence.
+
+    Always runs verify_skill() after applying a fix — result includes verification
+    evidence so the agent cannot claim success without seeing passing output.
+    """
     if str(line_number).strip().lower() == "all":
         return _fix_all(skill_name, issue_type)
 
@@ -596,7 +702,13 @@ def fix(skill_name: str, issue_type: str, line_number: str) -> str:
         return f"⚠️ Manual review needed:\n{json.dumps(patch, indent=2)}"
 
     result = apply_patch(skill_name, patch)
-    return result.get("message", json.dumps(result, indent=2))
+
+    if result.get("error"):
+        return f"❌ Fix failed: {result['error']}"
+
+    # ── VERIFICATION GATE: evidence before claims ──────────────────────────────
+    verification = verify_skill(skill_name)
+    return f"{result.get('message', '✅ Patch applied')}\n\n{verification}"
 
 def prevent(skill_name: str, error_type: str) -> str:
     """Check if we've learned a fix for this error type and apply it proactively."""
@@ -761,7 +873,8 @@ def status() -> str:
         "",
         "Available functions:",
         "  • audit(skill_name)                          - Analyze code health",
-        "  • fix(skill_name, issue_type, line_number)   - Auto-apply fix (use 'all' to fix every occurrence)",
+        "  • fix(skill_name, issue_type, line_number)   - Auto-apply fix (use 'all' to fix every occurrence); always verifies after",
+        "  • verify_skill(skill_name)                   - Syntax+compile+metadata check — call before claiming a fix is done",
         "  • daily_review(skill_name?)                  - Daily learning cycle: scan + surface recurring patterns",
         "  • prevent(skill_name, error_type)            - Check for learned fixes",
         "  • report()                                   - System-wide improvement summary",
@@ -793,6 +906,7 @@ __all__ = [
     "DOC",
     "audit",
     "fix",
+    "verify_skill",
     "daily_review",
     "prevent",
     "report",
