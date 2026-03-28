@@ -136,7 +136,7 @@ def _import_skill(module_name: str):
 
 # ── General-purpose research ───────────────────────────────────────────────────
 
-def research(query: str, depth: str = "quick", save: bool = True) -> str:
+def research(query: str, depth: str = "quick", save=True) -> str:
     """
     General-purpose web research on any topic.
 
@@ -165,6 +165,10 @@ def research(query: str, depth: str = "quick", save: bool = True) -> str:
         web = _import_skill("web")
     except ImportError as e:
         return f"❌ web skill not available: {e}"
+
+    # Coerce types — Trinity dispatcher passes all args as strings
+    depth = str(depth).strip().lower()
+    save  = str(save).strip().lower() not in ("false", "0", "no", "")
 
     timestamp  = datetime.now().isoformat()
     date_label = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -389,7 +393,7 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
 
 # ── Core skill suggestion system ───────────────────────────────────────────────
 
-def suggest_core(max_skills: int = 30) -> str:
+def suggest_core(max_skills=30) -> str:
     """
     Audit ALL core skills and save proposed patches to memory for your review.
     No files are modified. You approve each suggestion with apply_suggestion().
@@ -409,6 +413,7 @@ def suggest_core(max_skills: int = 30) -> str:
     except ImportError as e:
         return f"❌ {e}"
 
+    max_skills = int(max_skills)  # dispatcher passes args as strings
     core_files = sorted(
         p for p in SKILLS_CORE_DIR.glob("*.py") if not p.name.startswith("_")
     )
@@ -681,8 +686,9 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
 
 # ── Individual loops ───────────────────────────────────────────────────────────
 
-def _loop_ast_audit(max_experiments: int = 10) -> str:
+def _loop_ast_audit(max_experiments=10) -> str:
     """Loop 1 — auto-fix bare_except & missing_timeout in DYNAMIC skills."""
+    max_experiments = int(max_experiments)
     try:
         si = _import_skill("self_improvement")
     except ImportError as e:
@@ -716,8 +722,9 @@ def _loop_ast_audit(max_experiments: int = 10) -> str:
     return f"🔬 ast_audit ({count} experiments):\n" + "\n".join(results)
 
 
-def _loop_error_reduce(max_experiments: int = 10) -> str:
+def _loop_error_reduce(max_experiments=10) -> str:
     """Loop 2 — target the most-frequent error pattern in DYNAMIC skills."""
+    max_experiments = int(max_experiments)
     try:
         si = _import_skill("self_improvement")
     except ImportError as e:
@@ -783,7 +790,7 @@ def _loop_daily_review() -> str:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def run_loop(loop_name: str, max_experiments: int = 10) -> str:
+def run_loop(loop_name: str, max_experiments=10) -> str:
     """
     Run a single named improvement loop.
 
@@ -794,6 +801,7 @@ def run_loop(loop_name: str, max_experiments: int = 10) -> str:
     Returns:
         Full summary of this loop's run.
     """
+    max_experiments = int(max_experiments)
     _loops = {
         "ast_audit":    lambda: _loop_ast_audit(max_experiments),
         "error_reduce": lambda: _loop_error_reduce(max_experiments),
@@ -809,7 +817,7 @@ def run_loop(loop_name: str, max_experiments: int = 10) -> str:
     return f"{result}\n\n⏱ Loop '{loop_name}' finished in {elapsed:.1f}s"
 
 
-def run_all(max_experiments: int = 5) -> str:
+def run_all(max_experiments=5) -> str:
     """
     Run all loops in sequence. Designed for overnight autopilot.
 
@@ -825,6 +833,7 @@ def run_all(max_experiments: int = 5) -> str:
     Returns:
         Combined results from all loops.
     """
+    max_experiments = int(max_experiments)
     start   = time.time()
     divider = "=" * 52
     results = [f"🤖 AutoImprove started — {datetime.now().strftime('%Y-%m-%d %H:%M')}"]
@@ -840,7 +849,7 @@ def run_all(max_experiments: int = 5) -> str:
     return "\n".join(results)
 
 
-def schedule_nightly(run_time: str = "2am", max_experiments: int = 5) -> str:
+def schedule_nightly(run_time: str = "2am", max_experiments=5) -> str:
     """
     Put all improvement loops on autopilot — schedules run_all() every night.
 
@@ -851,6 +860,7 @@ def schedule_nightly(run_time: str = "2am", max_experiments: int = 5) -> str:
     Returns:
         Confirmation from scheduler.
     """
+    max_experiments = int(max_experiments)
     try:
         sched = _import_skill("scheduler")
     except ImportError as e:
@@ -875,13 +885,14 @@ def schedule_nightly(run_time: str = "2am", max_experiments: int = 5) -> str:
     )
 
 
-def report(days: int = 7) -> str:
+def report(days=7) -> str:
     """
     Show improvement history for the last N days.
 
     Args:
         days: Look-back window (default 7)
     """
+    days    = int(days)
     entries = _load_log(days)
     if not entries:
         return (
