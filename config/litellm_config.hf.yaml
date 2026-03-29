@@ -1,3 +1,9 @@
+general_settings:
+  # Disable all database / spend-tracking features so LiteLLM can start
+  # without a Prisma / PostgreSQL setup (required on Hugging Face Spaces).
+  disable_spend_logs: true
+  store_model_in_db: false
+
 model_list:
   # Default model — user must set their own API key via the Trinity settings UI.
   # The placeholder key allows LiteLLM to start without crashing on Hugging Face Spaces.
