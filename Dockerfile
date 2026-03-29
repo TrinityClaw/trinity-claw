@@ -33,8 +33,8 @@ COPY config/  /app/config/
 COPY memory/  /app/memory/
 
 # ── Service configs ───────────────────────────────────────────────────────────
-COPY nginx.hf.conf      /etc/nginx/nginx.conf
-COPY supervisord.conf   /etc/supervisor/conf.d/supervisord.conf
+COPY nginx.hf.conf    /etc/nginx/nginx.conf
+COPY supervisord.conf /app/supervisord.conf
 
 # ── Runtime directories ───────────────────────────────────────────────────────
 RUN mkdir -p /data/chroma /tmp/nginx \
@@ -49,4 +49,4 @@ EXPOSE 7860
 
 USER 1000
 
-CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
+CMD ["/usr/bin/supervisord", "-n", "-c", "/app/supervisord.conf"]
