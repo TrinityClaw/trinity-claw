@@ -35,6 +35,7 @@ COPY memory/  /app/memory/
 # ── Service configs ───────────────────────────────────────────────────────────
 COPY nginx.hf.conf    /etc/nginx/nginx.conf
 COPY supervisord.conf /app/supervisord.conf
+COPY proxy.py         /app/proxy.py
 
 # ── Runtime directories ───────────────────────────────────────────────────────
 RUN mkdir -p /data/chroma /tmp/nginx \
