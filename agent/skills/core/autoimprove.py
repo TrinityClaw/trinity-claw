@@ -42,7 +42,9 @@ DOC = (
     "apply_suggestion(skill_name, issue_type)→apply one approved suggestion to a core skill; "
     "schedule_nightly(run_time='2am')→put on autopilot; "
     "report(days=7)→improvement history; "
-    "status()→config and skills in scope."
+    "status()→config and skills in scope; "
+    "design(task)→design-first gate: scan existing skills, surface gaps, propose 2-3 approaches with trade-offs — call this before create_skill for any non-trivial build request; "
+    "write_spec(task, approach, details)→write approved spec to /app/memory/designs/YYYY-MM-DD-<slug>.md and return the path — call after user approves an approach, before writing any code."
 )
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -1172,6 +1174,157 @@ def status() -> str:
     ])
 
 
+# ── Design-first brainstorming ────────────────────────────────────────────────
+
+DESIGNS_DIR = MEMORY_DIR / "designs"
+
+
+def design(task: str) -> str:
+    """
+    Design-first gate: scan existing skills, surface gaps, propose 2-3 approaches.
+
+    Call this before create_skill for any non-trivial build request.
+    Returns a structured brief Trinity uses to ask the user ONE clarifying question
+    and propose concrete approaches with trade-offs.
+
+    Args:
+        task: Plain-language description of what the user wants built.
+
+    Returns:
+        Structured design brief: existing coverage, open questions, 2-3 approaches.
+    """
+    import os
+
+    task = str(task).strip()
+    if not task:
+        return "❌ task cannot be empty."
+
+    # Scan what skills already exist (core + dynamic)
+    core_skills, dynamic_skills = [], []
+    try:
+        core_skills = [
+            f[:-3] for f in os.listdir(str(SKILLS_CORE_DIR))
+            if f.endswith(".py") and not f.startswith("_")
+        ]
+    except Exception:
+        pass
+    try:
+        dynamic_skills = [
+            f[:-3] for f in os.listdir(str(SKILLS_DYNAMIC_DIR))
+            if f.endswith(".py") and not f.startswith("_")
+        ]
+    except Exception:
+        pass
+
+    all_skills = sorted(set(core_skills + dynamic_skills))
+
+    # Naive keyword overlap: find skills whose name shares words with the task
+    task_words = set(re.findall(r'\w+', task.lower())) - _RESEARCH_STOP
+    related = [s for s in all_skills if any(w in s.lower() for w in task_words)]
+
+    lines = [
+        "## Design Brief",
+        f"**Task:** {task}",
+        "",
+        "### Existing Coverage",
+    ]
+    if related:
+        lines.append(f"Potentially related skills: {', '.join(related)}")
+        lines.append("→ Check if one of these can be extended before creating a new skill.")
+    else:
+        lines.append("No directly related skills found — likely needs a new skill.")
+
+    lines += [
+        "",
+        "### Clarifying Question",
+        "Ask the user ONE of the following (pick the most critical unknown):",
+        "  A) What is the expected input format / data source?",
+        "  B) What should the output look like — string, file, notification?",
+        "  C) Will this run on demand or on a schedule?",
+        "  D) Are there auth/credential requirements?",
+        "  E) Should this extend an existing skill or be standalone?",
+        "",
+        "### Proposed Approaches",
+        "",
+        "**Option 1 — Extend existing skill** (if a related skill exists)",
+        "  + No new file, lower maintenance surface",
+        "  + Fits naturally into existing DOC string and __all__",
+        "  - May grow the skill beyond its original scope",
+        "  - Only viable if the overlap is genuine, not superficial",
+        "",
+        "**Option 2 — New dynamic skill** (default path)",
+        "  + Isolated, easy to audit and delete",
+        "  + Sandboxed by create_skill's AST + blocklist gates",
+        "  - Adds to skill count; name must be unique and descriptive",
+        "  - Must follow NAME/DOC/function convention",
+        "",
+        "**Option 3 — Compose from existing skills** (no new code)",
+        "  + Zero new files, zero security surface",
+        "  + Trinity orchestrates existing tools via chat instructions",
+        "  - Only works if existing skills already cover all sub-steps",
+        "  - Less reusable across sessions (no persistent callable)",
+        "",
+        "### Next Steps",
+        "1. Ask the user the ONE clarifying question above.",
+        "2. Once answered, pick an option and call `autoimprove.write_spec(task, option, details)`.",
+        "3. Show the spec to the user for approval.",
+        "4. Only then proceed to `create_skill` (if Option 1 or 2).",
+    ]
+
+    return "\n".join(lines)
+
+
+def write_spec(task: str, approach: str, details: str) -> str:
+    """
+    Write an approved design spec to /app/memory/designs/YYYY-MM-DD-<slug>.md.
+
+    Call this after the user has approved an approach from `design()`.
+    The spec becomes the single source of truth before any code is written.
+
+    Args:
+        task:     Plain-language task description (used for filename slug).
+        approach: Chosen approach label, e.g. "Option 2 — New dynamic skill".
+        details:  Free-form spec content: inputs, outputs, edge cases, constraints.
+
+    Returns:
+        Path of the written spec file, or an error message.
+    """
+    task = str(task).strip()
+    approach = str(approach).strip()
+    details = str(details).strip()
+
+    if not task or not details:
+        return "❌ task and details are required."
+
+    slug = re.sub(r'[^\w]+', '-', task.lower()).strip('-')[:50]
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{date_str}-{slug}.md"
+
+    content = "\n".join([
+        f"# Design Spec: {task}",
+        f"**Date:** {date_str}",
+        f"**Approach:** {approach}",
+        "",
+        "## Details",
+        details,
+        "",
+        "## Self-Review Checklist",
+        "- [ ] No placeholders (ALL_CAPS) left unfilled",
+        "- [ ] No contradictions between input and output descriptions",
+        "- [ ] Edge cases covered (empty input, auth failure, large data)",
+        "- [ ] Approach is the simplest that satisfies the requirement (YAGNI)",
+        "- [ ] User has explicitly approved this spec",
+    ])
+
+    try:
+        DESIGNS_DIR.mkdir(parents=True, exist_ok=True)
+        spec_path = DESIGNS_DIR / filename
+        spec_path.write_text(content, encoding="utf-8")
+        return f"✅ Spec saved to /app/memory/designs/{filename} — show this to the user for approval before writing any code."
+    except Exception as e:
+        return f"❌ Failed to write spec: {e}"
+
+
 # ── Export list ────────────────────────────────────────────────────────────────
 
 __all__ = [
@@ -1187,4 +1340,6 @@ __all__ = [
     "schedule_nightly",
     "report",
     "status",
+    "design",
+    "write_spec",
 ]
