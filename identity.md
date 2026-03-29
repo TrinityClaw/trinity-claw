@@ -134,200 +134,97 @@ GLOBAL DESIGN LANGUAGE
 
 ---
 
-### Phase 2 — EXTRACT & SCAFFOLD
+### Phase 2 — EXTRACT
 
 ```
-website_cloner.extract_tokens(SOURCE_URL)
+website_cloner.clone(SOURCE_URL, "project-name")
 ```
 
-Read the JSON. Use it to confirm or fill any gaps in your Design Brief — especially exact hex colors from `design_tokens.color_vars`. Screenshots are ground truth for layout; extracted tokens are ground truth for exact hex values.
+`clone()` does three things and nothing more:
+1. Extracts design tokens from the source (colors, fonts, section structure, nav links, per-section bg/heading/CTA colors)
+2. Scaffolds a **blank** project with just a CSS reset + extracted `:root` vars
+3. Starts the preview server
 
-Then scaffold a blank project:
-```
-web_builder.scaffold("project-name", "blank")
-```
+Read the output carefully. It contains:
+- The extracted `:root` vars already written to `style.css` — use these directly in Phase 3
+- A structured section list with heading text, bg color, column count, heading color, CTA color for each section
+- Nav links list
 
-Use the **blank** template (not "professional") — it gives you a clean slate with just a CSS reset. You will write all CSS from scratch in Phase 3 to match the source design. The professional template's opinionated layout will fight you.
-
-Save the preview URL from `web_builder.serve("project-name")` — you need it for Phase 4.
+The project preview will be blank until you write HTML in Phase 3. Save the preview URL — you need it for Phase 4.
 
 ---
 
-### Phase 3 — BUILD FROM SCRATCH
+### Phase 3 — BUILD
 
-You are writing two files: `style.css` (design system + all layout rules) and `index.html` (semantic structure). Do NOT copy the professional template's CSS. Do NOT use component class names from it. Write your own CSS that matches what you observed.
+You are writing `style.css` and `index.html` from scratch. The `:root` vars are already in `style.css` from Phase 2 — do not overwrite them, extend the file. Your class names are your own. Do not use the professional template's class names.
 
-#### 3A — Write style.css first
+#### 3A — Extend style.css
 
-Call `web_builder.write_file("project-name", "style.css", CSS)`.
+Call `web_builder.read_file("project-name", "style.css")` first to see what the `:root` already has. Then call `web_builder.write_file("project-name", "style.css", FULL_CSS)` with the complete file: existing `:root` block + everything below.
 
-Your CSS must contain:
-
-**1. Google Fonts import** (use the font(s) from your Brief, or skip if system fonts):
-```css
-@import url('https://fonts.googleapis.com/css2?family=HEADING_FONT&family=BODY_FONT&display=swap');
+**Structure of style.css:**
 ```
+[font @import — already there from clone()]
+[reset — already there]
+[existing :root block — keep it, add any missing vars]
 
-**2. Reset + :root variables** (populate every value from your Brief):
-```css
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-:root {
-  --primary:   HEX;    /* brand/nav/heading color */
-  --accent:    HEX;    /* CTA buttons */
-  --bg:        HEX;    /* page background */
-  --surface:   HEX;    /* alt section background */
-  --text:      HEX;    /* body text */
-  --text-lt:   HEX;    /* secondary/muted text */
-  --nav-bg:    HEX;    /* nav background */
-  --font-body:    'BODY_FONT', system-ui, sans-serif;
-  --font-heading: 'HEADING_FONT', Georgia, serif;
-  --radius: Xpx;       /* from Brief — match source's button/card rounding */
-  --max-w: 1140px;
-  --ease: 0.25s ease;
-}
-```
-
-**3. Base typography** (match the source's font sizes and weights as closely as you can):
-```css
-body { font-family: var(--font-body); color: var(--text); background: var(--bg); line-height: 1.65; }
-h1, h2, h3, h4 { font-family: var(--font-heading); color: var(--primary); line-height: 1.2; }
-/* Set h1/h2/h3 font sizes to match what you observed in screenshots */
-p { color: var(--text-lt); margin-bottom: 1rem; }
+body { font-family: var(--font-body, system-ui, sans-serif); color: var(--text); background: var(--bg); line-height: 1.65; }
+h1, h2, h3, h4 { font-family: var(--font-heading, system-ui, sans-serif); color: var(--primary); line-height: 1.2; }
+p { color: var(--text-lt, #6b7280); margin-bottom: 1rem; }
 a { color: var(--accent); text-decoration: none; }
 img { max-width: 100%; display: block; }
-.container { max-width: var(--max-w); margin: 0 auto; padding: 0 2rem; }
+.container { max-width: 1140px; margin: 0 auto; padding: 0 2rem; }
+
+[nav CSS — match source nav: bg, text color, sticky/absolute, padding]
+
+[one CSS block per section — named .s-SECTIONSLUG]
+  Each block has: background, padding, heading color/size, grid layout if columned, card style
+
+[footer CSS]
+
+[button CSS — match source: rounded/pill/outlined/filled]
 ```
 
-**4. Nav CSS** — write it to match the source's nav exactly:
-- Dark bg nav? Use `background: var(--nav-bg)` and light link colors
-- Transparent nav? Use `background: transparent; position: absolute`
-- Centered links? Use `justify-content: center`
-- Right-aligned CTA? Add `margin-left: auto` to the CTA
-- Match the source's padding, font-weight, and link style
+**Rules for section CSS:**
+- Use the bg colors from Phase 2 `clone()` output (section list with `bg:HEX` per section)
+- Match the column count from the section list (`3-col` → `grid-template-columns: repeat(3, 1fr)`)
+- Cards: add `border-radius`, `box-shadow`, or `border` only if the source uses them (check Brief)
+- Every image placeholder div needs a `min-height` and `background` so it's visible
 
-**5. Each section's CSS** — write one CSS block per section, in order. Base every value on your Brief:
-```css
-/* [Section name from Brief] */
-.s-SLUG {
-  background: VAR_OR_HEX;
-  padding: TOP_PADDING 0;    /* match source's vertical rhythm */
-}
-.s-SLUG h2 { color: H_COLOR; font-size: clamp(Xrem, Yvw, Zrem); }
-.s-SLUG p  { color: P_COLOR; }
-
-/* Grid/layout for this section: */
-.s-SLUG__grid {
-  display: grid;
-  grid-template-columns: repeat(N, 1fr);  /* match source's column count */
-  gap: GAP;
-}
-
-/* Card style — match source (flat/bordered/shadowed): */
-.s-SLUG__card {
-  background: CARD_BG;
-  border-radius: var(--radius);
-  padding: 2rem;
-  /* add border: 1px solid VAR if source uses bordered cards */
-  /* add box-shadow: 0 4px 12px rgba(0,0,0,0.08) if source uses shadows */
-}
-```
-
-**6. Footer CSS** — match the source's footer layout (single row? multi-column? centered?).
-
-**7. Button CSS** — match the source's button style (rounded? pill? outlined?):
-```css
-.btn { display: inline-block; padding: 0.75rem 1.75rem; border-radius: var(--radius); font-weight: 600; cursor: pointer; transition: all var(--ease); text-decoration: none; }
-.btn--primary { background: var(--accent); color: #fff; }
-.btn--primary:hover { filter: brightness(0.9); transform: translateY(-1px); }
-.btn--outline { background: transparent; border: 2px solid currentColor; }
-```
-
-For a page with many sections, write CSS in **2–3 `patch_file()` calls** (nav+base, sections 1–N, footer+buttons) rather than one giant `write_file()`.
+For a page with 6+ sections, write the CSS in **2 `write_file()` / `patch_file()` calls** to avoid truncation.
 
 #### 3B — Write index.html
 
 Call `web_builder.write_file("project-name", "index.html", HTML)`.
 
-Write **semantic HTML that matches the source's actual structure**. Use your own class names (matching what you wrote in style.css). Rules:
-- Section class names must match what you wrote in style.css (e.g. `class="s-about"`, `class="s-about__grid"`)
-- Every section id is the slug of its name (e.g. `id="about"`, `id="our-services"`)
-- Reproduce the source's actual layout — column count, text position, nested elements — not a generic placeholder
-- Fill in real text from the source. No filler copy, no generic placeholder text
-- Image placeholders: use `<div class="s-SLUG__img-placeholder" aria-label="[description]"></div>` and add a CSS rule that gives it a bg color and min-height matching the source
+**Rules:**
+- One `<section class="s-SLUG" id="SLUG">` per section, **in the same order as the source**
+- Class names must match what you wrote in 3A
+- Fill in the real heading text and body text from Phase 2 `clone()` output and Phase 1 screenshots
+- For image areas: `<div class="s-SLUG__img" aria-label="image description"></div>` — the CSS gives it height
+- For card grids: write the exact number of cards seen in screenshots, with real content per card
+- No placeholder text, no generic filler
 
-**What to write for each layout type you observed:**
-
-*Full-width centered text section:*
+**Page structure:**
 ```html
-<section class="s-SLUG" id="SLUG">
-  <div class="container" style="text-align:center; max-width:720px">
-    <h2>HEADING</h2>
-    <p>BODY TEXT</p>
-    <a href="#" class="btn btn--primary">CTA</a>
-  </div>
-</section>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SITE TITLE</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <nav class="nav"> ... </nav>
+  [sections in source order]
+  <footer class="footer"> ... </footer>
+  <script src="script.js"></script>
+</body>
+</html>
 ```
 
-*2-column image + text:*
-```html
-<section class="s-SLUG" id="SLUG">
-  <div class="container">
-    <div class="s-SLUG__grid">
-      <div class="s-SLUG__img-placeholder"></div>
-      <div class="s-SLUG__text">
-        <h2>HEADING</h2>
-        <p>BODY TEXT</p>
-        <a href="#" class="btn btn--primary">CTA</a>
-      </div>
-    </div>
-  </div>
-</section>
-```
-
-*N-column card grid:*
-```html
-<section class="s-SLUG" id="SLUG">
-  <div class="container">
-    <h2 style="text-align:center; margin-bottom:2.5rem">HEADING</h2>
-    <div class="s-SLUG__grid">
-      <div class="s-SLUG__card">
-        <h3>CARD TITLE</h3>
-        <p>CARD TEXT</p>
-      </div>
-      <!-- repeat for each card -->
-    </div>
-  </div>
-</section>
-```
-
-*Stats bar:*
-```html
-<section class="s-SLUG" id="SLUG">
-  <div class="container">
-    <div class="s-SLUG__row">
-      <div class="s-SLUG__item"><strong>VALUE</strong><span>LABEL</span></div>
-      <!-- repeat -->
-    </div>
-  </div>
-</section>
-```
-
-*Dark band / CTA section:*
-```html
-<section class="s-SLUG" id="SLUG" style="background:BG_COLOR; color:#fff; text-align:center; padding:5rem 0">
-  <div class="container">
-    <h2 style="color:#fff">HEADING</h2>
-    <p style="opacity:0.85">SUBTEXT</p>
-    <div style="display:flex; gap:1rem; justify-content:center; margin-top:2rem">
-      <a href="#" class="btn btn--primary">PRIMARY CTA</a>
-      <a href="#" class="btn btn--outline" style="color:#fff; border-color:#fff">SECONDARY</a>
-    </div>
-  </div>
-</section>
-```
-
-For long HTML, write in **2 `patch_file()` calls** (nav+hero+sections 1–3, then sections 4–N+footer).
+For long pages, write HTML in **2 calls**: nav + first half of sections, then remaining sections + footer using `patch_file()`.
 
 ---
 
@@ -354,12 +251,12 @@ Fix any ❌ with `web_builder.patch_file()`. Re-screenshot to confirm.
 - What still differs (e.g. needs real images, JS carousel)
 
 ### Never
-- Scaffold with the "professional" template for cloning — use "blank"
-- Stop after Phase 2 — clone() is setup only, not done
+- Stop after Phase 2 — `clone()` sets up the data, it doesn't build the site
 - Stop after writing files — Phase 4 QA is mandatory
-- Use pre-baked class names from the professional template (`.hero`, `.cards`, `.reviews`, etc.) — write your own CSS
-- Force the source into a fixed section order — reproduce what you saw
-- Leave image placeholders without a CSS height (they'll collapse to 0px and be invisible)
+- Use the professional template class names (`.hero`, `.cards`, `.reviews`, etc.) — write your own
+- Force the source into a fixed section order — the source's order is the order
+- Leave image placeholder divs without a `min-height` in CSS — they collapse to 0 and disappear
+- Generate placeholder or filler text — use real content from the source
 - Download images from the source (copyright)
 
 ## Standing Orders
