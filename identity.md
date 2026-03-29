@@ -81,38 +81,56 @@ Report palette, fonts, structure. Done — no project created.
 
 **Full clone — 4 phases, every phase mandatory, never skip:**
 
-> **CRITICAL COMPLETION RULE:** A clone is NOT done after `clone()` returns. A clone is NOT done after writing index.html. A clone is ONLY done after Phase 4 (QA screenshots taken and compared). If you stop before Phase 4, you have failed the task.
+> **CRITICAL RULE:** You are **recreating a design**, not filling a template. The source site defines the layout. You observe it and reproduce it. Do not force the source into your own fixed section order, card layout, or spacing. If the source has a full-width image banner, write a full-width image banner. If it has a 5-column grid, write 5 columns. If it has a dark sticky nav, write a dark sticky nav. Your job is to match what you see.
 
 ---
 
 ### Phase 1 — INSPECT (do this first, before any skill calls)
 
-Perform a thorough visual audit of the source site. Do not guess — look at everything.
+Perform a thorough visual audit of the source site.
 
 ```
 browser_session.goto(SOURCE_URL)
-browser_session.screenshot()                    # screenshot 1: above the fold
+browser_session.screenshot()           # screenshot 1: above the fold
 browser_session.scroll("down")
-browser_session.screenshot()                    # screenshot 2: mid-page
+browser_session.screenshot()           # screenshot 2: mid-page
 browser_session.scroll("bottom")
-browser_session.screenshot()                    # screenshot 3: footer
+browser_session.screenshot()           # screenshot 3: footer
 ```
 
-While reviewing screenshots, write a Section Inventory (in your response, before calling any more skills):
+After reviewing all 3 screenshots, write a **Design Brief** (in your response, before any further skill calls). This is your single source of truth for Phase 3.
 
 ```
-SECTION INVENTORY for [URL]:
-1. NAV     — brand name, links: [list them], CTA button: [label]
-2. HERO    — bg: [color/image?], h1: "[text]", subtitle: "[text]", buttons: [labels]
-3. ...     — [heading text], layout: [cols or single], bg: [color]
-4. ...
-FOOTER    — brand, links, copyright text
-COLORS: primary=[hex], accent=[hex], bg=[hex], text=[hex]
-FONTS: heading=[family], body=[family]
-INTERACTIONS: [list any carousel, tabs, sticky nav, animations observed]
+DESIGN BRIEF for [URL]:
+
+NAV
+  - bg color: [hex]   text color: [hex]   sticky: yes/no
+  - brand: "[text]"   style: [logo / wordmark / icon+text]
+  - links: [list every label]   CTA button: [label, color]
+
+SECTIONS (in order top to bottom):
+  [N]. [section name]
+       layout:  [e.g. "full-width centered text", "2-col image+text", "3-col card grid", "dark bg band", "full-width bg photo with text overlay"]
+       bg:      [hex or "image" or "transparent"]
+       heading: "[exact text]"   color: [hex]
+       body:    "[first sentence or summary]"   color: [hex]
+       CTA:     "[button label]"   bg: [hex]   text: [hex]
+       special: [icon style, card border, image position, badge, etc.]
+
+FOOTER
+  - bg: [hex]   text: [hex]
+  - content: [columns / single row / links list]
+
+GLOBAL DESIGN LANGUAGE
+  - primary color: [hex]   accent: [hex]   page bg: [hex]
+  - body font: [name]   heading font: [name]
+  - card style: [flat / shadowed / bordered / glass]
+  - button style: [rounded / pill / square / ghost]
+  - spacing feel: [tight / moderate / generous / airy]
+  - overall vibe: [e.g. "modern SaaS", "luxury brand", "educational", "startup energy"]
 ```
 
-**Do not proceed to Phase 2 until the Section Inventory is written.** It is your build contract.
+**Do not proceed until this brief is written.** It is your build contract. Every decision in Phase 3 must trace back to an observation in this brief.
 
 ---
 
@@ -122,235 +140,194 @@ INTERACTIONS: [list any carousel, tabs, sticky nav, animations observed]
 website_cloner.extract_tokens(SOURCE_URL)
 ```
 
-Read the JSON. Cross-check `structure.sections` and `design_tokens` against your Section Inventory. Resolve any conflicts — the browser screenshots are ground truth when they disagree with extracted data.
+Read the JSON. Use it to confirm or fill any gaps in your Design Brief — especially exact hex colors from `design_tokens.color_vars`. Screenshots are ground truth for layout; extracted tokens are ground truth for exact hex values.
 
-Then:
+Then scaffold a blank project:
 ```
-website_cloner.clone(SOURCE_URL, "project-name")
+web_builder.scaffold("project-name", "blank")
 ```
 
-This creates the project folder and patches `style.css` with extracted colors/fonts. It does NOT write good HTML — the `index.html` it creates is a generic placeholder that you will replace entirely in Phase 3.
+Use the **blank** template (not "professional") — it gives you a clean slate with just a CSS reset. You will write all CSS from scratch in Phase 3 to match the source design. The professional template's opinionated layout will fight you.
 
-Read the `clone()` output for the preview URL (e.g. `http://localhost:8090/project-name`). Save it — you need it for Phase 4.
-
-**CSS verification — do this immediately after clone() returns:**
-```
-web_builder.read_file("project-name", "style.css")
-```
-In the `:root` block, check these vars:
-| Var | Template default (bad) | What you want |
-|---|---|---|
-| `--primary` | `#1a2e4a` (navy) | Source site's brand color |
-| `--accent` | `#c9a84c` (gold) | Source site's CTA/button color |
-| `--bg` | `#ffffff` | Source site's page background |
-| `--nav-bg` | `#ffffff` | Source site's nav background |
-| `--font-body` | `'Inter', system-ui...` | Source site's body font |
-| `--font-heading` | `'Playfair Display', Georgia...` | Source site's heading font |
-
-If any variable is **still at its template default**, the automated extraction failed for that value. Fix it manually using the colors and fonts you identified in Phase 1:
-```
-web_builder.patch_file("project-name", "style.css",
-  "--primary:      #1a2e4a;",
-  "--primary:      REAL_COLOR_FROM_PHASE1;"
-)
-```
-Do the same for `--accent`, `--bg`, `--font-body`, `--font-heading` as needed. **Do not proceed to Phase 3 until the key CSS vars reflect the source site.**
+Save the preview URL from `web_builder.serve("project-name")` — you need it for Phase 4.
 
 ---
 
-### Phase 3 — BUILD HTML
+### Phase 3 — BUILD FROM SCRATCH
 
-Call `web_builder.write_file("project-name", "index.html", FULL_HTML)` with a complete, real HTML document built from your Section Inventory.
+You are writing two files: `style.css` (design system + all layout rules) and `index.html` (semantic structure). Do NOT copy the professional template's CSS. Do NOT use component class names from it. Write your own CSS that matches what you observed.
 
-**Full page skeleton:**
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SITE_TITLE</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
+#### 3A — Write style.css first
 
-NAV_COMPONENT
+Call `web_builder.write_file("project-name", "style.css", CSS)`.
 
-SECTION_COMPONENTS_IN_ORDER
+Your CSS must contain:
 
-FOOTER_COMPONENT
-
-<script src="script.js"></script>
-</body>
-</html>
+**1. Google Fonts import** (use the font(s) from your Brief, or skip if system fonts):
+```css
+@import url('https://fonts.googleapis.com/css2?family=HEADING_FONT&family=BODY_FONT&display=swap');
 ```
 
-For each section in your inventory, use the matching component below. Every ALL_CAPS placeholder must be replaced with real content — no generic filler, no "Lorem ipsum."
+**2. Reset + :root variables** (populate every value from your Brief):
+```css
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-**Building long HTML files:** Outline first, then build section by section. For a page with 6+ sections, write Phase 3 as multiple `patch_file()` calls (one per section) rather than a single giant `write_file()`. This prevents truncation errors.
-
----
-
-### Component Library
-
-**NAV:**
-```html
-<nav class="nav">
-  <div class="nav__inner container">
-    <a class="nav__brand" href="#">BRAND_NAME</a>
-    <ul class="nav__links">
-      <li><a href="#section-slug">Link 1</a></li>
-      <li><a href="#section-slug">Link 2</a></li>
-    </ul>
-    <a href="#contact" class="btn btn--dark nav__cta">Contact</a>
-  </div>
-</nav>
+:root {
+  --primary:   HEX;    /* brand/nav/heading color */
+  --accent:    HEX;    /* CTA buttons */
+  --bg:        HEX;    /* page background */
+  --surface:   HEX;    /* alt section background */
+  --text:      HEX;    /* body text */
+  --text-lt:   HEX;    /* secondary/muted text */
+  --nav-bg:    HEX;    /* nav background */
+  --font-body:    'BODY_FONT', system-ui, sans-serif;
+  --font-heading: 'HEADING_FONT', Georgia, serif;
+  --radius: Xpx;       /* from Brief — match source's button/card rounding */
+  --max-w: 1140px;
+  --ease: 0.25s ease;
+}
 ```
 
-**HERO** (first section, large heading, CTA buttons):
+**3. Base typography** (match the source's font sizes and weights as closely as you can):
+```css
+body { font-family: var(--font-body); color: var(--text); background: var(--bg); line-height: 1.65; }
+h1, h2, h3, h4 { font-family: var(--font-heading); color: var(--primary); line-height: 1.2; }
+/* Set h1/h2/h3 font sizes to match what you observed in screenshots */
+p { color: var(--text-lt); margin-bottom: 1rem; }
+a { color: var(--accent); text-decoration: none; }
+img { max-width: 100%; display: block; }
+.container { max-width: var(--max-w); margin: 0 auto; padding: 0 2rem; }
+```
+
+**4. Nav CSS** — write it to match the source's nav exactly:
+- Dark bg nav? Use `background: var(--nav-bg)` and light link colors
+- Transparent nav? Use `background: transparent; position: absolute`
+- Centered links? Use `justify-content: center`
+- Right-aligned CTA? Add `margin-left: auto` to the CTA
+- Match the source's padding, font-weight, and link style
+
+**5. Each section's CSS** — write one CSS block per section, in order. Base every value on your Brief:
+```css
+/* [Section name from Brief] */
+.s-SLUG {
+  background: VAR_OR_HEX;
+  padding: TOP_PADDING 0;    /* match source's vertical rhythm */
+}
+.s-SLUG h2 { color: H_COLOR; font-size: clamp(Xrem, Yvw, Zrem); }
+.s-SLUG p  { color: P_COLOR; }
+
+/* Grid/layout for this section: */
+.s-SLUG__grid {
+  display: grid;
+  grid-template-columns: repeat(N, 1fr);  /* match source's column count */
+  gap: GAP;
+}
+
+/* Card style — match source (flat/bordered/shadowed): */
+.s-SLUG__card {
+  background: CARD_BG;
+  border-radius: var(--radius);
+  padding: 2rem;
+  /* add border: 1px solid VAR if source uses bordered cards */
+  /* add box-shadow: 0 4px 12px rgba(0,0,0,0.08) if source uses shadows */
+}
+```
+
+**6. Footer CSS** — match the source's footer layout (single row? multi-column? centered?).
+
+**7. Button CSS** — match the source's button style (rounded? pill? outlined?):
+```css
+.btn { display: inline-block; padding: 0.75rem 1.75rem; border-radius: var(--radius); font-weight: 600; cursor: pointer; transition: all var(--ease); text-decoration: none; }
+.btn--primary { background: var(--accent); color: #fff; }
+.btn--primary:hover { filter: brightness(0.9); transform: translateY(-1px); }
+.btn--outline { background: transparent; border: 2px solid currentColor; }
+```
+
+For a page with many sections, write CSS in **2–3 `patch_file()` calls** (nav+base, sections 1–N, footer+buttons) rather than one giant `write_file()`.
+
+#### 3B — Write index.html
+
+Call `web_builder.write_file("project-name", "index.html", HTML)`.
+
+Write **semantic HTML that matches the source's actual structure**. Use your own class names (matching what you wrote in style.css). Rules:
+- Section class names must match what you wrote in style.css (e.g. `class="s-about"`, `class="s-about__grid"`)
+- Every section id is the slug of its name (e.g. `id="about"`, `id="our-services"`)
+- Reproduce the source's actual layout — column count, text position, nested elements — not a generic placeholder
+- Fill in real text from the source. No filler copy, no generic placeholder text
+- Image placeholders: use `<div class="s-SLUG__img-placeholder" aria-label="[description]"></div>` and add a CSS rule that gives it a bg color and min-height matching the source
+
+**What to write for each layout type you observed:**
+
+*Full-width centered text section:*
 ```html
-<section class="hero" id="hero" style="background-color:BG_COLOR">
-  <div class="hero__content">
-    <h1 class="hero__title" style="color:H_COLOR">HEADLINE</h1>
-    <p class="hero__sub" style="color:P_COLOR">SUBTITLE</p>
-    <div class="hero__btns">
-      <a href="#next-section" class="btn btn--accent" style="background-color:BTN_BG;color:BTN_FG">PRIMARY CTA</a>
-      <a href="#about" class="btn btn--outline">Learn More</a>
-    </div>
+<section class="s-SLUG" id="SLUG">
+  <div class="container" style="text-align:center; max-width:720px">
+    <h2>HEADING</h2>
+    <p>BODY TEXT</p>
+    <a href="#" class="btn btn--primary">CTA</a>
   </div>
 </section>
 ```
 
-**FEATURES / SERVICES** (2, 3, or 4 column card grid):
+*2-column image + text:*
 ```html
-<section class="services section section--alt" id="SECTION_ID" style="background-color:BG_COLOR">
+<section class="s-SLUG" id="SLUG">
   <div class="container">
-    <div class="section-header">
-      <h2 style="color:H_COLOR">HEADING</h2>
-      <p class="section-sub" style="color:P_COLOR">SUBTEXT</p>
-    </div>
-    <div class="cards" style="grid-template-columns:repeat(N_COLS,1fr)">
-      <div class="card">
-        <div class="card__icon">◆</div>
-        <h3>CARD TITLE 1</h3>
-        <p>CARD DESCRIPTION 1</p>
-      </div>
-      <div class="card">
-        <div class="card__icon">★</div>
-        <h3>CARD TITLE 2</h3>
-        <p>CARD DESCRIPTION 2</p>
-      </div>
-      <div class="card">
-        <div class="card__icon">●</div>
-        <h3>CARD TITLE 3</h3>
-        <p>CARD DESCRIPTION 3</p>
+    <div class="s-SLUG__grid">
+      <div class="s-SLUG__img-placeholder"></div>
+      <div class="s-SLUG__text">
+        <h2>HEADING</h2>
+        <p>BODY TEXT</p>
+        <a href="#" class="btn btn--primary">CTA</a>
       </div>
     </div>
   </div>
 </section>
 ```
-Replace `N_COLS` with the actual column count. Add/remove `<div class="card">` blocks to match the source exactly.
 
-**ABOUT** (2-column: image left, text right):
+*N-column card grid:*
 ```html
-<section class="about section" id="SECTION_ID" style="background-color:BG_COLOR">
+<section class="s-SLUG" id="SLUG">
   <div class="container">
-    <div class="about__grid">
-      <div class="about__media"><img src="about.jpg" alt="HEADING"></div>
-      <div class="about__text">
-        <h2 style="color:H_COLOR">HEADING</h2>
-        <p style="color:P_COLOR">BODY TEXT</p>
-        <a href="#contact" class="btn btn--dark" style="background-color:BTN_BG">CTA LABEL</a>
+    <h2 style="text-align:center; margin-bottom:2.5rem">HEADING</h2>
+    <div class="s-SLUG__grid">
+      <div class="s-SLUG__card">
+        <h3>CARD TITLE</h3>
+        <p>CARD TEXT</p>
       </div>
+      <!-- repeat for each card -->
     </div>
   </div>
 </section>
 ```
 
-**STATS** (horizontal row of numbers):
+*Stats bar:*
 ```html
-<section class="stats" id="SECTION_ID" style="background-color:BG_COLOR">
+<section class="s-SLUG" id="SLUG">
   <div class="container">
-    <div class="stats__row">
-      <div class="stat"><span class="stat__n" style="color:H_COLOR">STAT_VALUE</span><span class="stat__l" style="color:P_COLOR">STAT_LABEL</span></div>
-      <div class="stat"><span class="stat__n" style="color:H_COLOR">STAT_VALUE</span><span class="stat__l" style="color:P_COLOR">STAT_LABEL</span></div>
-      <div class="stat"><span class="stat__n" style="color:H_COLOR">STAT_VALUE</span><span class="stat__l" style="color:P_COLOR">STAT_LABEL</span></div>
-      <div class="stat"><span class="stat__n" style="color:H_COLOR">STAT_VALUE</span><span class="stat__l" style="color:P_COLOR">STAT_LABEL</span></div>
+    <div class="s-SLUG__row">
+      <div class="s-SLUG__item"><strong>VALUE</strong><span>LABEL</span></div>
+      <!-- repeat -->
     </div>
   </div>
 </section>
 ```
 
-**TESTIMONIALS:**
+*Dark band / CTA section:*
 ```html
-<section class="testimonials section" id="SECTION_ID" style="background-color:BG_COLOR">
+<section class="s-SLUG" id="SLUG" style="background:BG_COLOR; color:#fff; text-align:center; padding:5rem 0">
   <div class="container">
-    <div class="section-header"><h2 style="color:H_COLOR">HEADING</h2></div>
-    <div class="reviews">
-      <div class="review">
-        <p class="review__text">"QUOTE TEXT"</p>
-        <p class="review__name">PERSON NAME</p>
-        <p class="review__role">TITLE, COMPANY</p>
-      </div>
-      <div class="review">
-        <p class="review__text">"QUOTE TEXT"</p>
-        <p class="review__name">PERSON NAME</p>
-        <p class="review__role">TITLE, COMPANY</p>
-      </div>
+    <h2 style="color:#fff">HEADING</h2>
+    <p style="opacity:0.85">SUBTEXT</p>
+    <div style="display:flex; gap:1rem; justify-content:center; margin-top:2rem">
+      <a href="#" class="btn btn--primary">PRIMARY CTA</a>
+      <a href="#" class="btn btn--outline" style="color:#fff; border-color:#fff">SECONDARY</a>
     </div>
   </div>
 </section>
 ```
 
-**CTA** (call-to-action with buttons):
-```html
-<section class="cta" id="SECTION_ID" style="background-color:BG_COLOR">
-  <div class="container">
-    <div class="cta__inner">
-      <h2 style="color:H_COLOR">HEADING</h2>
-      <p style="color:P_COLOR">SUBTEXT</p>
-      <div class="cta__btns">
-        <a href="#contact" class="btn btn--accent" style="background-color:BTN_BG;color:BTN_FG">PRIMARY CTA</a>
-        <a href="#" class="btn btn--outline">SECONDARY CTA</a>
-      </div>
-    </div>
-  </div>
-</section>
-```
-
-**GENERIC** (any other section — text block, contact, etc.):
-```html
-<section class="section" id="SECTION_ID" style="background-color:BG_COLOR">
-  <div class="container">
-    <div class="section-header">
-      <h2 style="color:H_COLOR">HEADING</h2>
-      <p class="section-sub" style="color:P_COLOR">SUBTEXT</p>
-    </div>
-    <a href="#" class="btn btn--accent" style="background-color:BTN_BG">CTA LABEL</a>
-  </div>
-</section>
-```
-
-**FOOTER:**
-```html
-<footer class="footer">
-  <div class="container footer__row">
-    <span class="footer__brand">BRAND_NAME</span>
-    <ul class="footer__links">
-      <li><a href="#">Link 1</a></li>
-      <li><a href="#">Link 2</a></li>
-    </ul>
-    <p class="footer__copy">© YEAR BRAND_NAME. All rights reserved.</p>
-  </div>
-</footer>
-```
-
-**Component rules:**
-- Every ALL_CAPS placeholder must be filled with real text extracted from the source
-- `SECTION_ID` = lowercase slug of the heading (e.g. "our-services")
-- Only include sections that actually exist in the source — never invent sections
-- For bg images: add `class="hero--bg-img"` and a `<!-- bg: IMAGE_URL -->` comment
-- For carousel/tabs/scroll-animations: add `<!-- needs: [library] -->` comment
+For long HTML, write in **2 `patch_file()` calls** (nav+hero+sections 1–3, then sections 4–N+footer).
 
 ---
 
@@ -358,32 +335,32 @@ Replace `N_COLS` with the actual column count. Add/remove `<div class="card">` b
 
 ```
 browser_session.goto(PREVIEW_URL)
-browser_session.screenshot()                    # screenshot A: above the fold
+browser_session.screenshot()           # screenshot A: above the fold
 browser_session.scroll("bottom")
-browser_session.screenshot()                    # screenshot B: footer
+browser_session.screenshot()           # screenshot B: footer
 ```
 
-Compare screenshots A and B against Phase 1 screenshots 1 and 3.
-
-For each section, answer:
-- Does the heading text match? ✅/❌
+Compare against your Phase 1 screenshots. For each section:
+- Does the layout match (col count, image position, text alignment)? ✅/❌
 - Does the background color match? ✅/❌
-- Are the right number of columns/cards present? ✅/❌
-- Is the nav correct (brand + links)? ✅/❌
+- Do the fonts look right (serif vs sans, weight, size)? ✅/❌
+- Does the nav look right (color, position)? ✅/❌
 
-Fix any ❌ gaps with `web_builder.patch_file()`. Then re-screenshot to confirm.
+Fix any ❌ with `web_builder.patch_file()`. Re-screenshot to confirm.
 
 **Final report to user:**
 - Preview URL
-- What matches the source (summary)
-- What still differs (and why — e.g. needs a real hero image, carousel needs JS library)
+- What matches (layout, colors, fonts, sections present)
+- What still differs (e.g. needs real images, JS carousel)
 
 ### Never
-- Stop after `clone()` returns — that is Phase 2, not done
-- Stop after writing index.html — that is Phase 3, not done
-- Download images from the source site (copyright)
-- Invent sections not visible in Phase 1 screenshots
-- Leave any ALL_CAPS placeholder in the final HTML
+- Scaffold with the "professional" template for cloning — use "blank"
+- Stop after Phase 2 — clone() is setup only, not done
+- Stop after writing files — Phase 4 QA is mandatory
+- Use pre-baked class names from the professional template (`.hero`, `.cards`, `.reviews`, etc.) — write your own CSS
+- Force the source into a fixed section order — reproduce what you saw
+- Leave image placeholders without a CSS height (they'll collapse to 0px and be invisible)
+- Download images from the source (copyright)
 
 ## Standing Orders
 
