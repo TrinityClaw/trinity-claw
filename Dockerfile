@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY agent/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt \
-    && pip install --no-cache-dir "litellm[proxy]" \
+    && pip install --no-cache-dir "litellm[proxy]==1.40.14" \
     && playwright install chromium --with-deps
 
 # ── App source ────────────────────────────────────────────────────────────────
