@@ -37,8 +37,8 @@ DOC = (
     "run_experiment(skill_name, issue_type)→one autoresearch cycle on a dynamic skill; "
     "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core; "
     "run_all(max_experiments=5)→all loops in sequence (overnight autopilot); "
-    "suggest_core(max_skills=30)→audit core skills, save proposed patches to memory; "
-    "list_suggestions(status='pending')→show pending|applied|failed|all core suggestions; "
+    "suggest_core(skill_name=None, max_skills=30)→audit core skills, save proposed patches to memory; skill_name targets one skill (e.g. 'browser_session'); "
+    "list_suggestions(status='pending', skill_name=None)→show pending|applied|failed|all core suggestions; skill_name filters to one skill; "
     "apply_suggestion(skill_name, issue_type)→apply one approved suggestion to a core skill; "
     "schedule_nightly(run_time='2am')→put on autopilot; "
     "report(days=7)→improvement history; "
@@ -531,9 +531,9 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
 
 # ── Core skill suggestion system ───────────────────────────────────────────────
 
-def suggest_core(max_skills=30) -> str:
+def suggest_core(skill_name=None, max_skills=30) -> str:
     """
-    Audit ALL core skills and save proposed patches to memory for your review.
+    Audit core skills and save proposed patches to memory for your review.
     No files are modified. You approve each suggestion with apply_suggestion().
 
     Scans /app/skills/core/ for auto-fixable issues (bare_except, missing_timeout),
@@ -541,7 +541,9 @@ def suggest_core(max_skills=30) -> str:
     Already-pending suggestions are skipped (no duplicates).
 
     Args:
-        max_skills: How many core skills to scan (default 30 = all of them)
+        skill_name: Target a single skill by name (e.g. 'browser_session').
+                    Omit to scan all core skills.
+        max_skills: Max skills to scan when no skill_name given (default 30 = all)
 
     Returns:
         Summary of new suggestions found.
@@ -551,10 +553,27 @@ def suggest_core(max_skills=30) -> str:
     except ImportError as e:
         return f"❌ {e}"
 
-    max_skills = int(max_skills)  # dispatcher passes args as strings
-    core_files = sorted(
+    # Normalize args — dispatcher passes everything as strings
+    skill_name = str(skill_name).strip() if skill_name not in (None, "None", "", "null") else None
+    try:
+        max_skills = int(max_skills)
+    except (ValueError, TypeError):
+        max_skills = 30
+
+    all_core_files = sorted(
         p for p in SKILLS_CORE_DIR.glob("*.py") if not p.name.startswith("_")
     )
+
+    if skill_name:
+        core_files = [p for p in all_core_files if p.stem == skill_name]
+        if not core_files:
+            available = [p.stem for p in all_core_files]
+            return (
+                f"❌ Core skill '{skill_name}' not found.\n"
+                f"Available: {', '.join(available)}"
+            )
+    else:
+        core_files = all_core_files
     if not core_files:
         return "⚠️ No core skills found at /app/skills/core/"
 
@@ -571,7 +590,8 @@ def suggest_core(max_skills=30) -> str:
     skipped_dup     = 0
     scanned         = 0
 
-    for skill_path in core_files[:max_skills]:
+    scan_list = core_files if skill_name else core_files[:max_skills]
+    for skill_path in scan_list:
         skill_name = skill_path.stem
         scanned   += 1
 
@@ -648,16 +668,25 @@ def suggest_core(max_skills=30) -> str:
     return "\n".join(lines)
 
 
-def list_suggestions(status: str = "pending") -> str:
+def list_suggestions(status: str = "pending", skill_name: str = None) -> str:
     """
     Show core skill improvement suggestions saved to memory.
 
     Args:
-        status: Filter — 'pending' | 'applied' | 'failed' | 'all'
+        status:     Filter — 'pending' | 'applied' | 'failed' | 'all'
+        skill_name: Optional — show suggestions for one skill only (e.g. 'browser_session')
 
     Returns:
         Formatted list of suggestions.
     """
+    # Normalize — dispatcher may pass skill name as status arg
+    skill_name = str(skill_name).strip() if skill_name not in (None, "None", "", "null") else None
+    valid_statuses = ("pending", "applied", "failed", "all")
+    if status not in valid_statuses:
+        # User passed a skill name as first arg — treat it as skill_name filter
+        skill_name = status
+        status = "all"
+
     all_s = _load_suggestions()
     if not all_s:
         return (
@@ -666,11 +695,15 @@ def list_suggestions(status: str = "pending") -> str:
         )
 
     filtered = all_s if status == "all" else [s for s in all_s if s.get("status") == status]
+    if skill_name:
+        filtered = [s for s in filtered if s.get("skill") == skill_name]
     if not filtered:
-        return f"📭 No '{status}' suggestions. Try list_suggestions('all') to see everything."
+        skill_hint = f" for '{skill_name}'" if skill_name else ""
+        return f"📭 No '{status}' suggestions{skill_hint}. Try list_suggestions('all') to see everything."
 
     icons = {"pending": "⏳", "applied": "✅", "failed": "❌"}
-    lines = [f"📋 Core skill suggestions — {status} ({len(filtered)} of {len(all_s)} total):"]
+    skill_label = f" [{skill_name}]" if skill_name else ""
+    lines = [f"📋 Core skill suggestions{skill_label} — {status} ({len(filtered)} of {len(all_s)} total):"]
 
     for s in filtered:
         icon    = icons.get(s.get("status", "pending"), "?")
