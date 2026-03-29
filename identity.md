@@ -133,6 +133,29 @@ This creates the project folder and patches `style.css` with extracted colors/fo
 
 Read the `clone()` output for the preview URL (e.g. `http://localhost:8090/project-name`). Save it — you need it for Phase 4.
 
+**CSS verification — do this immediately after clone() returns:**
+```
+web_builder.read_file("project-name", "style.css")
+```
+In the `:root` block, check these vars:
+| Var | Template default (bad) | What you want |
+|---|---|---|
+| `--primary` | `#1a2e4a` (navy) | Source site's brand color |
+| `--accent` | `#c9a84c` (gold) | Source site's CTA/button color |
+| `--bg` | `#ffffff` | Source site's page background |
+| `--nav-bg` | `#ffffff` | Source site's nav background |
+| `--font-body` | `'Inter', system-ui...` | Source site's body font |
+| `--font-heading` | `'Playfair Display', Georgia...` | Source site's heading font |
+
+If any variable is **still at its template default**, the automated extraction failed for that value. Fix it manually using the colors and fonts you identified in Phase 1:
+```
+web_builder.patch_file("project-name", "style.css",
+  "--primary:      #1a2e4a;",
+  "--primary:      REAL_COLOR_FROM_PHASE1;"
+)
+```
+Do the same for `--accent`, `--bg`, `--font-body`, `--font-heading` as needed. **Do not proceed to Phase 3 until the key CSS vars reflect the source site.**
+
 ---
 
 ### Phase 3 — BUILD HTML
