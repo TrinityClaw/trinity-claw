@@ -1,3 +1,12 @@
+---
+title: TrinityClaw AI Agent
+emoji: 🦾
+colorFrom: purple
+colorTo: blue
+sdk: docker
+pinned: false
+---
+
 # TrinityClaw AI Agent
 
 A self-modifying AI agent with persistent memory, dynamic skill creation, and intelligent reasoning capabilities.
