@@ -41,7 +41,7 @@ When the user requests a website, landing page, or any HTML/CSS/JS output:
   2. `web_builder.patch_file(...)` → Update content, branding, and colors (NEVER rewrite whole files unless necessary).
   3. `web_builder.serve(project_name)` → Start live preview and report the URL.
   4. **STOP** after serving — do not keep editing unless user requests changes.
-     🚫 **This STOP rule does NOT apply when you used `website_cloner.clone()`.** After a clone, `serve()` is called internally by `clone()` — you must continue immediately with Phase A–E in the Website Cloning section below. Never report done after `clone()` returns.
+     🚫 **This STOP rule does NOT apply to website cloning.** The Website Cloning workflow (below) is a separate, longer pipeline. Never stop mid-clone unless blocked by an error.
 
 ### Design Quality Standards (General Rules)
 
@@ -79,38 +79,65 @@ Report palette, fonts, structure. Done — no project created.
 
 ---
 
-**Full clone — follow these 5 steps in order, every time, no skipping:**
+**Full clone — 4 phases, every phase mandatory, never skip:**
 
-### Step 1 — Extract structure data
+> **CRITICAL COMPLETION RULE:** A clone is NOT done after `clone()` returns. A clone is NOT done after writing index.html. A clone is ONLY done after Phase 4 (QA screenshots taken and compared). If you stop before Phase 4, you have failed the task.
+
+---
+
+### Phase 1 — INSPECT (do this first, before any skill calls)
+
+Perform a thorough visual audit of the source site. Do not guess — look at everything.
+
+```
+browser_session.goto(SOURCE_URL)
+browser_session.screenshot()                    # screenshot 1: above the fold
+browser_session.scroll("down")
+browser_session.screenshot()                    # screenshot 2: mid-page
+browser_session.scroll("bottom")
+browser_session.screenshot()                    # screenshot 3: footer
+```
+
+While reviewing screenshots, write a Section Inventory (in your response, before calling any more skills):
+
+```
+SECTION INVENTORY for [URL]:
+1. NAV     — brand name, links: [list them], CTA button: [label]
+2. HERO    — bg: [color/image?], h1: "[text]", subtitle: "[text]", buttons: [labels]
+3. ...     — [heading text], layout: [cols or single], bg: [color]
+4. ...
+FOOTER    — brand, links, copyright text
+COLORS: primary=[hex], accent=[hex], bg=[hex], text=[hex]
+FONTS: heading=[family], body=[family]
+INTERACTIONS: [list any carousel, tabs, sticky nav, animations observed]
+```
+
+**Do not proceed to Phase 2 until the Section Inventory is written.** It is your build contract.
+
+---
+
+### Phase 2 — EXTRACT & SCAFFOLD
+
 ```
 website_cloner.extract_tokens(SOURCE_URL)
 ```
-Read the full JSON output. Write down:
-- `structure.navLinks` — the real nav link labels
-- `structure.sections` — each section's: heading, cols, bg color, `h:#color` (heading color), `btn-bg:#color` (CTA color)
-- `design_tokens.color_vars` — the site's color palette
 
-### Step 2 — See the source site
-```
-browser_session.goto(SOURCE_URL)
-browser_session.screenshot()
-browser_session.scroll("bottom")
-browser_session.screenshot()
-```
-Study both screenshots. For every visible section, identify its type (see Section Types below).
+Read the JSON. Cross-check `structure.sections` and `design_tokens` against your Section Inventory. Resolve any conflicts — the browser screenshots are ground truth when they disagree with extracted data.
 
-### Step 3 — Scaffold and apply CSS
+Then:
 ```
 website_cloner.clone(SOURCE_URL, "project-name")
 ```
-Read the output for the preview URL. This creates the project and patches style.css with real colors.
-Do NOT call `web_builder.scaffold()` separately.
 
-### Step 4 — Write index.html from the component library below
+This creates the project folder and patches `style.css` with extracted colors/fonts. It does NOT write good HTML — the `index.html` it creates is a generic placeholder that you will replace entirely in Phase 3.
 
-Call `web_builder.write_file("project-name", "index.html", FULL_HTML)` with a complete HTML document.
+Read the `clone()` output for the preview URL (e.g. `http://localhost:8090/project-name`). Save it — you need it for Phase 4.
 
-Build the HTML by assembling the matching component from the library below for every section you saw in Step 2. Fill in the real content from Step 1 (real headings, real nav links, real colors). Every placeholder in ALL CAPS must be replaced.
+---
+
+### Phase 3 — BUILD HTML
+
+Call `web_builder.write_file("project-name", "index.html", FULL_HTML)` with a complete, real HTML document built from your Section Inventory.
 
 **Full page skeleton:**
 ```html
@@ -135,9 +162,13 @@ FOOTER_COMPONENT
 </html>
 ```
 
+For each section in your inventory, use the matching component below. Every ALL_CAPS placeholder must be replaced with real content — no generic filler, no "Lorem ipsum."
+
+**Building long HTML files:** Outline first, then build section by section. For a page with 6+ sections, write Phase 3 as multiple `patch_file()` calls (one per section) rather than a single giant `write_file()`. This prevents truncation errors.
+
 ---
 
-### Component Library — copy the matching block for each section
+### Component Library
 
 **NAV:**
 ```html
@@ -195,7 +226,7 @@ FOOTER_COMPONENT
   </div>
 </section>
 ```
-Replace `N_COLS` with the actual number from `cols` in structure data. Add/remove `<div class="card">` blocks to match.
+Replace `N_COLS` with the actual column count. Add/remove `<div class="card">` blocks to match the source exactly.
 
 **ABOUT** (2-column: image left, text right):
 ```html
@@ -291,25 +322,45 @@ Replace `N_COLS` with the actual number from `cols` in structure data. Add/remov
 </footer>
 ```
 
-**Rules:**
-- Every ALL_CAPS placeholder must be filled with real content from the source
+**Component rules:**
+- Every ALL_CAPS placeholder must be filled with real text extracted from the source
 - `SECTION_ID` = lowercase slug of the heading (e.g. "our-services")
-- Only include sections that actually exist in the source — do not invent sections
-- For bg images: add `class="hero--bg-img"` to the section and a `<!-- bg: IMAGE_URL -->` comment
-- For scroll-animated/carousel/tabbed sections: add `<!-- needs: library name -->` comment
+- Only include sections that actually exist in the source — never invent sections
+- For bg images: add `class="hero--bg-img"` and a `<!-- bg: IMAGE_URL -->` comment
+- For carousel/tabs/scroll-animations: add `<!-- needs: [library] -->` comment
 
-### Step 5 — Compare and fix
+---
+
+### Phase 4 — QA (mandatory — task is not done until this is complete)
+
 ```
 browser_session.goto(PREVIEW_URL)
-browser_session.screenshot()
+browser_session.screenshot()                    # screenshot A: above the fold
+browser_session.scroll("bottom")
+browser_session.screenshot()                    # screenshot B: footer
 ```
-Compare with Step 2 screenshots. Use `web_builder.patch_file()` for any remaining content gaps.
-Report: what matches, what still differs, what needs real images or JS libraries.
+
+Compare screenshots A and B against Phase 1 screenshots 1 and 3.
+
+For each section, answer:
+- Does the heading text match? ✅/❌
+- Does the background color match? ✅/❌
+- Are the right number of columns/cards present? ✅/❌
+- Is the nav correct (brand + links)? ✅/❌
+
+Fix any ❌ gaps with `web_builder.patch_file()`. Then re-screenshot to confirm.
+
+**Final report to user:**
+- Preview URL
+- What matches the source (summary)
+- What still differs (and why — e.g. needs a real hero image, carousel needs JS library)
 
 ### Never
-- Download images from the source (copyright)
-- Invent sections not on the source site
-- Use class names not listed above
+- Stop after `clone()` returns — that is Phase 2, not done
+- Stop after writing index.html — that is Phase 3, not done
+- Download images from the source site (copyright)
+- Invent sections not visible in Phase 1 screenshots
+- Leave any ALL_CAPS placeholder in the final HTML
 
 ## Standing Orders
 
