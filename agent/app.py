@@ -1728,6 +1728,45 @@ def version():
         sha = "unknown"
     return {"version": VERSION, "sha": sha}
 
+@app.get("/memory/inspect", dependencies=[Depends(verify_api_key)])
+def memory_inspect(limit: int = 20):
+    """Return the most recently stored ChromaDB entries so you can see what's in long-term memory."""
+    if not collection:
+        return {"error": "ChromaDB not connected"}
+    try:
+        result = collection.get(limit=limit, include=["documents", "metadatas"])
+        entries = []
+        for i, doc in enumerate(result.get("documents") or []):
+            meta = (result.get("metadatas") or [])[i] if result.get("metadatas") else {}
+            entries.append({"id": (result.get("ids") or [])[i], "type": meta.get("type"), "preview": doc[:200]})
+        return {"count": len(entries), "entries": entries}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/memory/clear", dependencies=[Depends(verify_api_key)])
+def memory_clear():
+    """Wipe the entire ChromaDB trinity_memory collection and recreate it empty."""
+    global collection, chroma_client
+    if not chroma_client:
+        return {"error": "ChromaDB not connected"}
+    try:
+        chroma_client.delete_collection("trinity_memory")
+        collection = chroma_client.get_or_create_collection(name="trinity_memory")
+        return {"success": True, "message": "ChromaDB collection cleared and recreated"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/memory/entry/{entry_id}", dependencies=[Depends(verify_api_key)])
+def memory_delete_entry(entry_id: str):
+    """Delete a single entry from ChromaDB by its ID."""
+    if not collection:
+        return {"error": "ChromaDB not connected"}
+    try:
+        collection.delete(ids=[entry_id])
+        return {"success": True, "deleted": entry_id}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/skills", dependencies=[Depends(verify_api_key)])
 def get_skills():
     """List available skills with detailed metadata."""
