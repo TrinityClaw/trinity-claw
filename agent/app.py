@@ -2076,23 +2076,37 @@ def transcribe(req: TranscribeRequest):
 @app.post("/chat")
 def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     _check_rate_limit(api_key)
-    # 1. Retrieve Memory from multiple sources
-    # Skip ChromaDB for short/conversational messages — embedding "hi" or "thanks"
-    # wastes ~500ms and injects irrelevant context that confuses small models.
+
+    # Load in-memory session history first — needed to decide whether ChromaDB is useful.
+    session_id = req.session_id or "default"
+    history = get_session_history(session_id)
+    print(f"📖 Session {session_id[:12]}... — {len(history) // 2} prior turn(s) in memory")
+
+    # 1. Retrieve long-term memory from ChromaDB.
+    # Skip entirely when:
+    #   a) Message is too short/conversational (embedding noise)
+    #   b) We already have an active session — the session IS the context. Injecting
+    #      semantically-similar-but-unrelated old answers causes the model to answer
+    #      the PREVIOUS question instead of the current one.
+    CHROMA_SIMILARITY_THRESHOLD = 0.35  # cosine distance; lower = more similar
+    CHROMA_SKIP_IF_TURNS = 2            # skip ChromaDB if session has >= this many turns
     chroma_context = ""
-    if collection and len(req.message.strip()) > 40:
+    active_turns = len([m for m in history if m.get("role") == "user"])
+    if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
         try:
-            memories = collection.query(query_texts=[req.message], n_results=3)
+            memories = collection.query(query_texts=[req.message], n_results=3,
+                                        include=["documents", "metadatas", "distances"])
             if memories['documents'] and memories['documents'][0]:
-                # Separate user queries from AI responses
-                user_queries = []
                 ai_responses = []
+                distances = memories.get('distances', [[]])[0]
 
                 for i, doc in enumerate(memories['documents'][0]):
                     meta = memories['metadatas'][0][i] if memories['metadatas'] else {}
-                    if meta.get('type') == 'user_query':
-                        user_queries.append(doc)
-                    else:
+                    dist = distances[i] if i < len(distances) else 1.0
+                    # Skip results that are not closely related to the current message.
+                    if dist > CHROMA_SIMILARITY_THRESHOLD:
+                        continue
+                    if meta.get('type') != 'user_query':
                         ai_responses.append(doc)
 
                 # Inject only AI responses/summaries — never raw user queries.
@@ -2101,14 +2115,11 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                 if ai_responses:
                     _safe_responses = [_sanitize_external_content(r, source="chromadb") for r in ai_responses[:2]]
                     chroma_context = "Relevant past context (what I previously answered on related topics): " + " | ".join(_safe_responses)
-                # user_queries intentionally excluded to prevent cross-task confusion
+                    print(f"🧠 ChromaDB injecting {len(ai_responses)} memory fragment(s) (dist<{CHROMA_SIMILARITY_THRESHOLD})")
+                else:
+                    print(f"🧠 ChromaDB: no sufficiently similar past answers (threshold {CHROMA_SIMILARITY_THRESHOLD})")
         except Exception as e:
             print(f"⚠️  ChromaDB query error: {e}")
-
-    # Load in-memory session history (replaces flat JSONL context injection)
-    session_id = req.session_id or "default"
-    history = get_session_history(session_id)
-    print(f"📖 Session {session_id[:12]}... — {len(history) // 2} prior turn(s) in memory")
 
     # 2. Build message content (vision support)
     # Resize first — NVIDIA NIM rejects large base64 payloads silently, causing hallucinations
@@ -2638,8 +2649,10 @@ Before invoking any skill, scan this list. If a past mistake applies, apply the 
 
 - Only use skills listed above in "YOUR TOOLS"
 - If skill not listed → check if web.search can answer it first → only then tell user it doesn't exist
-- Weather, news, prices, live facts → ALWAYS search immediately, no asking
-- NEVER answer real-time questions (prices, rates, scores, news) from your training data — your knowledge is outdated. Search first, always.
+- Weather, news, prices, sports scores, exchange rates → ALWAYS search immediately, no asking
+- NEVER answer real-time data (prices, rates, scores, current news) from your training data — always search first
+- Code repos, GitHub URLs, architecture questions, file analysis → READ or FETCH the content, do NOT treat as a real-time search task
+- When a user shares a URL and asks to analyze/compare/review it → fetch it directly and reason about it; do not web-search for something else
 - Keep responses short and clear
 - Ask one question at a time if confused
 {_local_model_reminder}"""
