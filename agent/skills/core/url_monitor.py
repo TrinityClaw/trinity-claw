@@ -166,7 +166,7 @@ class UrlMonitor:
                     if 'Last-Modified' in response.headers:
                         try:
                             last_modified = parsedate_to_datetime(response.headers['Last-Modified'])
-                        except:
+                        except Exception as e:
                             last_modified = datetime.now()
                     
                     response_time = time.time() - start_time
