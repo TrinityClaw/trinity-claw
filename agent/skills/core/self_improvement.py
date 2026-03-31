@@ -12,9 +12,11 @@ Features:
 """
 
 import ast
+import os
 import re
 import json
 import hashlib
+import requests as _requests
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -28,7 +30,7 @@ DOC = (
     "Self-healing and learning: analyze skills, record mistakes, auto-fix code, prevent repeat errors. "
     "Returns: audit(skill_name)→health report with issues; "
     "fix(skill_name, issue_type, line_number)→apply fix at line (use 'all' to fix every occurrence); always runs verify_skill() after — reports evidence before claiming success; "
-    "verify_skill(skill_name)→run syntax+compile+metadata checks and return pass/fail evidence — call before declaring any fix complete; "
+    "verify_skill(skill_name)→syntax+compile+metadata checks then a model-based VERDICT: PASS/FAIL/PARTIAL with execution trace evidence — call before declaring any fix complete; "
     "daily_review(skill_name?)→scan skill(s), summarize lessons learned, surface recurring patterns; "
     "record_mistake(skill, error_type, error_msg)→save lesson to lessons.jsonl; "
     "report()→system-wide improvement summary with top recurring issues."
@@ -584,6 +586,106 @@ def learn_from_feedback(skill_name: str, feedback: str, was_helpful: bool) -> st
     return f"{status} Future suggestions will be refined."
 
 # ============================================================================
+# VERDICT VERIFICATION (ported from Claude Code's verification agent pattern)
+# After syntax checks pass, a model call produces VERDICT: PASS/FAIL/PARTIAL.
+# The model must trace an actual execution path — "looks correct" is forbidden.
+# ============================================================================
+
+def _call_llm_verdict(prompt: str) -> str:
+    """Minimal single-turn LLM call for VERDICT checks. Respects MODEL_SOURCE."""
+    model_source = os.getenv("MODEL_SOURCE", "cloud")
+    if model_source == "local":
+        ollama_base = os.getenv("OLLAMA_API_BASE", "http://ollama:11434")
+        model = os.getenv("OLLAMA_MODEL", "llama3.2")
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": 0.0, "num_predict": 512},
+        }
+        resp = _requests.post(f"{ollama_base}/api/chat", json=payload, timeout=60)
+        resp.raise_for_status()
+        return resp.json().get("message", {}).get("content", "")
+    else:
+        litellm_base = os.getenv("LITELLM_API_BASE", "http://litellm:4000")
+        api_key = os.getenv("LITELLM_MASTER_KEY", "")
+        # Use a dedicated fast model for verdicts; fall back to DEFAULT_MODEL
+        model = os.getenv("VERDICT_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o-mini"))
+        headers = {"Authorization": f"Bearer {api_key}"}
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "max_tokens": 512,
+        }
+        resp = _requests.post(
+            f"{litellm_base}/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+
+def _verdict_check(skill_name: str, source: str) -> str:
+    """Ask the model to verify a skill and return VERDICT: PASS/FAIL/PARTIAL.
+
+    Rules enforced in the prompt (from Claude Code's verification agent):
+    - Must trace an actual execution path with a realistic input
+    - 'Looks correct' rationalizations are explicitly forbidden
+    - PARTIAL = works but has a named edge case bug
+    - FAIL = would raise on the happy path
+    - PASS = traced execution returns expected result
+    """
+    source_preview = source[:4000] + ("\n... [truncated]" if len(source) > 4000 else "")
+    prompt = f"""You are a strict verification agent for Python skill modules.
+
+TASK: Verify that skill '{skill_name}' is functionally correct.
+
+RULES:
+1. Return EXACTLY one of: VERDICT: PASS  /  VERDICT: FAIL  /  VERDICT: PARTIAL
+2. NEVER say "the code looks correct" — you MUST trace an actual execution path
+3. Pick the most important public function, choose a realistic input, execute it step by step mentally, show the result
+4. PARTIAL = compiles and mostly works but has a specific edge case bug you can name
+5. FAIL = broken in a way that would cause a runtime error on the happy path
+6. PASS = you traced execution and it returns the expected result with no obvious bugs
+
+SOURCE ({skill_name}.py):
+```python
+{source_preview}
+```
+
+Trace one function execution, then end your response with:
+VERDICT: PASS|FAIL|PARTIAL
+EVIDENCE: <one sentence — the specific trace result or failure reason, not "looks correct">"""
+
+    try:
+        response = _call_llm_verdict(prompt)
+    except Exception as e:
+        return f"⚠️  VERDICT skipped (LLM unavailable): {e}"
+
+    for line in response.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("VERDICT:"):
+            verdict_word = stripped.replace("VERDICT:", "").strip().upper().split()[0]
+            evidence = ""
+            for ev_line in response.splitlines():
+                if ev_line.strip().startswith("EVIDENCE:"):
+                    evidence = ev_line.strip().replace("EVIDENCE:", "").strip()
+                    break
+            evidence = evidence or "(no evidence provided)"
+            if verdict_word == "PASS":
+                return f"✅ VERDICT: PASS — {evidence}"
+            elif verdict_word == "PARTIAL":
+                return f"⚠️  VERDICT: PARTIAL — {evidence}"
+            elif verdict_word == "FAIL":
+                return f"❌ VERDICT: FAIL — {evidence}"
+
+    return f"⚠️  VERDICT unparseable — raw: {response[:300]}"
+
+
+# ============================================================================
 # MAIN SKILL FUNCTIONS (User-facing - MUST be at module level)
 # ============================================================================
 
@@ -630,11 +732,13 @@ def verify_skill(skill_name: str) -> str:
         )
 
     line_count = source.count('\n') + 1
+    verdict = _verdict_check(skill_name, source)
     return (
-        f"✅ VERIFICATION PASSED: {skill_name}.py\n"
+        f"✅ SYNTAX PASSED: {skill_name}.py\n"
         f"   • Syntax  : valid (ast.parse + compile)\n"
         f"   • Metadata: NAME and DOC present\n"
-        f"   • Lines   : {line_count}"
+        f"   • Lines   : {line_count}\n"
+        f"   • {verdict}"
     )
 
 
