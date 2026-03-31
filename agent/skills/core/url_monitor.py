@@ -24,6 +24,12 @@ DOC = (
     "tw_log_tweet()→str — record that a tweet was just posted (call right after browser_session.tweet()). "
     "Use these in scheduler prompts to build stateful Twitter automation without extra skills."
 )
+__all__ = [
+    "NAME", "DOC",
+    "add_url", "remove_url", "check_url_now", "check_all_urls",
+    "get_status_summary", "get_url_history", "get_recent_changes",
+    "tw_is_seen", "tw_mark_seen", "tw_last_tweet_time", "tw_log_tweet",
+]
 
 @dataclass
 class UrlStatus:
