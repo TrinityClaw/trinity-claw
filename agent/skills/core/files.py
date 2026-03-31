@@ -1,6 +1,10 @@
 import os
 import hashlib
+import json
 import logging
+import shutil
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 NAME = "files"
@@ -12,8 +16,12 @@ DOC = (
     "write(path, content)→confirmation string; append(path, content)→confirmation string; "
     "patch(path, old_text, new_text)→find-and-replace in a file; "
     "exists(path)→'yes' or 'no'; "
-    "size(path)→human-readable size; sha256(path)→hash string; tree(path)→recursive directory layout."
+    "size(path)→human-readable size; sha256(path)→hash string; tree(path)→recursive directory layout. "
+    "Checkpoint/rollback: checkpoint(path, label)→snapshot a file or dir before destructive ops, returns checkpoint_id; "
+    "restore(checkpoint_id)→rollback to a saved checkpoint; checkpoints()→list all saved checkpoints."
 )
+
+_CHECKPOINT_ROOT = Path("/app/memory/checkpoints")
 
 _APP        = Path("/app")
 _WRITE_ROOTS = (Path("/app/memory"), Path("/app/skills/dynamic"))
@@ -244,6 +252,137 @@ def tree(path: str = "/app") -> str:
         )
     except Exception as e:
         return f"Error: {e}"
+
+
+# ── CHECKPOINT / ROLLBACK ────────────────────────────────────────────────────
+
+def checkpoint(path: str, label: str = "") -> str:
+    """
+    Snapshot a file or directory before destructive operations.
+    Saves to /app/memory/checkpoints/<id>/ with a manifest.
+    Returns the checkpoint_id to pass to restore() if needed.
+    Call this before: delete, patch, write (overwrite), or any bulk file change.
+    """
+    try:
+        src = _read_path(path)
+        if not src.exists():
+            return f"❌ Cannot checkpoint — path not found: {path}"
+
+        checkpoint_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+        dest_dir = _CHECKPOINT_ROOT / checkpoint_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        dest = dest_dir / src.name
+        if src.is_dir():
+            shutil.copytree(src, dest)
+            size_bytes = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
+        else:
+            shutil.copy2(src, dest)
+            size_bytes = dest.stat().st_size
+
+        manifest = {
+            "checkpoint_id": checkpoint_id,
+            "created": datetime.now().isoformat(),
+            "label": label or "(no label)",
+            "original_path": str(src),
+            "is_dir": src.is_dir(),
+            "size_bytes": size_bytes,
+        }
+        (dest_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        return (
+            f"✅ Checkpoint saved: {checkpoint_id}\n"
+            f"   Source : {src}\n"
+            f"   Label  : {manifest['label']}\n"
+            f"   Size   : {size_bytes / 1024:.1f} KB\n"
+            f"   Restore: files.restore('{checkpoint_id}')"
+        )
+    except Exception as e:
+        return f"❌ Checkpoint failed: {e}"
+
+
+def restore(checkpoint_id: str) -> str:
+    """
+    Restore a file or directory from a previously saved checkpoint.
+    The original_path in the manifest must be within an allowed write root
+    (/app/memory/ or /app/skills/dynamic/).
+    """
+    try:
+        checkpoint_dir = _CHECKPOINT_ROOT / checkpoint_id
+        if not checkpoint_dir.exists():
+            return f"❌ Checkpoint not found: {checkpoint_id}"
+
+        manifest_path = checkpoint_dir / "manifest.json"
+        if not manifest_path.exists():
+            return f"❌ Checkpoint manifest missing in: {checkpoint_id}"
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        original_path = manifest["original_path"]
+
+        # Enforce write-root safety on restore target
+        dest = _write_path(original_path)
+
+        # Find the backed-up file/dir (everything in checkpoint_dir except manifest.json)
+        contents = [p for p in checkpoint_dir.iterdir() if p.name != "manifest.json"]
+        if not contents:
+            return f"❌ Checkpoint directory is empty: {checkpoint_id}"
+        src = contents[0]
+
+        if dest.exists():
+            if dest.is_dir():
+                shutil.rmtree(dest)
+            else:
+                dest.unlink()
+
+        if src.is_dir():
+            shutil.copytree(src, dest)
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+
+        return (
+            f"✅ Restored from checkpoint: {checkpoint_id}\n"
+            f"   Label    : {manifest.get('label', '(no label)')}\n"
+            f"   Saved at : {manifest.get('created', '?')}\n"
+            f"   Restored : {dest}"
+        )
+    except ValueError as e:
+        return f"❌ Restore blocked — target is outside allowed write roots: {e}"
+    except Exception as e:
+        return f"❌ Restore failed: {e}"
+
+
+def checkpoints() -> str:
+    """List all saved checkpoints with their labels, dates, and source paths."""
+    try:
+        if not _CHECKPOINT_ROOT.exists():
+            return "No checkpoints found."
+
+        entries = sorted(
+            [d for d in _CHECKPOINT_ROOT.iterdir() if d.is_dir()],
+            reverse=True,
+        )
+        if not entries:
+            return "No checkpoints found."
+
+        lines = [f"{'ID':<30}  {'Created':<20}  {'Label':<25}  Source"]
+        lines.append("─" * 100)
+        for entry in entries:
+            manifest_path = entry / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                m = json.loads(manifest_path.read_text(encoding="utf-8"))
+                created = m.get("created", "")[:19]
+                label = m.get("label", "(no label)")[:25]
+                source = m.get("original_path", "?")
+                lines.append(f"{entry.name:<30}  {created:<20}  {label:<25}  {source}")
+            except Exception:
+                lines.append(f"{entry.name:<30}  (unreadable manifest)")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Could not list checkpoints: {e}"
 
 
 def find_duplicates(path: str) -> str:
