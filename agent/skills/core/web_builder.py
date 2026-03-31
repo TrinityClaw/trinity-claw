@@ -37,7 +37,7 @@ DOC = (
     "patch_file(project,filename,old,new)→targeted edit without rewriting whole file (PREFERRED for content/color updates) — WARNING: match is whitespace-exact, tabs and newlines must match precisely; include 2+ lines of surrounding context to ensure uniqueness; "
     "read_file(project,filename)→read file; delete_file(project,filename)→remove a file; "
     "delete_project(project)→remove entire project; list_projects()→all projects; "
-    "serve(project,port)→live preview; stop_server()→stop preview; validate(project)→HTML checks; "
+    "serve(project,port)→live preview; stop_server()→stop preview; server_status()→check if server is running and get its URL (use this, NEVER call 'status' — that function does not exist); validate(project)→HTML checks; "
     "export_zip(project)→pack project as downloadable zip. "
     "get_design_system(description,project_name?)→generate industry-matched design system (colors, typography, UI style, anti-patterns) using 161 reasoning rules; call BEFORE scaffold() for best results. "
     "⚠️ CRITICAL RULE: After scaffold(), ALWAYS use patch_file() — NEVER write_file() on index.html or style.css. write_file() overwrites the full professional template and destroys the layout. "
@@ -458,12 +458,16 @@ document.addEventListener('DOMContentLoaded', () => {
   --shadow:       0 4px 6px -1px rgba(0,0,0,0.1),0 2px 4px -1px rgba(0,0,0,0.06);
   --shadow-lg:    0 10px 15px -3px rgba(0,0,0,0.12),0 4px 6px -2px rgba(0,0,0,0.05);
   --ease:         0.25s ease;
+  --font-body:    'Inter', system-ui, -apple-system, sans-serif;
+  --font-heading: 'Playfair Display', Georgia, serif;
+  --nav-bg:       #ffffff;
+  --nav-text:     #1f2937;
 }
 
 html { scroll-behavior: smooth; }
 
 body {
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-body);
   line-height: 1.7;
   color: var(--text);
   background: var(--bg);
@@ -472,7 +476,7 @@ body {
 }
 
 h1, h2, h3, h4 {
-  font-family: 'Playfair Display', Georgia, serif;
+  font-family: var(--font-heading);
   line-height: 1.2;
   color: var(--primary);
 }
@@ -520,7 +524,7 @@ img { max-width: 100%; height: auto; display: block; }
   position: sticky;
   top: 0;
   z-index: 1000;
-  background: var(--bg);
+  background: var(--nav-bg);
   border-bottom: 1px solid var(--border);
   transition: box-shadow var(--ease);
 }
@@ -534,7 +538,7 @@ img { max-width: 100%; height: auto; display: block; }
   gap: 2rem;
 }
 .nav__brand {
-  font-family: 'Playfair Display', Georgia, serif;
+  font-family: var(--font-heading);
   font-size: 1.4rem;
   font-weight: 700;
   color: var(--primary);
@@ -1050,6 +1054,9 @@ def serve(project: str, port: str = "8090") -> str:
             _httpd.shutdown()
         except Exception:
             pass
+        _httpd = None
+        _server_thread = None
+        _serving_project = None
 
     class _NoListHandler(http.server.SimpleHTTPRequestHandler):
         def list_directory(self, _path):
@@ -1090,7 +1097,7 @@ def stop_server() -> str:
 
 def server_status() -> str:
     """Check if the preview server is running."""
-    if _httpd and _serving_project:
+    if _httpd and _serving_project and _server_thread and _server_thread.is_alive():
         port = _httpd.server_address[1]
         return f"🟢 Serving '{_serving_project}' at http://localhost:{port}"
     return "🔴 No server running."
