@@ -46,7 +46,10 @@ DOC = (
     "design(task)→design-first gate: scan existing skills, surface gaps, propose 2-3 approaches with trade-offs — call this before create_skill for any non-trivial build request; "
     "write_spec(task, approach, details)→write approved spec to /app/memory/designs/YYYY-MM-DD-<slug>.md and return the path — call after user approves an approach, before writing any code; "
     "lessons_to_proposals(threshold=3)→scan error_patterns.json for patterns with ≥threshold occurrences that are NOT auto-fixable, save structured review proposals to lesson_proposals.jsonl — runs automatically inside error_reduce; "
-    "list_proposals(status='pending')→show lesson-derived improvement proposals needing a human decision; status: pending|resolved|dismissed|all."
+    "list_proposals(status='pending')→show lesson-derived improvement proposals needing a human decision; status: pending|resolved|dismissed|all; "
+    "park_idea(idea, source='')→park a free-form improvement idea to improvement_ideas.jsonl for later action — use during research, mid-experiment, or when user mentions a potential improvement; "
+    "list_ideas(status='open')→show parked improvement ideas; status: open|dismissed|all; "
+    "dismiss_idea(idea_id)→mark a parked idea as dismissed after acting on it or deciding it's not worth pursuing."
 )
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -59,12 +62,16 @@ SUGGESTIONS_FILE   = MEMORY_DIR / "core_suggestions.jsonl"
 PATTERNS_FILE      = MEMORY_DIR / "error_patterns.json"
 LESSONS_FILE       = MEMORY_DIR / "lessons.jsonl"
 PROPOSALS_FILE     = MEMORY_DIR / "lesson_proposals.jsonl"
+IDEAS_FILE         = MEMORY_DIR / "improvement_ideas.jsonl"
 
 # Only deterministic, low-risk issue types get auto-applied
 AUTO_FIXABLE = ("bare_except", "missing_timeout")
 
 # Min occurrences before a non-auto-fixable pattern earns a review proposal
 PROPOSAL_THRESHOLD = 3
+
+# Min IMPROVED experiments needed before MAD confidence is meaningful
+MAD_MIN_SAMPLES = 3
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -99,6 +106,75 @@ def _load_log(days: int = 7) -> List[Dict]:
     return entries
 
 
+# ── MAD confidence scoring ────────────────────────────────────────────────────
+
+def _load_all_score_deltas(cap: int = 50) -> List[float]:
+    """
+    Return up to `cap` most-recent score deltas from IMPROVED experiments.
+    Used as the noise-floor sample for MAD confidence scoring.
+    """
+    if not IMPROVE_LOG.exists():
+        return []
+    deltas: List[float] = []
+    try:
+        lines = IMPROVE_LOG.read_text(encoding="utf-8").splitlines()
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+                if (
+                    e.get("outcome") == "IMPROVED"
+                    and e.get("before_score") is not None
+                    and e.get("after_score") is not None
+                ):
+                    deltas.append(float(e["after_score"]) - float(e["before_score"]))
+                    if len(deltas) >= cap:
+                        break
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+    except Exception:
+        pass
+    return deltas
+
+
+def _compute_confidence(current_delta: Optional[float], recent_deltas: List[float]):
+    """
+    Compute MAD-based confidence that an improvement exceeds session noise.
+
+    Mirrors pi-autoresearch's confidence scoring:
+      MAD = median(|delta_i - median(deltas)|)
+      ratio = current_delta / MAD
+
+    Returns (ratio, label):
+      ratio  — float or None if not enough data
+      label  — "🟢 genuine" | "🟡 marginal" | "🔴 within noise" | "— (no baseline)"
+    """
+    if current_delta is None or len(recent_deltas) < MAD_MIN_SAMPLES:
+        return None, "— (no baseline yet)"
+
+    deltas = sorted(recent_deltas)
+    n      = len(deltas)
+    median = deltas[n // 2] if n % 2 else (deltas[n // 2 - 1] + deltas[n // 2]) / 2.0
+    abs_devs = sorted(abs(d - median) for d in deltas)
+    mad      = abs_devs[n // 2] if n % 2 else (abs_devs[n // 2 - 1] + abs_devs[n // 2]) / 2.0
+
+    if mad == 0:
+        # All past deltas identical — any positive improvement is genuine
+        label = "🟢 genuine" if current_delta > 0 else "🔴 within noise"
+        return None, label
+
+    ratio = round(current_delta / mad, 2)
+    if ratio >= 2.0:
+        label = f"🟢 genuine ({ratio}×)"
+    elif ratio >= 1.0:
+        label = f"🟡 marginal ({ratio}×)"
+    else:
+        label = f"🔴 within noise ({ratio}×)"
+
+    return ratio, label
+
+
 # ── Suggestion store (core skills) ────────────────────────────────────────────
 
 def _load_suggestions() -> List[Dict]:
@@ -128,6 +204,143 @@ def _save_suggestions(suggestions: List[Dict]) -> None:
                 f.write(json.dumps(s, ensure_ascii=False, default=str) + "\n")
     except Exception:
         pass
+
+
+# ── Ideas parking lot ─────────────────────────────────────────────────────────
+
+def _load_ideas() -> List[Dict]:
+    """Load all ideas from improvement_ideas.jsonl."""
+    if not IDEAS_FILE.exists():
+        return []
+    ideas = []
+    try:
+        for line in IDEAS_FILE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                ideas.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except Exception:
+        pass
+    return ideas
+
+
+def _save_ideas(ideas: List[Dict]) -> None:
+    """Overwrite improvement_ideas.jsonl with the full list."""
+    try:
+        IDEAS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with IDEAS_FILE.open("w", encoding="utf-8") as f:
+            for idea in ideas:
+                f.write(json.dumps(idea, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def park_idea(idea: str, source: str = "") -> str:
+    """
+    Park a free-form improvement idea for later action.
+
+    Use this when Trinity or you spot something worth trying but can't act on
+    it right now — during a research loop, mid-experiment observation, or a
+    passing thought. Ideas accumulate in improvement_ideas.jsonl and are
+    reviewed with list_ideas().
+
+    Args:
+        idea:   Plain-language description of the improvement idea.
+        source: Optional context — skill name, loop name, or 'user'.
+
+    Returns:
+        Confirmation with the assigned idea ID.
+    """
+    idea = str(idea).strip()
+    if not idea:
+        return "❌ idea text cannot be empty."
+
+    import uuid as _uuid
+    idea_id = datetime.now().strftime("%Y%m%d") + "_" + _uuid.uuid4().hex[:6]
+    entry = {
+        "id":        idea_id,
+        "timestamp": datetime.now().isoformat(),
+        "idea":      idea,
+        "source":    str(source).strip() or "(unspecified)",
+        "status":    "open",
+    }
+    ideas = _load_ideas()
+    ideas.append(entry)
+    _save_ideas(ideas)
+    return f"💡 Idea parked [{idea_id}]: {idea[:80]}"
+
+
+def list_ideas(status: str = "open") -> str:
+    """
+    Show parked improvement ideas.
+
+    Args:
+        status: Filter — 'open' | 'dismissed' | 'all'
+
+    Returns:
+        Formatted list of ideas.
+    """
+    valid_statuses = ("open", "dismissed", "all")
+    if status not in valid_statuses:
+        status = "all"
+
+    all_ideas = _load_ideas()
+    if not all_ideas:
+        return (
+            "📭 No ideas parked yet.\n"
+            "Use autoimprove.park_idea('your idea') to save one."
+        )
+
+    filtered = all_ideas if status == "all" else [i for i in all_ideas if i.get("status") == status]
+    if not filtered:
+        return f"📭 No '{status}' ideas. Try list_ideas('all') to see everything."
+
+    icons = {"open": "💡", "dismissed": "—"}
+    lines = [f"💡 Improvement ideas — {status} ({len(filtered)} of {len(all_ideas)} total):"]
+
+    for idea in filtered:
+        icon   = icons.get(idea.get("status", "open"), "?")
+        ts     = idea.get("timestamp", "")[:10]
+        src    = idea.get("source", "?")
+        text   = idea.get("idea", "?")
+        iid    = idea.get("id", "?")
+        lines.append(f"\n  {icon} [{ts}] ({src})  id={iid}")
+        lines.append(f"     {text}")
+
+    if status == "open" and filtered:
+        lines += [
+            "",
+            f"To dismiss: autoimprove.dismiss_idea('<id>')",
+        ]
+
+    return "\n".join(lines)
+
+
+def dismiss_idea(idea_id: str) -> str:
+    """
+    Mark a parked idea as dismissed (acted on or no longer relevant).
+
+    Args:
+        idea_id: The id field shown in list_ideas() (e.g. '20260331_a3f9b1').
+
+    Returns:
+        Confirmation or not-found message.
+    """
+    idea_id = str(idea_id).strip()
+    ideas   = _load_ideas()
+    for i, idea in enumerate(ideas):
+        if idea.get("id") == idea_id:
+            ideas[i]["status"]       = "dismissed"
+            ideas[i]["dismissed_at"] = datetime.now().isoformat()
+            _save_ideas(ideas)
+            return f"✅ Idea dismissed: {idea.get('idea', '')[:80]}"
+    open_ids = [i["id"] for i in ideas if i.get("status") == "open"]
+    return (
+        f"❌ Idea '{idea_id}' not found.\n"
+        f"Open idea IDs: {open_ids or 'none'}"
+    )
 
 
 def _suggestion_key(skill_name: str, issue_type: str) -> str:
@@ -522,20 +735,29 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
         outcome = "NO_CHANGE"
         reason  = f"score unchanged at {before_score}, no issues reduced"
 
+    # MAD confidence — how does this delta compare to historical noise?
+    score_delta       = (after_score - before_score) if outcome == "IMPROVED" else None
+    recent_deltas     = _load_all_score_deltas()
+    conf_ratio, conf_label = _compute_confidence(score_delta, recent_deltas)
+
     _log({
-        "timestamp":    timestamp,
-        "skill":        skill_name,
-        "issue_type":   issue_type,
-        "outcome":      outcome,
-        "before_score": before_score,
-        "after_score":  after_score,
-        "issues_fixed": issues_fixed,
-        "test_passed":  test_passed,
-        "reason":       reason,
+        "timestamp":        timestamp,
+        "skill":            skill_name,
+        "issue_type":       issue_type,
+        "outcome":          outcome,
+        "before_score":     before_score,
+        "after_score":      after_score,
+        "score_delta":      score_delta,
+        "confidence":       conf_ratio,
+        "confidence_label": conf_label,
+        "issues_fixed":     issues_fixed,
+        "test_passed":      test_passed,
+        "reason":           reason,
     })
 
-    icon = "✅" if outcome == "IMPROVED" else ("🔄" if outcome == "REVERTED" else "—")
-    return f"{icon} {outcome}: {skill_name} [{issue_type}] — {reason}"
+    icon     = "✅" if outcome == "IMPROVED" else ("🔄" if outcome == "REVERTED" else "—")
+    conf_str = f" | {conf_label}" if outcome == "IMPROVED" else ""
+    return f"{icon} {outcome}: {skill_name} [{issue_type}] — {reason}{conf_str}"
 
 
 # ── Core skill suggestion system ───────────────────────────────────────────────
@@ -1315,6 +1537,17 @@ def report(days=7) -> str:
     suggestions = _load_suggestions()
     pending_count = sum(1 for s in suggestions if s.get("status") == "pending")
 
+    # MAD confidence summary across this reporting window
+    period_deltas  = [
+        float(e["score_delta"]) for e in entries
+        if e.get("outcome") == "IMPROVED" and e.get("score_delta") is not None
+    ]
+    genuine  = sum(1 for e in entries if (e.get("confidence") or 0) >= 2.0)
+    marginal = sum(1 for e in entries if 1.0 <= (e.get("confidence") or 0) < 2.0)
+    noise    = sum(1 for e in entries if e.get("outcome") == "IMPROVED"
+                   and e.get("confidence") is not None and (e.get("confidence") or 0) < 1.0)
+    has_conf = (genuine + marginal + noise) > 0
+
     lines = [
         f"📈 AutoImprove Report — last {days} day(s)",
         "=" * 52,
@@ -1325,6 +1558,20 @@ def report(days=7) -> str:
         f"  📋 Reviews/scans   : {reviews}",
         f"Core suggestions     : {pending_count} pending review",
     ]
+
+    if has_conf:
+        lines += [
+            "",
+            "Confidence breakdown (MAD-based noise floor):",
+            f"  🟢 Genuine (≥2×)    : {genuine}",
+            f"  🟡 Marginal (1–2×)  : {marginal}",
+            f"  🔴 Within noise (<1×): {noise}",
+        ]
+        if len(period_deltas) >= MAD_MIN_SAMPLES:
+            avg_delta = sum(period_deltas) / len(period_deltas)
+            lines.append(f"  Avg score delta     : +{avg_delta:.1f} pts")
+    else:
+        lines.append(f"  Confidence          : — (need {MAD_MIN_SAMPLES}+ IMPROVED experiments for MAD baseline)")
 
     if skill_wins:
         lines.append("")
@@ -1351,7 +1598,9 @@ def report(days=7) -> str:
             before = e.get("before_score", "?")
             after  = e.get("after_score", "?")
             icon   = "✅" if outcome == "IMPROVED" else ("🔄" if outcome == "REVERTED" else "—")
-            lines.append(f"  {ts}  {icon}  {track}{skill} [{issue}] {before}→{after}")
+            conf   = e.get("confidence_label", "")
+            conf_str = f"  {conf}" if conf and outcome == "IMPROVED" else ""
+            lines.append(f"  {ts}  {icon}  {track}{skill} [{issue}] {before}→{after}{conf_str}")
 
     return "\n".join(lines)
 
@@ -1366,6 +1615,8 @@ def status() -> str:
     pending        = sum(1 for s in suggestions if s.get("status") == "pending")
     proposals      = _load_proposals()
     pending_props  = sum(1 for p in proposals if p.get("status") == "pending")
+    ideas          = _load_ideas()
+    open_ideas     = sum(1 for i in ideas if i.get("status") == "open")
 
     return "\n".join([
         "🤖 AutoImprove — Autoresearch Loop for Trinity",
@@ -1385,6 +1636,7 @@ def status() -> str:
         f"Core skills    ({len(core_skills)}): {len(core_skills)} files in /app/skills/core/",
         f"Pending suggestions : {pending} core fixes waiting for approval",
         f"Pending proposals   : {pending_props} lesson patterns needing a decision",
+        f"Open ideas          : {open_ideas} parked improvement ideas",
         f"Last experiment     : {last_run}",
         "",
         "Commands:",
@@ -1395,6 +1647,9 @@ def status() -> str:
         "  autoimprove.apply_suggestion('web', 'bare_except')  → approve and apply one fix",
         "  autoimprove.lessons_to_proposals()                  → surface recurring error patterns",
         "  autoimprove.list_proposals()                        → review non-auto-fixable patterns",
+        "  autoimprove.park_idea('description', 'source')      → park an idea for later",
+        "  autoimprove.list_ideas()                            → show open improvement ideas",
+        "  autoimprove.dismiss_idea('<id>')                    → mark idea as done/dismissed",
         "  autoimprove.schedule_nightly('2am')                 → set on autopilot",
         "  autoimprove.report(7)                               → last 7 days",
         "",
