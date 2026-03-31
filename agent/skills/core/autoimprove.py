@@ -44,7 +44,9 @@ DOC = (
     "report(days=7)→improvement history; "
     "status()→config and skills in scope; "
     "design(task)→design-first gate: scan existing skills, surface gaps, propose 2-3 approaches with trade-offs — call this before create_skill for any non-trivial build request; "
-    "write_spec(task, approach, details)→write approved spec to /app/memory/designs/YYYY-MM-DD-<slug>.md and return the path — call after user approves an approach, before writing any code."
+    "write_spec(task, approach, details)→write approved spec to /app/memory/designs/YYYY-MM-DD-<slug>.md and return the path — call after user approves an approach, before writing any code; "
+    "lessons_to_proposals(threshold=3)→scan error_patterns.json for patterns with ≥threshold occurrences that are NOT auto-fixable, save structured review proposals to lesson_proposals.jsonl — runs automatically inside error_reduce; "
+    "list_proposals(status='pending')→show lesson-derived improvement proposals needing a human decision; status: pending|resolved|dismissed|all."
 )
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -55,9 +57,14 @@ MEMORY_DIR         = Path("/app/memory")
 IMPROVE_LOG        = MEMORY_DIR / "improvement_log.jsonl"
 SUGGESTIONS_FILE   = MEMORY_DIR / "core_suggestions.jsonl"
 PATTERNS_FILE      = MEMORY_DIR / "error_patterns.json"
+LESSONS_FILE       = MEMORY_DIR / "lessons.jsonl"
+PROPOSALS_FILE     = MEMORY_DIR / "lesson_proposals.jsonl"
 
 # Only deterministic, low-risk issue types get auto-applied
 AUTO_FIXABLE = ("bare_except", "missing_timeout")
+
+# Min occurrences before a non-auto-fixable pattern earns a review proposal
+PROPOSAL_THRESHOLD = 3
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -857,6 +864,222 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     )
 
 
+# ── Lesson proposals (non-auto-fixable patterns) ──────────────────────────────
+
+def _load_proposals() -> List[Dict]:
+    """Load all lesson proposals from lesson_proposals.jsonl."""
+    if not PROPOSALS_FILE.exists():
+        return []
+    proposals = []
+    try:
+        for line in PROPOSALS_FILE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                proposals.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except Exception:
+        pass
+    return proposals
+
+
+def _save_proposals(proposals: List[Dict]) -> None:
+    """Overwrite lesson_proposals.jsonl with the full list."""
+    try:
+        PROPOSALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with PROPOSALS_FILE.open("w", encoding="utf-8") as f:
+            for p in proposals:
+                f.write(json.dumps(p, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
+    """
+    Scan error_patterns.json for patterns that have accumulated ≥ threshold
+    occurrences but are NOT in AUTO_FIXABLE (so error_reduce silently ignores them).
+    For each qualifying pattern, save a structured review proposal to
+    lesson_proposals.jsonl. Already-pending proposals are skipped.
+
+    This closes the loop: mistakes accumulate in lessons.jsonl → threshold hit →
+    proposal surfaces for your review → you decide how to act on it.
+    Auto-fixable patterns (bare_except, missing_timeout) are already handled by
+    ast_audit / error_reduce and are intentionally excluded here.
+
+    Args:
+        threshold: Min occurrence count before a pattern generates a proposal (default 3).
+
+    Returns:
+        Summary of new proposals found.
+    """
+    # Coerce — dispatcher passes strings
+    try:
+        threshold = int(threshold)
+    except (ValueError, TypeError):
+        threshold = PROPOSAL_THRESHOLD
+
+    if not PATTERNS_FILE.exists():
+        return "NO_DATA: error_patterns.json not found yet — run skills first to accumulate data"
+
+    try:
+        with PATTERNS_FILE.open(encoding="utf-8") as f:
+            patterns = json.load(f)
+    except Exception as e:
+        return f"❌ could not read error_patterns.json: {e}"
+
+    # Collect example messages from lessons.jsonl for richer proposals
+    lessons_by_type: Dict[str, List[str]] = {}
+    if LESSONS_FILE.exists():
+        try:
+            for line in LESSONS_FILE.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    lesson = json.loads(line)
+                    et = lesson.get("error_type") or lesson.get("type", "")
+                    msg = lesson.get("error_msg") or lesson.get("message", "")
+                    if et and msg:
+                        lessons_by_type.setdefault(et, []).append(str(msg)[:120])
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            pass
+
+    # Index existing pending proposals to avoid duplicates
+    existing = _load_proposals()
+    pending_types = {
+        p["error_type"]
+        for p in existing
+        if p.get("status") == "pending"
+    }
+
+    new_proposals = []
+    skipped_fixable = 0
+    skipped_low     = 0
+    skipped_dup     = 0
+
+    for error_type, meta in patterns.items():
+        count = meta.get("count", 0)
+
+        if error_type in AUTO_FIXABLE:
+            skipped_fixable += 1
+            continue
+        if count < threshold:
+            skipped_low += 1
+            continue
+        if error_type in pending_types:
+            skipped_dup += 1
+            continue
+
+        examples = lessons_by_type.get(error_type, [])[:3]
+
+        proposal = {
+            "timestamp":       datetime.now().isoformat(),
+            "error_type":      error_type,
+            "count":           count,
+            "severity":        meta.get("severity", "medium"),
+            "suggested_fix":   meta.get("fix", "(no fix hint available)"),
+            "status":          "pending",
+            "example_messages": examples,
+        }
+        new_proposals.append(proposal)
+        pending_types.add(error_type)
+
+    if new_proposals:
+        all_proposals = existing + new_proposals
+        _save_proposals(all_proposals)
+        _log({
+            "timestamp":   datetime.now().isoformat(),
+            "loop":        "lessons_to_proposals",
+            "outcome":     "PROPOSED",
+            "new_count":   len(new_proposals),
+            "threshold":   threshold,
+        })
+
+    lines = [
+        f"🔎 lessons_to_proposals (threshold={threshold})",
+        f"   New proposals        : {len(new_proposals)}",
+        f"   Already pending      : {skipped_dup}",
+        f"   Below threshold      : {skipped_low}",
+        f"   Skipped (auto-fixable): {skipped_fixable}",
+    ]
+
+    if new_proposals:
+        lines.append("")
+        lines.append("New proposals (review with autoimprove.list_proposals()):")
+        for p in new_proposals:
+            lines.append(
+                f"  • [{p['severity'].upper()}] {p['error_type']} — "
+                f"{p['count']}x seen → {p['suggested_fix']}"
+            )
+    else:
+        lines.append("✅ No new proposals — all qualifying patterns already pending or below threshold.")
+
+    return "\n".join(lines)
+
+
+def list_proposals(status: str = "pending") -> str:
+    """
+    Show lesson-derived improvement proposals.
+    These are recurring error patterns (≥3 occurrences) that are NOT auto-fixable
+    and need a human decision on how to address them.
+
+    Args:
+        status: Filter — 'pending' | 'resolved' | 'dismissed' | 'all'
+
+    Returns:
+        Formatted list of proposals.
+    """
+    valid_statuses = ("pending", "resolved", "dismissed", "all")
+    if status not in valid_statuses:
+        status = "all"
+
+    all_p = _load_proposals()
+    if not all_p:
+        return (
+            "📭 No lesson proposals yet.\n"
+            "Run: autoimprove.lessons_to_proposals() — or it runs automatically inside error_reduce."
+        )
+
+    filtered = all_p if status == "all" else [p for p in all_p if p.get("status") == status]
+    if not filtered:
+        return f"📭 No '{status}' proposals. Try list_proposals('all') to see everything."
+
+    icons    = {"pending": "⏳", "resolved": "✅", "dismissed": "—"}
+    sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}
+
+    lines = [f"📋 Lesson proposals — {status} ({len(filtered)} of {len(all_p)} total):"]
+    for p in filtered:
+        icon   = icons.get(p.get("status", "pending"), "?")
+        si     = sev_icon.get(p.get("severity", "medium"), "•")
+        ts     = p.get("timestamp", "")[:10]
+        et     = p.get("error_type", "?")
+        count  = p.get("count", "?")
+        fix    = p.get("suggested_fix", "?")
+        sev    = p.get("severity", "?")
+
+        lines.append(f"\n  {icon} {si} [{ts}] {et}  (seen {count}x, severity={sev})")
+        lines.append(f"     Suggested action: {fix}")
+        examples = p.get("example_messages", [])
+        if examples:
+            lines.append("     Examples from lessons:")
+            for ex in examples[:2]:
+                lines.append(f"       – {ex[:100]}")
+
+    if status == "pending" and filtered:
+        lines += [
+            "",
+            "These patterns are NOT auto-fixed — they need your decision.",
+            "Options per pattern:",
+            "  • Extend AUTO_FIXABLE in autoimprove.py if a safe deterministic fix exists",
+            "  • Run autoimprove.suggest_core('<skill_name>') to generate a patch proposal",
+            "  • Update coding practices in identity.md to prevent future occurrences",
+        ]
+
+    return "\n".join(lines)
+
+
 # ── Individual loops ───────────────────────────────────────────────────────────
 
 def _loop_ast_audit(max_experiments=10) -> str:
@@ -936,12 +1159,16 @@ def _loop_error_reduce(max_experiments=10) -> str:
             count += 1
             time.sleep(1)
 
-    if not results:
-        return f"✅ error_reduce: no dynamic skills have '{top_issue}' currently"
-    return (
+    # Surface non-auto-fixable patterns as review proposals (closes the lessons loop)
+    proposals_summary = lessons_to_proposals()
+
+    base = (
+        f"✅ error_reduce: no dynamic skills have '{top_issue}' currently"
+        if not results else
         f"🔬 error_reduce — targeting '{top_issue}' ({top_count}x in history), "
         f"{count} experiments:\n" + "\n".join(results)
     )
+    return f"{base}\n\n{proposals_summary}"
 
 
 def _loop_daily_review() -> str:
@@ -1137,6 +1364,8 @@ def status() -> str:
     last_run       = entries[-1].get("timestamp", "never")[:16] if entries else "never"
     suggestions    = _load_suggestions()
     pending        = sum(1 for s in suggestions if s.get("status") == "pending")
+    proposals      = _load_proposals()
+    pending_props  = sum(1 for p in proposals if p.get("status") == "pending")
 
     return "\n".join([
         "🤖 AutoImprove — Autoresearch Loop for Trinity",
@@ -1149,13 +1378,14 @@ def status() -> str:
         "Loops:",
         "  • daily_review — learning review, no code changes",
         "  • ast_audit    — auto-fix bare_except & missing_timeout in dynamic skills",
-        "  • error_reduce — auto-fix top error pattern in dynamic skills",
+        "  • error_reduce — auto-fix top error pattern + surface lesson proposals",
         "  • suggest_core — audit core skills, queue suggestions for your review",
         "",
         f"Dynamic skills ({len(dynamic_skills)}): {', '.join(dynamic_skills) or 'none'}",
         f"Core skills    ({len(core_skills)}): {len(core_skills)} files in /app/skills/core/",
-        f"Pending suggestions: {pending} core fixes waiting for approval",
-        f"Last experiment    : {last_run}",
+        f"Pending suggestions : {pending} core fixes waiting for approval",
+        f"Pending proposals   : {pending_props} lesson patterns needing a decision",
+        f"Last experiment     : {last_run}",
         "",
         "Commands:",
         "  autoimprove.research('any topic', depth='deep')     → web research, saved to notes",
@@ -1163,6 +1393,8 @@ def status() -> str:
         "  autoimprove.suggest_core()                          → scan all core skills now",
         "  autoimprove.list_suggestions()                      → review pending core fixes",
         "  autoimprove.apply_suggestion('web', 'bare_except')  → approve and apply one fix",
+        "  autoimprove.lessons_to_proposals()                  → surface recurring error patterns",
+        "  autoimprove.list_proposals()                        → review non-auto-fixable patterns",
         "  autoimprove.schedule_nightly('2am')                 → set on autopilot",
         "  autoimprove.report(7)                               → last 7 days",
         "",
