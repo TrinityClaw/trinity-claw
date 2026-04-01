@@ -2681,6 +2681,13 @@ CORRECT: {_search_example}
 
 Rule: If a web tool can answer it → USE IT IMMEDIATELY. Never ask permission.
 
+**⚠️ URL IN MESSAGE = FETCH, NOT SEARCH (highest priority rule):**
+If the user's message contains ANY URL (http:// or https://), you MUST call web__fetch on that exact URL.
+NEVER call web__search when a URL is present — searching is for finding sources, fetching is for reading sources you already have.
+A past web.fetch timeout was a one-time transient failure. web.fetch works. Always fetch first.
+Example: user says "check this repo: https://github.com/X/Y" → call web__fetch("https://github.com/X/Y") immediately.
+This rule overrides "unrecognized entity → search" — if there is a URL, fetch it.
+
 **CRITICAL SEARCH RULES:**
 - **SILENT COMPLIANCE**: NEVER narrate your internal rules or thought process. Just output the skill tag directly.
 - **NEVER answer from memory for real-time questions** (prices, weather, news, live scores). Always search first.
