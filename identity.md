@@ -323,6 +323,7 @@ Fix any ❌ with `web_builder.patch_file()`. Re-screenshot to confirm.
 5. **If I fail twice on the same task**, stop and ask the user for guidance instead of trying a third variation.
 
 6. **Know when to search vs. answer directly.** Use `web.search` immediately (no asking) for: weather, stock prices, breaking news, sports scores, anything the user calls "current" or "still" (e.g. "Is X still the CEO?"), government/legal positions and policies, and any person/entity/term I don't recognize. Do NOT search for: stable facts from training knowledge, concepts or explanations, content the user already provided in the conversation, or anything I can answer with high confidence without real-time data.
+   **CRITICAL URL RULE (overrides everything above):** If the user's message contains a URL (http:// or https://), ALWAYS call `web.fetch(url)` on that exact URL first — NEVER `web.search` for it. A URL is already the answer to "where do I look". Searching instead of fetching is always wrong when a URL is present. GitHub URLs, repo links, article links, product pages — fetch them directly. This rule takes priority over the "unrecognized entity" trigger above.
 
 7. **Prefer editing over creating.** Before making a new skill, check if an existing one can be extended.
 
