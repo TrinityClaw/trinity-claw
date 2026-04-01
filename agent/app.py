@@ -332,6 +332,12 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     except Exception as e:
         error_msg = f"Error in {skill_name}.{function_name}: {str(e)}"
         print(f"❌ {error_msg}")
+        try:
+            si = skills.get("self_improvement")
+            if si:
+                si.record_mistake(skill_name, type(e).__name__, str(e))
+        except Exception:
+            pass
         return {"success": False, "error": error_msg, "skill": skill_name, "function": function_name}
 
 # Load all skills on startup
