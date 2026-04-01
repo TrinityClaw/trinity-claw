@@ -16,6 +16,7 @@ import re
 import time
 import hashlib
 import hmac
+import math
 import uuid
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Depends, Security, status
@@ -1133,6 +1134,28 @@ def _detect_task_type(user_msg: str, skills_used: list) -> str:
         return "files"
     return "chat"
 
+def _compute_memory_score(dist: float, hit_count: int, timestamp_str: str,
+                          alpha: float = 0.6, beta: float = 0.2, gamma: float = 0.2,
+                          decay_rate: float = 0.05) -> float:
+    """Combined memory relevance score: cosine similarity + usage frequency + recency.
+
+    alpha:      weight for relevance  (cosine similarity, 1 - distance)
+    beta:       weight for frequency  (log-scaled hit count)
+    gamma:      weight for recency    (exponential decay over days)
+    decay_rate: daily decay constant  (0.05 → ~70% retained after 7 days)
+    Returns a value in [0, 1] — higher means more worth injecting.
+    """
+    relevance = max(0.0, 1.0 - dist)
+    frequency = math.log1p(min(hit_count, 100)) / math.log1p(100)
+    try:
+        stored_dt = datetime.fromisoformat(timestamp_str)
+        days_old = (datetime.now() - stored_dt).total_seconds() / 86400
+    except Exception:
+        days_old = 30
+    recency = math.exp(-decay_rate * max(0.0, days_old))
+    return alpha * relevance + beta * frequency + gamma * recency
+
+
 def store_memory_separate(user_msg: str, ai_reply: str, task_type: str = "general", session_id: Optional[str] = None):
     """Store user query and AI response separately in ChromaDB for better retrieval."""
     if not collection:
@@ -1150,7 +1173,9 @@ def store_memory_separate(user_msg: str, ai_reply: str, task_type: str = "genera
                 "type": "user_query",
                 "timestamp": timestamp,
                 "task_type": task_type,
-                "session_id": session_id
+                "session_id": session_id,
+                "hit_count": 0,
+                "last_accessed": timestamp,
             }]
         )
 
@@ -1164,7 +1189,9 @@ def store_memory_separate(user_msg: str, ai_reply: str, task_type: str = "genera
                 "timestamp": timestamp,
                 "task_type": task_type,
                 "parent_query_id": user_id,
-                "session_id": session_id
+                "session_id": session_id,
+                "hit_count": 0,
+                "last_accessed": timestamp,
             }]
         )
     except Exception as e:
@@ -1185,14 +1212,17 @@ def get_session_history(session_id: str) -> List[Dict]:
             try:
                 summary = summarize_messages(msgs)
                 if summary:
+                    now_iso = datetime.now().isoformat()
                     collection.add(
                         documents=[summary],
                         ids=[f"session_summary_{str(uuid.uuid4())[:12]}"],
                         metadatas=[{
                             "type": "session_summary",
                             "session_id": session_id,
-                            "timestamp": datetime.now().isoformat(),
-                            "turn_count": len(msgs) // 2
+                            "timestamp": now_iso,
+                            "turn_count": len(msgs) // 2,
+                            "hit_count": 0,
+                            "last_accessed": now_iso,
                         }]
                     )
                     print(f"💾 Stored expiry summary for session {session_id[:12]}...")
@@ -2127,36 +2157,64 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     #   b) We already have an active session — the session IS the context. Injecting
     #      semantically-similar-but-unrelated old answers causes the model to answer
     #      the PREVIOUS question instead of the current one.
-    CHROMA_SIMILARITY_THRESHOLD = 0.35  # cosine distance; lower = more similar
+    # Combined score floor — memories below this are not injected.
+    # Score = 0.6*relevance + 0.2*frequency + 0.2*recency (see _compute_memory_score).
+    # Equivalent to the old dist<0.35 cutoff for a fresh, never-accessed memory.
+    CHROMA_MIN_SCORE = 0.48
     CHROMA_SKIP_IF_TURNS = 2            # skip ChromaDB if session has >= this many turns
     chroma_context = ""
     active_turns = len([m for m in history if m.get("role") == "user"])
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
         try:
-            memories = collection.query(query_texts=[req.message], n_results=3,
+            # Fetch 5 candidates so scoring has enough to choose from
+            memories = collection.query(query_texts=[req.message], n_results=5,
                                         include=["documents", "metadatas", "distances"])
             if memories['documents'] and memories['documents'][0]:
-                ai_responses = []
+                scored = []
+                ids = memories.get('ids', [[]])[0]
                 distances = memories.get('distances', [[]])[0]
 
                 for i, doc in enumerate(memories['documents'][0]):
                     meta = memories['metadatas'][0][i] if memories['metadatas'] else {}
                     dist = distances[i] if i < len(distances) else 1.0
-                    # Skip results that are not closely related to the current message.
-                    if dist > CHROMA_SIMILARITY_THRESHOLD:
+                    doc_id = ids[i] if i < len(ids) else None
+                    # Never inject raw user queries — only AI responses and summaries.
+                    # Raw past queries look like commands and cause the model to answer
+                    # the OLD question instead of the current one.
+                    if meta.get('type') == 'user_query':
                         continue
-                    if meta.get('type') != 'user_query':
-                        ai_responses.append(doc)
+                    hit_count = int(meta.get('hit_count', 0))
+                    timestamp = meta.get('timestamp', datetime.now().isoformat())
+                    score = _compute_memory_score(dist, hit_count, timestamp)
+                    if score >= CHROMA_MIN_SCORE:
+                        scored.append((score, doc, doc_id))
 
-                # Inject only AI responses/summaries — never raw user queries.
-                # Raw past user queries look like commands and cause the model to
-                # answer the OLD question instead of the current one.
+                # Best matches first; inject top 2
+                scored.sort(key=lambda x: x[0], reverse=True)
+                ai_responses = [doc for _, doc, _ in scored[:2]]
+                used_ids = [doc_id for _, _, doc_id in scored[:2] if doc_id]
+
+                # Increment hit_count + refresh last_accessed for retrieved memories
+                if used_ids:
+                    now_iso = datetime.now().isoformat()
+                    for doc_id in used_ids:
+                        try:
+                            existing = collection.get(ids=[doc_id], include=["metadatas"])
+                            if existing and existing['metadatas']:
+                                cur_meta = existing['metadatas'][0].copy()
+                                cur_meta['hit_count'] = int(cur_meta.get('hit_count', 0)) + 1
+                                cur_meta['last_accessed'] = now_iso
+                                collection.update(ids=[doc_id], metadatas=[cur_meta])
+                        except Exception as upd_err:
+                            print(f"⚠️  Memory hit_count update failed: {upd_err}")
+
                 if ai_responses:
-                    _safe_responses = [_sanitize_external_content(r, source="chromadb") for r in ai_responses[:2]]
+                    _safe_responses = [_sanitize_external_content(r, source="chromadb") for r in ai_responses]
                     chroma_context = "Relevant past context (what I previously answered on related topics): " + " | ".join(_safe_responses)
-                    print(f"🧠 ChromaDB injecting {len(ai_responses)} memory fragment(s) (dist<{CHROMA_SIMILARITY_THRESHOLD})")
+                    top_score = scored[0][0] if scored else 0
+                    print(f"🧠 ChromaDB injecting {len(ai_responses)} memory fragment(s) (top score: {top_score:.2f})")
                 else:
-                    print(f"🧠 ChromaDB: no sufficiently similar past answers (threshold {CHROMA_SIMILARITY_THRESHOLD})")
+                    print(f"🧠 ChromaDB: no sufficiently relevant past answers (min score {CHROMA_MIN_SCORE})")
         except Exception as e:
             print(f"⚠️  ChromaDB query error: {e}")
 
