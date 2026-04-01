@@ -2159,8 +2159,13 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     #      the PREVIOUS question instead of the current one.
     # Combined score floor — memories below this are not injected.
     # Score = 0.6*relevance + 0.2*frequency + 0.2*recency (see _compute_memory_score).
-    # Equivalent to the old dist<0.35 cutoff for a fresh, never-accessed memory.
-    CHROMA_MIN_SCORE = 0.48
+    # CHROMA_MIN_RELEVANCE is a hard gate on cosine similarity alone (1 - dist).
+    # This prevents frequency/recency from rescuing an irrelevant memory — a memory
+    # that was accessed 50 times but is about a completely different topic should never
+    # be injected. Frequency/recency only affect ranking among memories that already
+    # clear the relevance gate.
+    CHROMA_MIN_RELEVANCE = 0.55         # hard floor: dist must be <= 0.45
+    CHROMA_MIN_SCORE = 0.60             # combined score floor (raised from 0.48)
     CHROMA_SKIP_IF_TURNS = 2            # skip ChromaDB if session has >= this many turns
     chroma_context = ""
     active_turns = len([m for m in history if m.get("role") == "user"])
@@ -2183,16 +2188,20 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                     # the OLD question instead of the current one.
                     if meta.get('type') == 'user_query':
                         continue
+                    # Hard relevance gate first — frequency cannot rescue a poor match
+                    relevance = max(0.0, 1.0 - dist)
+                    if relevance < CHROMA_MIN_RELEVANCE:
+                        continue
                     hit_count = int(meta.get('hit_count', 0))
                     timestamp = meta.get('timestamp', datetime.now().isoformat())
                     score = _compute_memory_score(dist, hit_count, timestamp)
                     if score >= CHROMA_MIN_SCORE:
                         scored.append((score, doc, doc_id))
 
-                # Best matches first; inject top 2
+                # Best matches first; inject top 1 only — less noise in the prompt
                 scored.sort(key=lambda x: x[0], reverse=True)
-                ai_responses = [doc for _, doc, _ in scored[:2]]
-                used_ids = [doc_id for _, _, doc_id in scored[:2] if doc_id]
+                ai_responses = [doc for _, doc, _ in scored[:1]]
+                used_ids = [doc_id for _, _, doc_id in scored[:1] if doc_id]
 
                 # Increment hit_count + refresh last_accessed for retrieved memories
                 if used_ids:
