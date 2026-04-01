@@ -354,12 +354,8 @@ def generate_patch(skill_name: str, issue_type: str, issue_line: int) -> Dict:
         if func_name_match:
             func_name = func_name_match.group(1)
             indent = len(original_line) - len(original_line.lstrip())
-            fix_applied = '\n'.join([
-                ' ' * indent + '"""',
-                ' ' * indent + f"TODO: Add description for {func_name}",
-                ' ' * indent + '"""',
-                original_line
-            ])
+            body_indent = ' ' * (indent + 4)
+            fix_applied = original_line.rstrip() + '\n' + body_indent + f'"""TODO: Add description for {func_name}."""'
         else:
             return {"error": f"Could not parse function name on line {issue_line}"}
             
@@ -389,8 +385,8 @@ def generate_patch(skill_name: str, issue_type: str, issue_line: int) -> Dict:
         "original": original_line.strip(),
         "proposed_fix": fix_applied.strip(),
         "diff": f"--- {skill_name}.py:{issue_line}\n+++ {skill_name}.py:{issue_line}\n-{original_line.strip()}\n+{fix_applied.strip()}",
-        "safe_to_apply": issue_type in ["bare_except", "missing_timeout"],
-        "requires_review": issue_type not in ["bare_except", "missing_timeout"]
+        "safe_to_apply": issue_type in ["bare_except", "missing_timeout", "missing_docstring"],
+        "requires_review": issue_type not in ["bare_except", "missing_timeout", "missing_docstring"]
     }
 
 # ============================================================================

@@ -65,7 +65,7 @@ PROPOSALS_FILE     = MEMORY_DIR / "lesson_proposals.jsonl"
 IDEAS_FILE         = MEMORY_DIR / "improvement_ideas.jsonl"
 
 # Only deterministic, low-risk issue types get auto-applied
-AUTO_FIXABLE = ("bare_except", "missing_timeout")
+AUTO_FIXABLE = ("bare_except", "missing_timeout", "missing_docstring")
 
 # Min occurrences before a non-auto-fixable pattern earns a review proposal
 PROPOSAL_THRESHOLD = 3
