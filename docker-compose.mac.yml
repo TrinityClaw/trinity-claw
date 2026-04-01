@@ -75,6 +75,7 @@ services:
       - "./config/litellm_config.yaml:/app/litellm_config.yaml"
       - "./agent/app.py:/app/app.py:ro"
       - "./agent/skills/core:/app/skills/core:ro"
+      - "./identity.md:/app/identity.md:ro"
     depends_on:
       - litellm
       - chroma
