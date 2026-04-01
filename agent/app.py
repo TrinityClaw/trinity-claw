@@ -2626,8 +2626,22 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         except Exception as _dr_err:
             print(f"⚠️  daily_review failed at session start: {_dr_err}")
 
+    # If the user's message contains a URL, prepend a hard directive at the very top
+    # of the system prompt so even a small local model sees it before anything else.
+    import re as _re
+    _url_in_message = _re.search(r'https?://\S+', req.message)
+    _url_directive = ""
+    if _url_in_message:
+        _found_url = _url_in_message.group(0).rstrip('.,;)')
+        _url_directive = (
+            f"⚠️ FIRST ACTION — MANDATORY: The user's message contains a URL: {_found_url}\n"
+            f"You MUST call web__fetch with url='{_found_url}' as your FIRST tool call.\n"
+            f"Do NOT call web__search. Do NOT respond with news, prices, or any other topic.\n"
+            f"Fetch the URL, read the result, then answer the user's question about it.\n\n"
+        )
+
     # IMPROVED SYSTEM PROMPT
-    system_prompt = f"""{_identity_content + chr(10) + chr(10) if _identity_content else ""}You are TrinityClaw, an intelligent AI agent with persistent memory and skill execution capabilities.
+    system_prompt = f"""{_url_directive}{_identity_content + chr(10) + chr(10) if _identity_content else ""}You are TrinityClaw, an intelligent AI agent with persistent memory and skill execution capabilities.
 
 ENVIRONMENT:
 - Today's date: {_today_str}
