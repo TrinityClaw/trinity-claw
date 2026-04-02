@@ -15,7 +15,8 @@ DOC = (
     'list_tasks()→all tasks with truncated prompt preview, '
     'get_task(name)→FULL task details including complete prompt — use this when user asks to see or edit a task, '
     'edit_task_prompt(name, new_prompt)→replace a task\'s prompt without changing its schedule, '
-    'remove(name), clear(), status(), parse_preview(when), get_activity_log(hours=24). '
+    'remove(name), clear(), status(), parse_preview(when), get_activity_log(hours=24), '
+    'get_task_report(name, limit=50)→full result history for one task. '
     'IMPORTANT: list_tasks() truncates prompts. Always use get_task(name) when the user wants to read or edit a specific task.'
 )
 
@@ -459,7 +460,7 @@ def get_activity_log(hours: int = 24) -> str:
     try:
         if not _ACTIVITY_LOG.exists():
             return "📭 No activity logged yet."
-        cutoff = datetime.now() - timedelta(hours=hours)
+        cutoff = datetime.now() - timedelta(hours=int(hours))
         entries = []
         for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -478,11 +479,48 @@ def get_activity_log(hours: int = 24) -> str:
         for e in entries:
             icon = "✅" if e.get("ok") else "❌"
             lines.append(f"  {e['ts']}  {icon}  [{e['source']}]  {e['action'][:60]}")
-            if not e.get("ok"):
-                lines.append(f"       ↳ {e['result'][:100]}")
+            if e.get("result"):
+                lines.append(f"       ↳ {e['result'][:200]}")
         return "\n".join(lines)
     except Exception as ex:
         return f"❌ get_activity_log error: {ex}"
+
+
+def get_task_report(name: str, limit: int = 50) -> str:
+    """Show the full result history for a specific task by name.
+    Scans the activity log for all entries matching this task. limit=50 by default."""
+    try:
+        if not _ACTIVITY_LOG.exists():
+            return "📭 No activity logged yet."
+        prefix = f"scheduler:{name}"
+        entries = []
+        for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                if e.get("source") == prefix:
+                    entries.append(e)
+            except Exception:
+                continue
+        entries = entries[-int(limit):]
+        if not entries:
+            return f"📭 No activity found for task '{name}'."
+        ok_count   = sum(1 for e in entries if e.get("ok"))
+        fail_count = len(entries) - ok_count
+        lines = [
+            f"📊 Report for task '{name}' ({len(entries)} runs shown, "
+            f"✅ {ok_count} ok  ❌ {fail_count} failed):"
+        ]
+        for e in entries:
+            icon = "✅" if e.get("ok") else "❌"
+            lines.append(f"\n  {e['ts']}  {icon}")
+            lines.append(f"  prompt:  {e['action']}")
+            lines.append(f"  result:  {e['result']}")
+        return "\n".join(lines)
+    except Exception as ex:
+        return f"❌ get_task_report error: {ex}"
 
 
 def parse_preview(when: str) -> str:
