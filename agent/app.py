@@ -1126,6 +1126,31 @@ def compact_jsonl():
         print(f"⚠️  JSONL compact error: {e}")
 
 
+# ── Correction Detection ─────────────────────────────────────────────────────
+_CORRECTION_SIGNALS = [
+    "that's wrong", "thats wrong", "that is wrong",
+    "you're wrong", "youre wrong", "you are wrong",
+    "incorrect", "that's not right", "thats not right",
+    "no, ", "not quite", "try again",
+    "you missed", "you forgot", "you should have",
+    "that didn't work", "it didn't work", "that failed",
+    "fix that", "fix this", "wrong answer",
+]
+
+_SKILL_RESULT_RE = re.compile(r'✅\s*([\w]+)\.([\w]+)')
+
+def _detect_correction(user_msg: str) -> bool:
+    """True if this message looks like a correction of the previous response."""
+    msg = user_msg.lower()
+    return any(signal in msg for signal in _CORRECTION_SIGNALS)
+
+def _extract_skill_context(ai_reply: str, fallback: str) -> str:
+    """Pull skill name from a ✅ result block in a previous AI reply."""
+    match = _SKILL_RESULT_RE.search(ai_reply)
+    return match.group(1) if match else fallback
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _detect_task_type(user_msg: str, skills_used: list) -> str:
     """Infer task category from message keywords and skills called."""
     msg = user_msg.lower()
@@ -3254,6 +3279,35 @@ CRITICAL: The RETRIEVED_MEMORY above is an archive from past sessions. It is bac
 
         def _persist_async():
             try:
+                # ── Correction detection ──────────────────────────────────
+                if _detect_correction(_req_message):
+                    prev_ai = ""
+                    hist = get_session_history(session_id)
+                    for msg in reversed(hist[:-1]):  # skip current assistant turn
+                        if msg.get("role") == "assistant":
+                            prev_ai = msg.get("content", "")
+                            break
+
+                    skill_ctx = _extract_skill_context(prev_ai, fallback=task_type)
+                    lesson = {
+                        "timestamp": datetime.now().isoformat(),
+                        "type": "correction",
+                        "skill_context": skill_ctx,
+                        "task_type": task_type,
+                        "session_id": _req_session_id,
+                        "correction_msg": _req_message[:500],
+                        "bad_reply_preview": prev_ai[:300],
+                    }
+                    try:
+                        _lessons_path = Path("/app/memory/lessons.jsonl")
+                        _lessons_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(_lessons_path, "a", encoding="utf-8") as _lf:
+                            _lf.write(json.dumps(lesson, ensure_ascii=False) + "\n")
+                        print(f"📝 Correction recorded — skill_context: {skill_ctx}")
+                    except Exception as _le:
+                        print(f"⚠️  Failed to record correction: {_le}")
+                # ─────────────────────────────────────────────────────────
+
                 store_memory_separate(
                     _req_message, _ai_reply_snap,
                     task_type=task_type, session_id=_req_session_id
