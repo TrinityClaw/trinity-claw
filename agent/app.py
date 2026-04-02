@@ -39,6 +39,27 @@ import queue as _queue_module
 import asyncio
 
 load_dotenv()
+
+# ── File cache: avoid re-reading stable files on every request ────────────────
+class _FileCache:
+    """Read a file once; return cached content until mtime changes on disk."""
+    def __init__(self):
+        self._cache: dict = {}  # path -> (mtime, content)
+
+    def read_text(self, path: str, encoding: str = "utf-8", default: str = "") -> str:
+        try:
+            mtime = os.path.getmtime(path)
+            if path in self._cache and self._cache[path][0] == mtime:
+                return self._cache[path][1]
+            with open(path, encoding=encoding) as _f:
+                content = _f.read()
+            self._cache[path] = (mtime, content)
+            return content
+        except Exception:
+            return default
+
+_fcache = _FileCache()
+# ─────────────────────────────────────────────────────────────────────────────
 print("🚀 TrinityClaw Agent is starting up...")
 
 # Add skills directory to path
@@ -2529,13 +2550,12 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
             "Always overwrite the whole note — don't append partial updates."
         )
 
-    # Auto-load user preferences from notes.json and build notes index
+    # Auto-load user preferences from notes.json and build notes index (cached)
     _pref_content = ""
     _notes_index = ""
     try:
-        _notes_path = "/app/memory/notes.json"
-        with open(_notes_path) as _f:
-            _notes_data = json.load(_f)
+        _notes_raw = _fcache.read_text("/app/memory/notes.json")
+        _notes_data = json.loads(_notes_raw) if _notes_raw else {}
         if "user_preferences" in _notes_data:
             _pref_content = _notes_data["user_preferences"].get("content", "")
         if _notes_data:
@@ -2546,22 +2566,17 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
     except Exception:
         pass
 
-    # Load identity file (identity.md)
-    _identity_content = ""
-    for _id_path in ["/app/identity.md", "/app/../identity.md"]:
-        try:
-            with open(_id_path, encoding="utf-8") as _f:
-                _identity_content = _f.read().strip()
-            break
-        except Exception:
-            pass
+    # Load identity file (cached)
+    _identity_content = (
+        _fcache.read_text("/app/identity.md").strip()
+        or _fcache.read_text("/app/../identity.md").strip()
+    )
 
-    # Load lessons: deduplicated by skill+error_type (most recent fix wins), sorted newest first
+    # Load lessons: deduplicated by skill+error_type (most recent fix wins), sorted newest first (cached)
     _lessons_lines = []
     try:
-        _lessons_path = "/app/memory/lessons.jsonl"
-        with open(_lessons_path, encoding="utf-8") as _f:
-            _raw_lessons = [l.strip() for l in _f if l.strip()]
+        _raw_lessons_text = _fcache.read_text("/app/memory/lessons.jsonl")
+        _raw_lessons = [l.strip() for l in _raw_lessons_text.splitlines() if l.strip()]
         _seen_keys: dict = {}
         for _raw in reversed(_raw_lessons):  # reverse so first-seen = most recent
             try:
@@ -2583,25 +2598,23 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         pass
     _lessons_block = "\n".join(_lessons_lines) if _lessons_lines else "None yet."
 
-    # Load daily journal (last 3 days) and user model for system prompt injection
+    # Load daily journal and user model for system prompt injection (cached)
     _daily_memory_block = ""
     try:
         from datetime import date as _date, timedelta as _timedelta
-        _journal_path = Path("/app/memory/daily_journal.jsonl")
-        _user_model_path = Path("/app/memory/user_model.json")
         _today_str = _date.today().isoformat()
         _cutoff_str = (_date.today() - _timedelta(days=7)).isoformat()
         _journal_entries = {}
-        if _journal_path.exists():
-            for _jline in _journal_path.read_text(encoding="utf-8").splitlines():
-                _jline = _jline.strip()
-                if _jline:
-                    try:
-                        _je = json.loads(_jline)
-                        if _je.get("date", "") >= _cutoff_str:
-                            _journal_entries[_je["date"]] = _je
-                    except Exception:
-                        pass
+        _journal_raw = _fcache.read_text("/app/memory/daily_journal.jsonl")
+        for _jline in _journal_raw.splitlines():
+            _jline = _jline.strip()
+            if _jline:
+                try:
+                    _je = json.loads(_jline)
+                    if _je.get("date", "") >= _cutoff_str:
+                        _journal_entries[_je["date"]] = _je
+                except Exception:
+                    pass
         _journal_lines = []
         for _je in sorted(_journal_entries.values(), key=lambda x: x["date"], reverse=True):
             _label = "TODAY" if _je["date"] == _today_str else _je["date"]
@@ -2613,8 +2626,9 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
             if _je.get("next_steps"):
                 _journal_lines.append(f"  Next steps promised: {_je['next_steps']}")
         _user_model_lines = []
-        if _user_model_path.exists():
-            _um = json.loads(_user_model_path.read_text(encoding="utf-8"))
+        _user_model_raw = _fcache.read_text("/app/memory/user_model.json")
+        if _user_model_raw:
+            _um = json.loads(_user_model_raw)
             for _ins in _um.get("insights", [])[-15:]:
                 _user_model_lines.append(f"- [{_ins['date']}] {_ins['insight']}")
         _dm_parts = []
@@ -2626,36 +2640,33 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
     except Exception:
         _daily_memory_block = "No journal entries yet."
 
-    # On new sessions (first message): run daily_review and auto-apply safe fixes
+    # On new sessions (first message): run daily_review in background — never blocks the response
     _skill_health_section = ""
     if len(history) == 0:
-        try:
-            from agent.skills.core import self_improvement as _si
-            _dr_result = _si.daily_review()
-            # Auto-apply safe fixes (bare_except, missing_timeout) for dynamic skills
-            _auto_fixed = []
-            _safe_types = ("bare_except", "missing_timeout")
-            _dyn_dir = Path("/app/skills/dynamic")
-            if _dyn_dir.exists():
-                for _dp in sorted(_dyn_dir.glob("*.py")):
-                    if _dp.name.startswith("_"):
-                        continue
-                    _sn = _dp.stem
-                    try:
-                        _analysis = _si.analyze_skill_code(_sn)
-                        _fixed_types = set()
-                        for _issue in _analysis.get("issues", []):
-                            if _issue["type"] in _safe_types and _issue["type"] not in _fixed_types:
-                                _si.fix(_sn, _issue["type"], "all")
-                                _auto_fixed.append(f"  • {_sn}: {_issue['type']}")
-                                _fixed_types.add(_issue["type"])
-                    except Exception:
-                        pass
-            if _auto_fixed:
-                _dr_result += "\n\n✅ Auto-fixed at session start:\n" + "\n".join(_auto_fixed)
-            _skill_health_section = f"\n## SKILL HEALTH (reviewed this session)\n\n{_dr_result}\n"
-        except Exception as _dr_err:
-            print(f"⚠️  daily_review failed at session start: {_dr_err}")
+        def _bg_daily_review():
+            try:
+                from agent.skills.core import self_improvement as _si
+                _dr_result = _si.daily_review()
+                _safe_types = ("bare_except", "missing_timeout")
+                _dyn_dir = Path("/app/skills/dynamic")
+                if _dyn_dir.exists():
+                    for _dp in sorted(_dyn_dir.glob("*.py")):
+                        if _dp.name.startswith("_"):
+                            continue
+                        _sn = _dp.stem
+                        try:
+                            _analysis = _si.analyze_skill_code(_sn)
+                            _fixed_types = set()
+                            for _issue in _analysis.get("issues", []):
+                                if _issue["type"] in _safe_types and _issue["type"] not in _fixed_types:
+                                    _si.fix(_sn, _issue["type"], "all")
+                                    _fixed_types.add(_issue["type"])
+                        except Exception:
+                            pass
+                print(f"🏥 Background daily_review complete: {_dr_result[:80]}")
+            except Exception as _dr_err:
+                print(f"⚠️  daily_review failed: {_dr_err}")
+        threading.Thread(target=_bg_daily_review, daemon=True, name="daily-review").start()
 
     # If the user's message contains a URL, prepend a hard directive at the very top
     # of the system prompt so even a small local model sees it before anything else.
