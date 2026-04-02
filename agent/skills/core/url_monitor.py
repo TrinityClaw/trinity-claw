@@ -17,6 +17,9 @@ from pathlib import Path
 NAME = "url_monitor"
 DOC = (
     "Monitor URLs for changes and health status. "
+    "Functions: add_url(url, friendly_name?, frequency_minutes?, tags?, alert_on_changes?) — tags can be list or plain string; "
+    "list_urls()→formatted status of all monitored URLs (preferred over get_status_summary/get_url_history/get_recent_changes); "
+    "remove_url(url), check_url_now(url), check_all_urls(). "
     "Also provides Twitter state helpers for scheduler-driven automation: "
     "tw_is_seen(key)→bool — check if a tweet_id or username was already processed; "
     "tw_mark_seen(key, value?)→str — mark as processed (prevents double-likes/follows); "
@@ -27,7 +30,7 @@ DOC = (
 __all__ = [
     "NAME", "DOC",
     "add_url", "remove_url", "check_url_now", "check_all_urls",
-    "get_status_summary", "get_url_history", "get_recent_changes",
+    "list_urls", "get_status_summary", "get_url_history", "get_recent_changes",
     "tw_is_seen", "tw_mark_seen", "tw_last_tweet_time", "tw_log_tweet",
 ]
 
@@ -354,10 +357,12 @@ class UrlMonitor:
             SELECT url_checks.url, url_checks.status_code, url_checks.check_time, url_checks.error
             FROM url_checks
             JOIN (
-                SELECT url, MAX(check_time) as latest FROM url_checks
+                SELECT url AS check_url, MAX(check_time) AS latest FROM url_checks
                 WHERE check_time > datetime('now', '-1 day')
                 GROUP BY url
-            ) latest_checks ON url_checks.url = latest_checks.url AND url_checks.check_time = latest_checks.latest
+            ) latest_checks
+              ON url_checks.url = latest_checks.check_url
+             AND url_checks.check_time = latest_checks.latest
         ''')
         
         latest_checks = cursor.fetchall()
@@ -415,23 +420,80 @@ class UrlMonitor:
 url_monitor_instance = UrlMonitor()
 
 # Skill interface functions
-def add_url(url: str, friendly_name: str = "", frequency_minutes: int = 60, 
-           tags: List[str] = None, alert_on_changes: bool = True) -> Dict:
+def add_url(url: str, friendly_name: str = "", frequency_minutes: int = 60,
+           tags=None, alert_on_changes: bool = True, frequency=None) -> Dict:
     """Add a new URL to monitor."""
-    return url_monitor_instance.add_url(url, friendly_name, frequency_minutes, 
-                                      tags, alert_on_changes)
+    # Accept tags as a plain string ("DDR5") or list (["DDR5"])
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    return url_monitor_instance.add_url(url, friendly_name, frequency_minutes,
+                                        tags, alert_on_changes, frequency=frequency)
 
 def get_status_summary() -> Dict:
     """Get comprehensive monitoring status."""
-    return url_monitor_instance.get_status_summary()
+    try:
+        return url_monitor_instance.get_status_summary()
+    except Exception as e:
+        return {"error": str(e)}
 
 def get_url_history(url: str, limit: int = 10) -> List[Dict]:
     """Get history for a specific URL."""
-    return url_monitor_instance.get_url_history(url, limit)
+    try:
+        return url_monitor_instance.get_url_history(url, int(limit))
+    except Exception as e:
+        return [{"error": str(e)}]
 
 def get_recent_changes(limit: int = 10) -> List[Dict]:
     """Get recent changes across all monitored URLs."""
-    return url_monitor_instance.get_recent_changes(limit)
+    try:
+        return url_monitor_instance.get_recent_changes(int(limit))
+    except Exception as e:
+        return [{"error": str(e)}]
+
+def list_urls() -> str:
+    """List all monitored URLs with their latest status. Preferred over get_status_summary."""
+    try:
+        conn = sqlite3.connect(url_monitor_instance.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT m.url, m.friendly_name, m.tags, m.check_frequency_minutes,
+                   m.last_check, m.is_active,
+                   c.status_code, c.response_time, c.error
+            FROM url_metadata m
+            LEFT JOIN url_checks c ON c.id = (
+                SELECT id FROM url_checks WHERE url = m.url
+                ORDER BY check_time DESC LIMIT 1
+            )
+            ORDER BY m.created_at DESC
+        ''')
+        rows = cursor.fetchall()
+        conn.close()
+        if not rows:
+            return "📭 No URLs being monitored."
+        lines = [f"🔍 Monitored URLs ({len(rows)}):"]
+        for r in rows:
+            url, name, tags, freq, last_check, active, status_code, resp_time, error = r
+            if status_code and int(status_code) < 400:
+                icon = "✅"
+            elif status_code:
+                icon = "❌"
+            else:
+                icon = "—"
+            line = f"\n  {icon} {url}" + (f"  ({name})" if name else "")
+            line += f"\n     status: {status_code or 'never checked'}"
+            if resp_time:
+                line += f"  |  resp: {float(resp_time):.2f}s"
+            line += f"  |  freq: {freq}min  |  {'active' if active else 'paused'}"
+            if tags:
+                line += f"\n     tags: {tags}"
+            if last_check:
+                line += f"\n     last check: {last_check}"
+            if error:
+                line += f"\n     error: {error}"
+            lines.append(line)
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ list_urls error: {e}"
 
 async def check_all_urls() -> List[Dict]:
     """Check all active URLs."""
