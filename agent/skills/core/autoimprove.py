@@ -16,6 +16,7 @@ Available loops:
 """
 
 import json
+import os
 import re
 import sys
 import time
@@ -74,6 +75,34 @@ PROPOSAL_THRESHOLD = 3
 
 # Min IMPROVED experiments needed before MAD confidence is meaningful
 MAD_MIN_SAMPLES = 3
+
+# ── Atomic file writes ────────────────────────────────────────────────────────
+
+def _atomic_write_jsonl(path: Path, records: List[Dict]) -> None:
+    """Overwrite a JSONL file atomically using a temp file + os.replace().
+
+    Writes to <path>.tmp first, then swaps it into place with a single
+    os.replace() call.  On Linux/macOS, os.replace() is a rename(2) syscall —
+    atomic at the filesystem level — so concurrent readers always see either
+    the old file or the new file, never a partial write or an empty file.
+
+    This is safer than opening with "w" (which truncates immediately) and then
+    writing, which leaves a window where another process reads an empty file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -200,10 +229,7 @@ def _load_suggestions() -> List[Dict]:
 def _save_suggestions(suggestions: List[Dict]) -> None:
     """Overwrite core_suggestions.jsonl with the full list."""
     try:
-        SUGGESTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with SUGGESTIONS_FILE.open("w", encoding="utf-8") as f:
-            for s in suggestions:
-                f.write(json.dumps(s, ensure_ascii=False, default=str) + "\n")
+        _atomic_write_jsonl(SUGGESTIONS_FILE, suggestions)
     except Exception:
         pass
 
@@ -231,10 +257,7 @@ def _load_ideas() -> List[Dict]:
 def _save_ideas(ideas: List[Dict]) -> None:
     """Overwrite improvement_ideas.jsonl with the full list."""
     try:
-        IDEAS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with IDEAS_FILE.open("w", encoding="utf-8") as f:
-            for idea in ideas:
-                f.write(json.dumps(idea, ensure_ascii=False, default=str) + "\n")
+        _atomic_write_jsonl(IDEAS_FILE, ideas)
     except Exception:
         pass
 
@@ -351,12 +374,22 @@ def _suggestion_key(skill_name: str, issue_type: str) -> str:
 
 # ── Lazy skill imports ─────────────────────────────────────────────────────────
 
-def _import_skill(module_name: str):
-    """Import a skill module, adding skill dirs to sys.path if needed."""
+def _import_skill(module_name: str, reload: bool = False):
+    """Import a skill module, adding skill dirs to sys.path if needed.
+
+    Args:
+        module_name: Module stem to import (e.g. 'seo_analyzer').
+        reload:      Force-reload from disk even if already cached in
+                     sys.modules. Pass True after a skill file is modified,
+                     so the patched version is picked up rather than the
+                     pre-patch copy that Python cached on first import.
+    """
+    import importlib
     for p in ("/app/skills/core", "/app/skills/dynamic", "/app/skills", "/app"):
         if p not in sys.path:
             sys.path.insert(0, p)
-    import importlib
+    if reload and module_name in sys.modules:
+        return importlib.reload(sys.modules[module_name])
     return importlib.import_module(module_name)
 
 
@@ -638,6 +671,74 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
     return result_text + footer
 
 
+# ── Layered smoke test ────────────────────────────────────────────────────────
+
+def _run_smoke_test(skill_name: str, ce) -> tuple:
+    """
+    Layered smoke test for a dynamic skill after patching.
+
+    Layer 1 (always): status() call, falling back to a bare import check.
+        Passes if ce.test_skill() returns a '✅'-prefixed string, or if the
+        fallback import snippet prints the skill's NAME without error.
+
+    Layer 2 (if skill defines get_test_scenarios): run up to 2 skill-defined
+        scenarios against the patched code.  Each scenario must be a dict:
+            name      — str, human-readable label shown on failure
+            code      — str, Python snippet passed to ce.run_snippet()
+            validator — callable(result: str) -> bool
+
+        Example in a skill file:
+            def get_test_scenarios(skill_name):
+                return [
+                    {
+                        "name":      "analyze_keywords returns density",
+                        "code":      "import seo_analyzer as s; print(s.analyze_keywords('hello world hello', 'hello'))",
+                        "validator": lambda r: "density" in r.lower(),
+                    },
+                ]
+
+        If get_test_scenarios() is absent, raises, or returns an empty list,
+        Layer 1 result stands — skills are not required to implement it.
+
+    Returns:
+        (passed: bool, detail: str)
+    """
+    # ── Layer 1: status() or import check ─────────────────────────────────────
+    test_result = ce.test_skill(skill_name, "status", "[]", timeout=10)
+    if not test_result.startswith("✅") and "not found" in test_result:
+        test_result = ce.run_snippet(
+            "import sys\n"
+            "sys.path.insert(0, '/app/skills/dynamic')\n"
+            f"import {skill_name}\n"
+            f"print(getattr({skill_name}, 'NAME', 'loaded ok'))",
+            timeout=10,
+        )
+    if not test_result.startswith("✅"):
+        return False, f"layer 1 failed: {test_result[:150]}"
+
+    # ── Layer 2: skill-defined scenarios (optional) ────────────────────────────
+    try:
+        # reload=True picks up the patched file, not the cached pre-patch version
+        skill_mod = _import_skill(skill_name, reload=True)
+        if not hasattr(skill_mod, "get_test_scenarios"):
+            return True, "layer 1 passed (no scenarios defined)"
+        scenarios = skill_mod.get_test_scenarios(skill_name)
+        if not scenarios:
+            return True, "layer 1 passed (empty scenario list)"
+        run_count = min(len(scenarios), 2)
+        for scenario in scenarios[:run_count]:
+            result = ce.run_snippet(scenario["code"], timeout=15)
+            if not scenario["validator"](result):
+                return False, (
+                    f"layer 2 failed — scenario '{scenario['name']}': {result[:120]}"
+                )
+    except Exception as exc:
+        # Scenario infrastructure error — layer 1 already passed, don't block
+        return True, f"layer 1 passed (scenario load error: {exc})"
+
+    return True, f"all layers passed ({run_count} scenario(s))"
+
+
 # ── Core experiment runner (DYNAMIC skills only) ──────────────────────────────
 
 def run_experiment(skill_name: str, issue_type: str) -> str:
@@ -659,14 +760,24 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
         issue_type:  One of: bare_except, missing_timeout
 
     Returns:
-        One-line outcome: IMPROVED | REVERTED | NO_CHANGE | SKIPPED
+        One-line outcome: IMPROVED | REVERTED | NO_CHANGE
+
+    Raises:
+        ValueError:   issue_type is not in AUTO_FIXABLE (hard safety boundary —
+                      this is never a soft skip, even if the caller rationalizes
+                      that a non-listed type "should" be safe), or skill not found.
+        ImportError:  required dependency skill unavailable.
+        RuntimeError: skill file unreadable or pre-patch audit failed.
     """
     if issue_type not in AUTO_FIXABLE:
-        return f"SKIPPED: '{issue_type}' not in auto-fixable set {AUTO_FIXABLE}"
+        raise ValueError(
+            f"refused: '{issue_type}' is not in the auto-fixable set {AUTO_FIXABLE}. "
+            f"Add it to AUTO_FIXABLE explicitly after human review — do not bypass this check."
+        )
 
     skill_path = SKILLS_DYNAMIC_DIR / f"{skill_name}.py"
     if not skill_path.exists():
-        return f"SKIPPED: {skill_name} not found in skills/dynamic/"
+        raise ValueError(f"skill '{skill_name}' not found in skills/dynamic/")
 
     timestamp = datetime.now().isoformat()
 
@@ -674,18 +785,18 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
         si = _import_skill("self_improvement")
         ce = _import_skill("code_executor")
     except ImportError as e:
-        return f"SKIPPED: dependency missing — {e}"
+        raise ImportError(f"dependency missing — {e}") from e
 
     # 1. Snapshot — safety net, no git needed
     try:
         original_code = skill_path.read_text(encoding="utf-8")
     except Exception as e:
-        return f"SKIPPED: cannot read {skill_name}.py — {e}"
+        raise RuntimeError(f"cannot read {skill_name}.py — {e}") from e
 
     # 2. Baseline audit
     before = si.analyze_skill_code(skill_name)
     if before.get("error"):
-        return f"SKIPPED: pre-audit error — {before['error']}"
+        raise RuntimeError(f"pre-audit failed for {skill_name} — {before['error']}")
 
     before_score  = before["health_score"]
     target_issues = [i for i in before["issues"] if i["type"] == issue_type]
@@ -709,17 +820,8 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
 
     after_score = after["health_score"]
 
-    # 5. Runtime smoke test — try status(), fall back to import check
-    test_result = ce.test_skill(skill_name, "status", "[]", timeout=10)
-    if not test_result.startswith("✅") and "not found" in test_result:
-        test_result = ce.run_snippet(
-            "import sys\n"
-            "sys.path.insert(0, '/app/skills/dynamic')\n"
-            f"import {skill_name}\n"
-            f"print(getattr({skill_name}, 'NAME', 'loaded ok'))",
-            timeout=10,
-        )
-    test_passed = test_result.startswith("✅")
+    # 5. Layered runtime smoke test
+    test_passed, test_detail = _run_smoke_test(skill_name, ce)
 
     # 6. Keep or restore
     issues_remaining = sum(1 for i in after.get("issues", []) if i["type"] == issue_type)
@@ -728,7 +830,7 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
     if not test_passed:
         skill_path.write_text(original_code, encoding="utf-8")
         outcome = "REVERTED"
-        reason  = f"runtime test failed: {test_result[:150]}"
+        reason  = f"runtime test failed: {test_detail}"
     elif issues_fixed > 0:
         outcome = "IMPROVED"
         reason  = f"score {before_score}→{after_score}, fixed {issues_fixed}/{len(target_issues)} issues"
@@ -754,6 +856,7 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
         "confidence_label": conf_label,
         "issues_fixed":     issues_fixed,
         "test_passed":      test_passed,
+        "test_detail":      test_detail,
         "reason":           reason,
     })
 
@@ -1111,10 +1214,7 @@ def _load_proposals() -> List[Dict]:
 def _save_proposals(proposals: List[Dict]) -> None:
     """Overwrite lesson_proposals.jsonl with the full list."""
     try:
-        PROPOSALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with PROPOSALS_FILE.open("w", encoding="utf-8") as f:
-            for p in proposals:
-                f.write(json.dumps(p, ensure_ascii=False, default=str) + "\n")
+        _atomic_write_jsonl(PROPOSALS_FILE, proposals)
     except Exception:
         pass
 
@@ -1333,7 +1433,10 @@ def _loop_ast_audit(max_experiments=10) -> str:
             if count >= max_experiments:
                 break
             if any(i["type"] == issue_type for i in analysis["issues"]):
-                results.append(f"  {run_experiment(skill_name, issue_type)}")
+                try:
+                    results.append(f"  {run_experiment(skill_name, issue_type)}")
+                except (ValueError, RuntimeError, ImportError) as exc:
+                    results.append(f"  ERROR [{skill_name}/{issue_type}]: {exc}")
                 count += 1
                 time.sleep(1)
 
@@ -1379,7 +1482,10 @@ def _loop_error_reduce(max_experiments=10) -> str:
         if analysis.get("error"):
             continue
         if any(i["type"] == top_issue for i in analysis["issues"]):
-            results.append(f"  {run_experiment(skill_name, top_issue)}")
+            try:
+                results.append(f"  {run_experiment(skill_name, top_issue)}")
+            except (ValueError, RuntimeError, ImportError) as exc:
+                results.append(f"  ERROR [{skill_name}/{top_issue}]: {exc}")
             count += 1
             time.sleep(1)
 
