@@ -2038,23 +2038,29 @@ def _call_llm(
         else:
             _tgt_model = _tgt_model.replace("ollama/", "")
             
+        _thinking_enabled = os.getenv("OLLAMA_THINK", "false").lower() == "true"
+        # When thinking is on, cap token generation to prevent runaway reasoning
+        # chains on ambiguous requests. OLLAMA_NUM_PREDICT_THINK defaults to 4000
+        # (enough for think block + response). When thinking is off, keep unlimited
+        # so skill tags are never cut mid-generation.
+        if _thinking_enabled:
+            _num_predict = int(os.getenv("OLLAMA_NUM_PREDICT_THINK", "4000"))
+        else:
+            _num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", "-1"))
         payload = {
             "model": _tgt_model,
             "messages": ollama_messages,
             "stream": False,
-            # Set OLLAMA_THINK=true in .env to enable Qwen3.5 extended thinking.
-            # Thinking produces richer reasoning chains but slower responses.
-            "think": os.getenv("OLLAMA_THINK", "false").lower() == "true",
+            "think": _thinking_enabled,
             "options": {
                 "temperature": 0.4,
                 "num_ctx": 32768,
-                # -1 means unlimited — prevents Ollama from cutting the response
-                # mid-generation, which leaves skill tags unclosed and unparseable.
-                "num_predict": int(os.getenv("OLLAMA_NUM_PREDICT", "-1")),
+                "num_predict": _num_predict,
             }
         }
-        print(f"🔄 Calling Ollama at {ollama_base}...")
-        resp = requests.post(f"{ollama_base}/api/chat", json=payload, timeout=300)
+        _ollama_timeout = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+        print(f"🔄 Calling Ollama at {ollama_base} (think={_thinking_enabled}, num_predict={_num_predict}, timeout={_ollama_timeout}s)...")
+        resp = requests.post(f"{ollama_base}/api/chat", json=payload, timeout=_ollama_timeout)
         resp.raise_for_status()
         raw = resp.json().get("message", {}).get("content", "No response from Ollama")
         # Return raw content — <think> blocks are stripped in the chat loop
@@ -2818,6 +2824,18 @@ CRITICAL: The RETRIEVED_MEMORY above is an archive from past sessions. It is bac
 - If the user's current message is clearly about a DIFFERENT topic than RETRIEVED_MEMORY → IGNORE the memory entirely and answer the current question.
 - NEVER let past memory override or redirect your response to the current user message.
 - Only reference past memory if the user explicitly asks about something from a previous conversation.
+
+## UNCLEAR OR AMBIGUOUS REQUESTS
+
+If you genuinely cannot determine what the user wants, do NOT reason about it extensively.
+Ask ONE short clarifying question immediately and stop. Do not attempt to guess and execute.
+
+Examples of when to ask:
+- "build me a thing" → ask what kind of thing
+- "fix it" with no prior context → ask what needs fixing
+- "make it better" with nothing to reference → ask what "it" refers to
+
+One question. Short. Then wait.
 
 ## REMEMBER
 
