@@ -49,7 +49,9 @@ DOC = (
     "list_proposals(status='pending')→show lesson-derived improvement proposals needing a human decision; status: pending|resolved|dismissed|all; "
     "park_idea(idea, source='')→park a free-form improvement idea to improvement_ideas.jsonl for later action — use during research, mid-experiment, or when user mentions a potential improvement; "
     "list_ideas(status='open')→show parked improvement ideas; status: open|dismissed|all; "
-    "dismiss_idea(idea_id)→mark a parked idea as dismissed after acting on it or deciding it's not worth pursuing."
+    "dismiss_idea(idea_id)→mark a parked idea as dismissed after acting on it or deciding it's not worth pursuing; "
+    "should_create_skill(execution_logs, iteration_count, user_message='')→analyze a completed task trace to decide if a new skill should be created; "
+    "returns {create: bool, reason, trigger, complexity_score}; triggers: complexity (5+ calls), error_recovery, correction, workflow (3+ skills)."
 )
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -1814,6 +1816,88 @@ def write_spec(task: str, approach: str, details: str) -> str:
 
 # ── Export list ────────────────────────────────────────────────────────────────
 
+def should_create_skill(
+    execution_logs: list,
+    iteration_count: int,
+    user_message: str = "",
+) -> dict:
+    """
+    Analyze a completed task trace to decide if a new skill should be created.
+
+    Evaluates four triggers:
+      - complexity:     5+ tool calls in the task
+      - error_recovery: errors occurred before eventual success
+      - correction:     user message contains correction language
+      - workflow:       3+ distinct skills combined in one task
+
+    Returns:
+        {
+            "create": bool,
+            "reason": str,
+            "trigger": str,   # "complexity" | "error_recovery" | "correction" | "workflow" | "none"
+            "complexity_score": float,  # 0.0–1.0
+        }
+    """
+    if not execution_logs:
+        return {
+            "create": False,
+            "reason": "no tool calls in this task",
+            "trigger": "none",
+            "complexity_score": 0.0,
+        }
+
+    total_calls  = len(execution_logs)
+    error_calls  = sum(1 for l in execution_logs if l.get("status") == "error")
+    success_calls = total_calls - error_calls
+    unique_skills = {l.get("skill", "") for l in execution_logs if l.get("skill")}
+
+    # Composite score: how non-trivial was this task?
+    complexity_score = round(
+        0.4 * min(total_calls / 5.0, 1.0)           # up to 0.4 for 5+ calls
+        + 0.3 * min(len(unique_skills) / 3.0, 1.0)  # up to 0.3 for 3+ distinct skills
+        + 0.3 * (1.0 if error_calls > 0 and success_calls > 0 else 0.0),  # error recovery
+        2,
+    )
+
+    # Correction keywords in the user's message
+    _CORRECTION_SIGNALS = (
+        "wrong", "no,", "don't", "stop", "instead",
+        "actually", "not that", "incorrect", "that's not",
+    )
+    _has_correction = any(sig in user_message.lower() for sig in _CORRECTION_SIGNALS)
+
+    trigger: Optional[str] = None
+    reason  = ""
+
+    if _has_correction:
+        trigger = "correction"
+        reason  = "User corrected the approach — the fix pattern may be worth capturing as a skill"
+    elif total_calls >= 5 and len(unique_skills) >= 3:
+        trigger = "workflow"
+        reason  = (
+            f"Multi-skill workflow: {total_calls} calls across "
+            f"{len(unique_skills)} skills ({', '.join(sorted(unique_skills))})"
+        )
+    elif error_calls > 0 and success_calls > 0:
+        trigger = "error_recovery"
+        reason  = (
+            f"Recovered from {error_calls} error(s) before success — "
+            "the successful path is worth capturing"
+        )
+    elif total_calls >= 5:
+        trigger = "complexity"
+        reason  = f"Complex task: {total_calls} tool calls across {iteration_count} iteration(s)"
+
+    create = trigger is not None and complexity_score >= 0.4
+
+    return {
+        "create":           create,
+        "reason":           reason,
+        "trigger":          trigger or "none",
+        "complexity_score": complexity_score,
+    }
+
+
 __all__ = [
     "NAME",
     "DOC",
@@ -1829,4 +1913,5 @@ __all__ = [
     "status",
     "design",
     "write_spec",
+    "should_create_skill",
 ]
