@@ -2820,6 +2820,7 @@ CRITICAL: The RETRIEVED_MEMORY above is an archive from past sessions. It is bac
 
         _continuation_pushes = 0        # cloud: how many "stop describing, act!" pushes sent so far
         _local_continuation_pushes = 0  # local: same, for Ollama/tag path
+        _consecutive_error_iters = 0    # how many consecutive iterations had only failed skill calls
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             print(f"🔁 Agent iteration {iteration}/{MAX_ITERATIONS}")
@@ -2971,6 +2972,14 @@ CRITICAL: The RETRIEVED_MEMORY above is an archive from past sessions. It is bac
                     break
 
                 print(f"⚙️  Iteration {iteration}: {len(execution_log)} skill(s) executed, looping…")
+                # Dead-end detection: track consecutive all-error iterations
+                _all_failed_this_iter = bool(execution_log) and all(
+                    l.get("status") == "error" for l in execution_log
+                )
+                if _all_failed_this_iter:
+                    _consecutive_error_iters += 1
+                else:
+                    _consecutive_error_iters = 0
                 messages.append({"role": "assistant", "content": executed_reply})
                 # Compute remaining website steps from the full execution log.
                 _wf_written = set()
@@ -3098,10 +3107,19 @@ CRITICAL: The RETRIEVED_MEMORY above is an archive from past sessions. It is bac
                         "RETRY analyze_design_folder with the correct path from that list."
                         " DO NOT write HTML or CSS until the brief succeeds."
                     )
+                _deadend_nudge = ""
+                if _consecutive_error_iters >= 2:
+                    _deadend_nudge = (
+                        f" ⚠️ DEAD-END: {_consecutive_error_iters} consecutive iterations"
+                        " all failed. Do NOT repeat the same approach and do NOT give up."
+                        " Pivot completely: try a different skill, different query,"
+                        " or use create_skill to build a custom tool for this problem."
+                    )
+                    _consecutive_error_iters = 0  # reset after nudge
                 messages.append({
                     "role": "system",
                     "content": (
-                        f"Step done.{brief_injection}{pending_note}"
+                        f"Step done.{brief_injection}{pending_note}{_deadend_nudge}"
                         f" Skill syntax: <skill:NAME.FUNC>args</skill:NAME.FUNC>"
                     ),
                 })
@@ -3158,6 +3176,28 @@ CRITICAL: The RETRIEVED_MEMORY above is an archive from past sessions. It is bac
                 })
                 # Append one tool result message per call
                 messages.extend(tool_result_messages)
+
+                # Dead-end detection: track consecutive all-error iterations
+                _all_failed_this_iter = bool(execution_log) and all(
+                    l.get("status") == "error" for l in execution_log
+                )
+                if _all_failed_this_iter:
+                    _consecutive_error_iters += 1
+                else:
+                    _consecutive_error_iters = 0
+
+                if _consecutive_error_iters >= 2:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"⚠️ You have failed {_consecutive_error_iters} consecutive"
+                            " iterations. Do NOT give up or report failure."
+                            " Pivot completely: try a different skill, different approach,"
+                            " or use create_skill to build a custom tool for this problem."
+                            " Keep going."
+                        ),
+                    })
+                    _consecutive_error_iters = 0  # reset after nudge
 
                 # Keep a text summary as fallback ai_reply in case the loop exhausts
                 ai_reply = "\n".join(
@@ -3231,6 +3271,30 @@ CRITICAL: The RETRIEVED_MEMORY above is an archive from past sessions. It is bac
                 print(f"⚠️  Async persist error: {_e}")
 
         threading.Thread(target=_persist_async, daemon=True, name="persist-memory").start()
+
+        # Post-loop: detect skill creation opportunity — non-blocking, never delays response
+        _exec_logs_snap2  = list(all_execution_logs)
+        _iter_snap        = iteration
+        _user_msg_snap    = req.message
+
+        def _maybe_suggest_skill():
+            try:
+                if "autoimprove" not in skills:
+                    return
+                result = skills["autoimprove"].should_create_skill(
+                    _exec_logs_snap2, _iter_snap, _user_msg_snap
+                )
+                if isinstance(result, dict) and result.get("create"):
+                    skills["autoimprove"].park_idea(
+                        f"Skill opportunity [{result.get('trigger')}]: {result.get('reason')} "
+                        f"— Task: {_user_msg_snap[:200]}",
+                        source="auto_detect",
+                    )
+                    print(f"💡 Skill opportunity parked (trigger={result.get('trigger')}): {result.get('reason')}")
+            except Exception as _se:
+                print(f"⚠️  Skill detection error: {_se}")
+
+        threading.Thread(target=_maybe_suggest_skill, daemon=True, name="skill-detect").start()
 
         _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": len(all_execution_logs)})
         return {
