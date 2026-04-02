@@ -36,8 +36,9 @@ DOC = (
     "depth='deep' runs 4 iterations with 4 sources each vs quick's 2×2; "
     "coverage metric = 0.4×source_yield + 0.6×query_term_coverage; "
     "run_experiment(skill_name, issue_type)→one autoresearch cycle on a dynamic skill; "
-    "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core; "
+    "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining; "
     "run_all(max_experiments=5)→all loops in sequence (overnight autopilot); "
+    "pattern_mining loop→scan session_logs.jsonl for recurring task_type patterns → park skill proposals via park_idea(); review with list_ideas(); "
     "suggest_core(skill_name=None, max_skills=30)→audit core skills, save proposed patches to memory; skill_name targets one skill (e.g. 'browser_session'); "
     "list_suggestions(status='pending', skill_name=None)→show pending|applied|failed|all core suggestions; skill_name filters to one skill; "
     "apply_suggestion(skill_name, issue_type)→apply one approved suggestion to a core skill; "
@@ -66,6 +67,7 @@ PATTERNS_FILE      = MEMORY_DIR / "error_patterns.json"
 LESSONS_FILE       = MEMORY_DIR / "lessons.jsonl"
 PROPOSALS_FILE     = MEMORY_DIR / "lesson_proposals.jsonl"
 IDEAS_FILE         = MEMORY_DIR / "improvement_ideas.jsonl"
+SESSION_LOG        = MEMORY_DIR / "session_logs.jsonl"
 
 # Only deterministic, low-risk issue types get auto-applied
 AUTO_FIXABLE = ("bare_except", "missing_timeout", "missing_docstring")
@@ -1518,6 +1520,110 @@ def _loop_daily_review() -> str:
     return f"📋 daily_review:\n{review}"
 
 
+def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
+    """
+    Loop 4 — scan session_logs.jsonl for recurring task_type patterns and park
+    skill proposals when a pattern appears frequently but has no matching skill.
+
+    Uses task_type tags written by app.py's _detect_task_type() — no LLM call,
+    no ChromaDB access needed. Results go to improvement_ideas.jsonl via
+    park_idea() so you review them with autoimprove.list_ideas().
+
+    Args:
+        days:            How many days of session history to scan (default 7)
+        min_occurrences: Min times a task_type must appear to earn a proposal (default 3)
+        max_proposals:   Cap on new proposals per run (default 5)
+
+    Returns:
+        Summary of patterns found and proposals parked.
+    """
+    try:
+        days            = int(days)
+        min_occurrences = int(min_occurrences)
+        max_proposals   = int(max_proposals)
+    except (ValueError, TypeError):
+        days, min_occurrences, max_proposals = 7, 3, 5
+
+    if not SESSION_LOG.exists():
+        return "NO_DATA: session_logs.jsonl not found — no conversations logged yet"
+
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+    # Tally task_type occurrences within the time window, collecting example queries
+    counts: Dict[str, List[str]] = {}
+    try:
+        for line in SESSION_LOG.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("timestamp", "") < cutoff:
+                continue
+            task_type = (entry.get("metadata") or {}).get("task_type", "").strip()
+            if not task_type or task_type == "general":
+                continue
+            counts.setdefault(task_type, []).append(
+                (entry.get("user") or "")[:120]
+            )
+    except Exception as e:
+        return f"❌ pattern_mining: could not read session_logs.jsonl — {e}"
+
+    if not counts:
+        return f"✅ pattern_mining: no typed task patterns in the last {days} day(s)"
+
+    # Build set of already-existing skill stems so we skip covered patterns
+    existing: set = set()
+    for skill_dir in (SKILLS_DYNAMIC_DIR, SKILLS_CORE_DIR):
+        if skill_dir.exists():
+            existing |= {p.stem for p in skill_dir.glob("*.py") if not p.name.startswith("_")}
+
+    # Sort by frequency descending, filter, propose
+    ranked = sorted(counts.items(), key=lambda x: -len(x[1]))
+    proposed, skipped_existing, skipped_threshold = 0, 0, 0
+
+    for task_type, examples in ranked:
+        if proposed >= max_proposals:
+            break
+        if len(examples) < min_occurrences:
+            skipped_threshold += 1
+            continue
+        if task_type in existing:
+            skipped_existing += 1
+            continue
+        sample = "; ".join(dict.fromkeys(examples[:3]))  # dedupe while preserving order
+        park_idea(
+            f"Recurring task pattern '{task_type}' seen {len(examples)}x in {days}d "
+            f"— consider a new skill. Example queries: {sample}",
+            source="pattern_mining",
+        )
+        proposed += 1
+
+    _log({
+        "timestamp":         datetime.now().isoformat(),
+        "loop":              "pattern_mining",
+        "outcome":           "MINED",
+        "days_scanned":      days,
+        "patterns_found":    len(counts),
+        "proposals_parked":  proposed,
+        "skipped_existing":  skipped_existing,
+        "skipped_threshold": skipped_threshold,
+    })
+
+    if proposed == 0:
+        return (
+            f"✅ pattern_mining: {len(counts)} pattern(s) found — "
+            f"none qualified ({skipped_existing} already have a skill, "
+            f"{skipped_threshold} below {min_occurrences}x threshold)"
+        )
+    return (
+        f"🔍 pattern_mining: {proposed} new proposal(s) parked "
+        f"({len(counts)} patterns scanned, {skipped_existing} already covered) "
+        f"— review with autoimprove.list_ideas()"
+    )
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def run_loop(loop_name: str, max_experiments=10) -> str:
@@ -1525,7 +1631,7 @@ def run_loop(loop_name: str, max_experiments=10) -> str:
     Run a single named improvement loop.
 
     Args:
-        loop_name:       ast_audit | error_reduce | daily_review | suggest_core
+        loop_name:       ast_audit | error_reduce | daily_review | suggest_core | pattern_mining
         max_experiments: Max experiments / skills to scan
 
     Returns:
@@ -1533,10 +1639,11 @@ def run_loop(loop_name: str, max_experiments=10) -> str:
     """
     max_experiments = int(max_experiments)
     _loops = {
-        "ast_audit":    lambda: _loop_ast_audit(max_experiments),
-        "error_reduce": lambda: _loop_error_reduce(max_experiments),
-        "daily_review": _loop_daily_review,
-        "suggest_core": lambda: suggest_core(max_experiments),
+        "ast_audit":       lambda: _loop_ast_audit(max_experiments),
+        "error_reduce":    lambda: _loop_error_reduce(max_experiments),
+        "daily_review":    _loop_daily_review,
+        "suggest_core":    lambda: suggest_core(max_experiments),
+        "pattern_mining":  _loop_pattern_mining,
     }
     if loop_name not in _loops:
         return f"❌ Unknown loop '{loop_name}'. Available: {list(_loops.keys())}"
@@ -1555,7 +1662,8 @@ def run_all(max_experiments=5) -> str:
       1. daily_review  — learn what happened, no changes
       2. ast_audit     — auto-fix dynamic skills
       3. error_reduce  — target top error pattern in dynamic skills
-      4. suggest_core  — audit core skills, queue suggestions for your review
+      4. suggest_core     — audit core skills, queue suggestions for your review
+      5. pattern_mining   — scan session history for recurring task patterns, park skill proposals
 
     Args:
         max_experiments: Max experiments per loop (default 5)
@@ -1568,7 +1676,7 @@ def run_all(max_experiments=5) -> str:
     divider = "=" * 52
     results = [f"🤖 AutoImprove started — {datetime.now().strftime('%Y-%m-%d %H:%M')}"]
 
-    for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core"):
+    for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core", "pattern_mining"):
         results.append(f"\n{divider}\n🔬 {loop_name}")
         results.append(run_loop(loop_name, max_experiments))
         time.sleep(2)
@@ -1576,6 +1684,7 @@ def run_all(max_experiments=5) -> str:
     elapsed = time.time() - start
     results.append(f"\n{divider}\n✅ run_all complete — {elapsed:.1f}s total")
     results.append("Review core suggestions: autoimprove.list_suggestions()")
+    results.append("Review skill proposals:  autoimprove.list_ideas()")
     return "\n".join(results)
 
 
