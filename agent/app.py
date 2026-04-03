@@ -2613,6 +2613,27 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _fcache.read_text("/app/identity.md").strip()
         or _fcache.read_text("/app/../identity.md").strip()
     )
+    # Append external capability files so _build_identity's trigger logic can
+    # conditionally inject them exactly as when they lived inside identity.md.
+    # web_clone and email are keyword-gated (TRINITY_START/END tags).
+    # web_design was never gated — always append it unconditionally.
+    for _ext_name, _ext_paths in (
+        ("web_clone", ("/app/web_clone.md", "/app/../web_clone.md")),
+        ("email",     ("/app/email.md",     "/app/../email.md")),
+    ):
+        _ext_content = _fcache.read_text(_ext_paths[0]).strip() or _fcache.read_text(_ext_paths[1]).strip()
+        if _ext_content:
+            _identity_raw += (
+                f"\n\n<!-- TRINITY_START:{_ext_name} -->\n"
+                f"{_ext_content}\n"
+                f"<!-- TRINITY_END:{_ext_name} -->"
+            )
+    _web_design = (
+        _fcache.read_text("/app/web_design.md").strip()
+        or _fcache.read_text("/app/../web_design.md").strip()
+    )
+    if _web_design:
+        _identity_raw += f"\n\n{_web_design}"
     _identity_content = _build_identity(_identity_raw, _msg_words)
 
     # Load lessons: deduplicated by skill+error_type (most recent fix wins), sorted newest first (cached)
