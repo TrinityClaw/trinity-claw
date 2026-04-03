@@ -2260,7 +2260,9 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     # to safely handle retrieved memory alongside the full system prompt + history.
     # Stale ChromaDB results cause local models to drift off-topic (e.g., answering about
     # old scheduler sessions instead of the current question).
-    if _is_local_model:
+    _req_m_early = (req.model or "").lower()
+    if (os.getenv("MODEL_SOURCE", "cloud") == "local"
+            or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi"))):
         collection = None
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
         try:
@@ -2676,7 +2678,13 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
             if _je.get("user_insights"):
                 _journal_lines.append(f"  User: {_je['user_insights']}")
             if _je.get("next_steps"):
-                _journal_lines.append(f"  Next steps promised: {_je['next_steps']}")
+                _ns = _je["next_steps"]
+                # Skip next_steps that are purely about scheduled/recurring tasks —
+                # they run automatically and don't need to occupy the model's attention.
+                _sched_kw = ("schedul", "recurring", "cron", "every day", "every hour",
+                             "nightly", "daily review", "autoimprove", "run loop")
+                if not any(k in _ns.lower() for k in _sched_kw):
+                    _journal_lines.append(f"  Next steps promised: {_ns}")
         _user_model_lines = []
         _user_model_raw = _fcache.read_text("/app/memory/user_model.json")
         if _user_model_raw:
@@ -2727,9 +2735,13 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
     _url_directive = ""
     if _url_in_message:
         _found_url = _url_in_message.group(0).rstrip('.,;)')
+        if _is_local_model:
+            _fetch_instruction = f"Output this tag immediately as your first action: <skill:web.fetch>{_found_url}</skill:web.fetch>"
+        else:
+            _fetch_instruction = f"You MUST call web__fetch with url='{_found_url}' as your FIRST tool call."
         _url_directive = (
             f"⚠️ FIRST ACTION — MANDATORY: The user's message contains a URL: {_found_url}\n"
-            f"You MUST call web__fetch with url='{_found_url}' as your FIRST tool call.\n"
+            f"{_fetch_instruction}\n"
             f"Do NOT call web__search. Do NOT respond with news, prices, or any other topic.\n"
             f"Fetch the URL, read the result, then answer the user's question about it.\n\n"
         )
@@ -2909,12 +2921,20 @@ One question. Short. Then wait.
         # If user is correcting a wrong answer, inject a forcing instruction so the model
         # actually researches the right answer instead of repeating the mistake.
         if _detect_correction(req.message):
+            if _is_local_model:
+                _search_instruction = (
+                    "Output a search tag immediately: "
+                    "<skill:web.search>QUERY ABOUT THE TOPIC</skill:web.search> "
+                    "Replace QUERY with the actual topic from the conversation."
+                )
+            else:
+                _search_instruction = "Call web__search with a query about the topic, or autoimprove__research."
             messages.append({
                 "role": "system",
                 "content": (
                     "⚠️ CORRECTION: Your previous response was flagged as wrong by the user. "
                     "DO NOT repeat it. You MUST: "
-                    "1) Call web__search or autoimprove__research to find the accurate answer. "
+                    f"1) {_search_instruction} "
                     "2) Check <LEARNED_LESSONS> for what you got wrong. "
                     "3) Only respond after you have verified the new answer with a live source. "
                     "Acknowledge the mistake in one sentence, then immediately search."
