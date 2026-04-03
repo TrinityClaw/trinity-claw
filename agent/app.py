@@ -2083,7 +2083,7 @@ def _call_llm(
             "think": _thinking_enabled,
             "options": {
                 "temperature": 0.4,
-                "num_ctx": 32768,
+                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "65536")),
                 "num_predict": _num_predict,
             }
         }
@@ -2918,28 +2918,35 @@ One question. Short. Then wait.
         messages.extend(history)
         messages.append({"role": "user", "content": user_message})
 
-        # If user is correcting a wrong answer, inject a forcing instruction so the model
-        # actually researches the right answer instead of repeating the mistake.
+        # If user is correcting a wrong answer, force the model to search before answering.
+        # IMPORTANT: For local/Ollama models, Gemma4's chat template ignores system-role
+        # messages that appear mid-conversation (only position-0 system is rendered).
+        # So we embed the correction directly in the user turn instead of appending a
+        # dead system message. For cloud models, tool-calling handles this differently.
         if _detect_correction(req.message):
             if _is_local_model:
-                _search_instruction = (
-                    "Output a search tag immediately: "
-                    "<skill:web.search>QUERY ABOUT THE TOPIC</skill:web.search> "
-                    "Replace QUERY with the actual topic from the conversation."
+                _correction_prefix = (
+                    "[CORRECTION REQUIRED] Your previous answer was flagged as WRONG. "
+                    "Do NOT repeat it.\n"
+                    "Your VERY FIRST output must be a web search tag — replace TOPIC with "
+                    "the actual subject from the conversation history:\n"
+                    "<skill:web.search>TOPIC</skill:web.search>\n"
+                    "After the search result comes back, verify the facts and give the correct answer.\n\n"
                 )
+                # Overwrite the last user turn — Gemma4 WILL read this as part of its prompt
+                messages[-1] = {"role": "user", "content": _correction_prefix + user_message}
             else:
-                _search_instruction = "Call web__search with a query about the topic, or autoimprove__research."
-            messages.append({
-                "role": "system",
-                "content": (
-                    "⚠️ CORRECTION: Your previous response was flagged as wrong by the user. "
-                    "DO NOT repeat it. You MUST: "
-                    f"1) {_search_instruction} "
-                    "2) Check <LEARNED_LESSONS> for what you got wrong. "
-                    "3) Only respond after you have verified the new answer with a live source. "
-                    "Acknowledge the mistake in one sentence, then immediately search."
-                ),
-            })
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "⚠️ CORRECTION: Your previous response was flagged as wrong by the user. "
+                        "DO NOT repeat it. You MUST: "
+                        "1) Call web__search with a query about the topic, or autoimprove__research. "
+                        "2) Check <LEARNED_LESSONS> for what you got wrong. "
+                        "3) Only respond after you have verified the new answer with a live source. "
+                        "Acknowledge the mistake in one sentence, then immediately search."
+                    ),
+                })
 
         all_execution_logs = []
         ai_reply = ""
