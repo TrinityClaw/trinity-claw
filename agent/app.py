@@ -151,6 +151,14 @@ def _check_rate_limit(api_key: str):
     timestamps.append(now)
     _rate_timestamps[key_id] = timestamps
 
+def _extract_short_doc(full_doc: str) -> str:
+    """Option A fallback: first segment of DOC before the first ';', capped at 120 chars."""
+    if not full_doc or full_doc == "No description":
+        return full_doc
+    first = full_doc.split(";")[0].strip()
+    return first[:120] if len(first) > 120 else first
+
+
 def load_skills_improved():
     """
     Improved skill loading with cache invalidation and metadata extraction.
@@ -215,9 +223,11 @@ def load_skills_improved():
                 ]
 
             skill_name = skill_file.stem
+            full_doc = getattr(module, 'DOC', doc)
             skills[skill_name] = module
             skill_metadata[skill_name] = {
-                "doc": getattr(module, 'DOC', doc),
+                "doc": full_doc,
+                "short_doc": getattr(module, 'SHORT_DOC', None) or _extract_short_doc(full_doc),
                 "functions": functions,
                 "path": str(skill_file),
                 "loaded_at": datetime.now().isoformat()
@@ -2460,16 +2470,16 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                     f"[SKILL: {name}] {meta.get('doc', 'No doc')}\n" + "\n".join(func_lines)
                 )
             else:
-                # Compact: just name + doc. Model can ask to see full docs if needed.
+                # Compact: short_doc only — full doc loads only when skill is relevant.
                 available_skills.append(
-                    f"[SKILL: {name}] {meta.get('doc', 'No doc')} (functions: {funcs})"
+                    f"[SKILL: {name}] {meta.get('short_doc', meta.get('doc', 'No doc'))} (functions: {funcs})"
                 )
         else:
             if _is_relevant:
                 available_skills.append(f"- {name}: {meta.get('doc', 'No doc')} (functions: {funcs})")
             else:
-                # Compact for cloud too: just name + doc, no function listing.
-                available_skills.append(f"- {name}: {meta.get('doc', 'No doc')}")
+                # Compact: short_doc only — full doc loads only when skill is relevant.
+                available_skills.append(f"- {name}: {meta.get('short_doc', meta.get('doc', 'No doc'))}")
 
     skills_doc = "\n".join(available_skills)
     _skill_index_line = "Skills you have: " + ", ".join(skill_names_list)
