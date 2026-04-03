@@ -219,7 +219,7 @@ def _dispatch(prompt: str, task_name: str) -> str:
             "http://localhost:8001/chat",
             json={"message": prompt, "session_id": f"sched_{task_name}"},
             headers=headers,
-            timeout=120,
+            timeout=1800,
         )
         if resp.ok:
             data = resp.json()
