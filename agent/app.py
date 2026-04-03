@@ -2256,6 +2256,12 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     CHROMA_SKIP_IF_TURNS = 2            # skip ChromaDB if session has >= this many turns
     chroma_context = ""
     active_turns = len([m for m in history if m.get("role") == "user"])
+    # Skip ChromaDB entirely for local/Ollama models — their context windows are too small
+    # to safely handle retrieved memory alongside the full system prompt + history.
+    # Stale ChromaDB results cause local models to drift off-topic (e.g., answering about
+    # old scheduler sessions instead of the current question).
+    if _is_local_model:
+        collection = None
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
         try:
             # Fetch 5 candidates so scoring has enough to choose from
@@ -2478,7 +2484,6 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
             "\n## SKILL USAGE REMINDER\n\n"
             "You CANNOT read files, save data, browse the web, or perform any external action without a skill tag.\n"
             "Every action needs a tag. Syntax: <skill:SKILLNAME.FUNCTIONNAME>arg1,arg2</skill:SKILLNAME.FUNCTIONNAME>\n"
-            f"{_skill_index_line}\n\n"
             "CRITICAL RULE: Never say 'I will do X' — just DO it. Output the skill tag immediately.\n"
             "For multi-step tasks: after each skill result, output the NEXT skill tag without waiting.\n"
             "Only write a text reply when ALL steps are done and all results are in context.\n"
@@ -2618,7 +2623,12 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
             try:
                 _l = json.loads(_raw)
                 if _l.get("fix_applied"):
-                    _key = f"{_l.get('skill','?')}:{_l.get('error_type','?')}"
+                    # For user corrections, use a content hash so different mistakes get separate slots
+                    if _l.get("type") == "correction":
+                        import hashlib as _hl
+                        _key = "correction:" + _hl.md5(_l.get("bad_reply_preview", "")[:100].encode()).hexdigest()[:12]
+                    else:
+                        _key = f"{_l.get('skill','?')}:{_l.get('error_type','?')}"
                     if _key not in _seen_keys:
                         _seen_keys[_key] = _l
             except Exception:
@@ -2627,9 +2637,15 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _deduped = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:20]
         for _l in _deduped:
             _safe_fix = _sanitize_external_content(_l["fix_applied"], source="lessons.jsonl")
-            _lessons_lines.append(
-                f"- [{_l.get('skill', '?')}] {_l.get('error_type', '?')}: fix → {_safe_fix}"
-            )
+            if _l.get("type") == "correction" and _l.get("bad_reply_preview"):
+                _safe_bad = _sanitize_external_content(_l["bad_reply_preview"][:150], source="lessons.jsonl")
+                _lessons_lines.append(
+                    f"- [user_correction] I said: \"{_safe_bad}\" → user flagged it wrong: {_safe_fix}"
+                )
+            else:
+                _lessons_lines.append(
+                    f"- [{_l.get('skill', '?')}] {_l.get('error_type', '?')}: fix → {_safe_fix}"
+                )
     except Exception:
         pass
     _lessons_block = "\n".join(_lessons_lines) if _lessons_lines else "None yet."
@@ -2889,6 +2905,21 @@ One question. Short. Then wait.
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": user_message})
+
+        # If user is correcting a wrong answer, inject a forcing instruction so the model
+        # actually researches the right answer instead of repeating the mistake.
+        if _detect_correction(req.message):
+            messages.append({
+                "role": "system",
+                "content": (
+                    "⚠️ CORRECTION: Your previous response was flagged as wrong by the user. "
+                    "DO NOT repeat it. You MUST: "
+                    "1) Call web__search or autoimprove__research to find the accurate answer. "
+                    "2) Check <LEARNED_LESSONS> for what you got wrong. "
+                    "3) Only respond after you have verified the new answer with a live source. "
+                    "Acknowledge the mistake in one sentence, then immediately search."
+                ),
+            })
 
         all_execution_logs = []
         ai_reply = ""
@@ -3351,11 +3382,14 @@ One question. Short. Then wait.
                     lesson = {
                         "timestamp": datetime.now().isoformat(),
                         "type": "correction",
+                        "skill": skill_ctx,
+                        "error_type": "user_correction",
                         "skill_context": skill_ctx,
                         "task_type": task_type,
                         "session_id": _req_session_id,
                         "correction_msg": _req_message[:500],
                         "bad_reply_preview": prev_ai[:300],
+                        "fix_applied": f"User flagged this reply as wrong: {_req_message[:300]}",
                     }
                     try:
                         _lessons_path = Path("/app/memory/lessons.jsonl")
