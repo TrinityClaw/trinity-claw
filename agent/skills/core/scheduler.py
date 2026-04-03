@@ -214,10 +214,18 @@ def _dispatch(prompt: str, task_name: str) -> str:
     """POST the stored prompt to the agent's /chat endpoint."""
     api_key = os.getenv("TRINITY_API_KEY", "")
     headers = {"X-API-Key": api_key} if api_key else {}
+    # Prepend a hard execution directive so scheduled tasks never trigger the
+    # Design-First Rule (SO #24) or go into planning mode — they must act immediately.
+    execution_prompt = (
+        "[SCHEDULED TASK — EXECUTE IMMEDIATELY]\n"
+        "Do NOT call autoimprove.design. Do NOT plan or describe. "
+        "Output skill tags immediately and execute to completion.\n\n"
+        + prompt
+    )
     try:
         resp = requests.post(
             "http://localhost:8001/chat",
-            json={"message": prompt, "session_id": f"sched_{task_name}"},
+            json={"message": execution_prompt, "session_id": f"sched_{task_name}"},
             headers=headers,
             timeout=1800,
         )
