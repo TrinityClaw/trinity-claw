@@ -37,7 +37,7 @@ DOC = (
     "coverage metric = 0.4×source_yield + 0.6×query_term_coverage; "
     "run_experiment(skill_name, issue_type)→one autoresearch cycle on a dynamic skill; "
     "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining; "
-    "run_all(max_experiments=5)→all loops in sequence (overnight autopilot); "
+    "run_all(max_experiments=5, max_runtime_seconds=None)→all loops in sequence (overnight autopilot); max_runtime_seconds caps total wall time — remaining loops are skipped cleanly if the deadline is hit; "
     "pattern_mining loop→scan session_logs.jsonl for recurring task_type patterns → park skill proposals via park_idea(); review with list_ideas(); "
     "suggest_core(skill_name=None, max_skills=30)→audit core skills, save proposed patches to memory; skill_name targets one skill (e.g. 'browser_session'); "
     "list_suggestions(status='pending', skill_name=None)→show pending|applied|failed|all core suggestions; skill_name filters to one skill; "
@@ -114,8 +114,8 @@ def _log(entry: Dict) -> None:
         IMPROVE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with IMPROVE_LOG.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-    except Exception:
-        pass
+    except Exception as _exc:
+        sys.stderr.write(f"[autoimprove] _log failed: {_exc}\n")
 
 
 def _load_log(days: int = 7) -> List[Dict]:
@@ -232,8 +232,8 @@ def _save_suggestions(suggestions: List[Dict]) -> None:
     """Overwrite core_suggestions.jsonl with the full list."""
     try:
         _atomic_write_jsonl(SUGGESTIONS_FILE, suggestions)
-    except Exception:
-        pass
+    except Exception as _exc:
+        sys.stderr.write(f"[autoimprove] _save_suggestions failed: {_exc}\n")
 
 
 # ── Ideas parking lot ─────────────────────────────────────────────────────────
@@ -260,8 +260,8 @@ def _save_ideas(ideas: List[Dict]) -> None:
     """Overwrite improvement_ideas.jsonl with the full list."""
     try:
         _atomic_write_jsonl(IDEAS_FILE, ideas)
-    except Exception:
-        pass
+    except Exception as _exc:
+        sys.stderr.write(f"[autoimprove] _save_ideas failed: {_exc}\n")
 
 
 def park_idea(idea: str, source: str = "") -> str:
@@ -376,6 +376,21 @@ def _suggestion_key(skill_name: str, issue_type: str) -> str:
 
 # ── Lazy skill imports ─────────────────────────────────────────────────────────
 
+_SKILL_PATHS = ("/app/skills/core", "/app/skills/dynamic", "/app/skills", "/app")
+_skill_paths_ready: bool = False
+
+
+def _ensure_skill_paths() -> None:
+    """Add skill directories to sys.path exactly once per process."""
+    global _skill_paths_ready
+    if _skill_paths_ready:
+        return
+    for p in _SKILL_PATHS:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    _skill_paths_ready = True
+
+
 def _import_skill(module_name: str, reload: bool = False):
     """Import a skill module, adding skill dirs to sys.path if needed.
 
@@ -387,9 +402,7 @@ def _import_skill(module_name: str, reload: bool = False):
                      pre-patch copy that Python cached on first import.
     """
     import importlib
-    for p in ("/app/skills/core", "/app/skills/dynamic", "/app/skills", "/app"):
-        if p not in sys.path:
-            sys.path.insert(0, p)
+    _ensure_skill_paths()
     if reload and module_name in sys.modules:
         return importlib.reload(sys.modules[module_name])
     return importlib.import_module(module_name)
@@ -460,6 +473,24 @@ def _missing_terms(query: str, sources: List[Dict]) -> List[str]:
         if s.get("content") and not str(s["content"]).startswith("fetch error")
     ).lower()
     return [t for t in terms if t not in combined]
+
+
+def _fetch_with_retry(web, url: str, max_retries: int = 3, base_delay: float = 1.0) -> str:
+    """Fetch a URL with exponential backoff on transient failures.
+
+    Retries up to max_retries times, sleeping base_delay * 2^attempt seconds
+    between each attempt (1s, 2s, 4s by default). Raises the last exception
+    if all retries are exhausted.
+    """
+    last_exc: Exception = RuntimeError("no attempts made")
+    for attempt in range(max_retries):
+        try:
+            return web.fetch(url)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                time.sleep(base_delay * (2 ** attempt))
+    raise last_exc
 
 
 def _refine_query(base_query: str, iteration: int, missing: List[str]) -> str:
@@ -551,7 +582,7 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
             if url not in seen_urls and len(iter_sources) < sources_per_iter:
                 seen_urls.add(url)
                 try:
-                    content = web.fetch(url)
+                    content = _fetch_with_retry(web, url)
                     iter_sources.append({
                         "url":       url,
                         "content":   (content or "")[:3000],
@@ -1217,8 +1248,8 @@ def _save_proposals(proposals: List[Dict]) -> None:
     """Overwrite lesson_proposals.jsonl with the full list."""
     try:
         _atomic_write_jsonl(PROPOSALS_FILE, proposals)
-    except Exception:
-        pass
+    except Exception as _exc:
+        sys.stderr.write(f"[autoimprove] _save_proposals failed: {_exc}\n")
 
 
 def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
@@ -1654,7 +1685,7 @@ def run_loop(loop_name: str, max_experiments=10) -> str:
     return f"{result}\n\n⏱ Loop '{loop_name}' finished in {elapsed:.1f}s"
 
 
-def run_all(max_experiments=5) -> str:
+def run_all(max_experiments=5, max_runtime_seconds=None) -> str:
     """
     Run all loops in sequence. Designed for overnight autopilot.
 
@@ -1666,17 +1697,36 @@ def run_all(max_experiments=5) -> str:
       5. pattern_mining   — scan session history for recurring task patterns, park skill proposals
 
     Args:
-        max_experiments: Max experiments per loop (default 5)
+        max_experiments:    Max experiments per loop (default 5)
+        max_runtime_seconds: Hard wall-time cap in seconds. If elapsed time exceeds
+                             this before a loop starts, remaining loops are skipped
+                             and the run exits cleanly. None = no cap (default).
 
     Returns:
         Combined results from all loops.
     """
     max_experiments = int(max_experiments)
+    deadline: Optional[float] = None
+    if max_runtime_seconds is not None:
+        try:
+            deadline = float(max_runtime_seconds)
+        except (ValueError, TypeError):
+            deadline = None
+
     start   = time.time()
     divider = "=" * 52
     results = [f"🤖 AutoImprove started — {datetime.now().strftime('%Y-%m-%d %H:%M')}"]
+    if deadline is not None:
+        results.append(f"   runtime cap: {deadline:.0f}s")
 
     for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core", "pattern_mining"):
+        elapsed_so_far = time.time() - start
+        if deadline is not None and elapsed_so_far >= deadline:
+            results.append(
+                f"\n{divider}\n⏱ runtime cap reached ({elapsed_so_far:.1f}s ≥ {deadline:.0f}s) "
+                f"— skipping '{loop_name}' and remaining loops"
+            )
+            break
         results.append(f"\n{divider}\n🔬 {loop_name}")
         results.append(run_loop(loop_name, max_experiments))
         time.sleep(2)
