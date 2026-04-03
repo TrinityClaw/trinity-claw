@@ -3416,7 +3416,7 @@ One question. Short. Then wait.
                         "session_id": _req_session_id,
                         "correction_msg": _req_message[:500],
                         "bad_reply_preview": prev_ai[:300],
-                        "fix_applied": f"User flagged this reply as wrong: {_req_message[:300]}",
+                        "fix_applied": _ai_reply_snap[:400] if _ai_reply_snap else f"User flagged this reply as wrong: {_req_message[:300]}",
                     }
                     try:
                         _lessons_path = Path("/app/memory/lessons.jsonl")
