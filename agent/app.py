@@ -1172,6 +1172,35 @@ def _extract_skill_context(ai_reply: str, fallback: str) -> str:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+_IDENTITY_SECTION_RE = re.compile(
+    r'<!-- TRINITY_START:(\w+) -->(.*?)<!-- TRINITY_END:\1 -->',
+    re.DOTALL
+)
+_IDENTITY_TRIGGERS: dict = {
+    "web_clone": {"clone", "cloner", "cloning", "website_cloner", "scrape", "replicate", "copy site", "copy website"},
+    "email":     {"email", "mail", "gmail", "compose", "inbox", "draft", "reply", "send message"},
+}
+
+def _build_identity(content: str, msg_words: set) -> str:
+    """Strip conditional sections from identity.md that are irrelevant to the current message.
+
+    Sections wrapped in <!-- TRINITY_START:name --> / <!-- TRINITY_END:name --> are only
+    injected when the message contains at least one trigger keyword for that section.
+    Everything outside those markers is always included.
+    Saves ~2,500–3,000 tokens on non-clone, non-email conversations.
+    """
+    def _replacer(m: re.Match) -> str:
+        name = m.group(1)
+        body = m.group(2).strip()
+        triggers = _IDENTITY_TRIGGERS.get(name, set())
+        if not triggers or (msg_words & triggers):
+            return "\n\n" + body + "\n\n"
+        return "\n"  # section omitted — leave a single newline so surrounding text stays clean
+
+    result = _IDENTITY_SECTION_RE.sub(_replacer, content)
+    return re.sub(r'\n{3,}', '\n\n', result).strip()
+
+
 def _detect_task_type(user_msg: str, skills_used: list) -> str:
     """Infer task category from message keywords and skills called."""
     msg = user_msg.lower()
@@ -2573,10 +2602,11 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         pass
 
     # Load identity file (cached)
-    _identity_content = (
+    _identity_raw = (
         _fcache.read_text("/app/identity.md").strip()
         or _fcache.read_text("/app/../identity.md").strip()
     )
+    _identity_content = _build_identity(_identity_raw, _msg_words)
 
     # Load lessons: deduplicated by skill+error_type (most recent fix wins), sorted newest first (cached)
     _lessons_lines = []
