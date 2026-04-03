@@ -5,6 +5,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 NAME = "google_drive"
+SHORT_DOC = "List, upload, download, create folders, and manage files in Google Drive."
 DOC = (
     "Google Drive — list, search, upload, download, create folders, and delete files. "
     "One-time setup: authorize() returns a consent URL; authorize(CODE) saves the token. After that, fully automatic. "

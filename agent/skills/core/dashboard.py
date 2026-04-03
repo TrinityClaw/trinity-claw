@@ -2,6 +2,7 @@ import psutil
 from datetime import datetime, timedelta
 
 NAME = "dashboard"
+SHORT_DOC = "System health monitoring — CPU, memory, disk, network, uptime, and active alerts."
 DOC = (
     "System health and monitoring: "
     "health()→full snapshot of CPU/memory/disk/network/uptime/top processes; "

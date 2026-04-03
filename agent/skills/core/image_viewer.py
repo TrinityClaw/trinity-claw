@@ -12,6 +12,7 @@ except ImportError:
 
 
 NAME = "image_viewer"
+SHORT_DOC = "View, inspect metadata, list, and OCR-extract text from local image files."
 DOC = "Load and analyse local image files. Functions: view_image(path) — render inline HTML preview, inspect_image(path) — metadata/EXIF, list_images(dir) — list images in a folder, extract_text(path, lang='eng') — OCR: extract all text from any image (screenshots, documents, receipts, photos). Supported lang codes: eng (English), ita (Italian), spa (Spanish), fra (French), ell (Greek), srp (Serbian Cyrillic), srp_latn (Serbian Latin). Combine with '+' e.g. lang='eng+srp_latn'. Returns the raw text string."
 VERSION = "1.1.0"
 

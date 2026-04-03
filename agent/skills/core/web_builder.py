@@ -29,6 +29,7 @@ except ImportError:
 SKILL_TIMEOUT = int(os.getenv("WEB_BUILDER_TIMEOUT", "300"))
 
 NAME = "web_builder"
+SHORT_DOC = "Build, preview, and manage HTML/CSS/JS website projects with a live preview server on port 8090."
 DOC = (
     "Build, preview, and manage HTML/CSS/JS website projects with live preview server on port 8090. "
     "analyze_design_folder(folder,language?,model?)→batch-analyze all design images with vision LLM, returns JSON brief; "

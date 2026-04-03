@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 NAME = "competitive_intel"
+SHORT_DOC = "Monitor competitor websites for pricing and content changes; manage a watchlist and schedule daily checks."
 SKILL_TIMEOUT = 300  # 5-minute timeout — checking 10+ sites needs room
 
 DOC = (

@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 NAME = "gmail"
+SHORT_DOC = "Read Gmail inbox, search emails, and reply via the Gmail API."
 DOC = (
     "Read your Gmail inbox using the Gmail API. "
     "One-time setup: enable Gmail API in Google Cloud Console (same project as Calendar), "

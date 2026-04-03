@@ -32,6 +32,7 @@ except ImportError:
     _HAS_LITELLM = False
 
 NAME = "knowledge_base"
+SHORT_DOC = "ChromaDB-backed business knowledge base — ingest files, semantic search, manage indexed documents."
 DOC = (
     "Business knowledge base backed by ChromaDB. "
     "Drop files into /app/memory/knowledge/ then call ingest_folder() to index them. "

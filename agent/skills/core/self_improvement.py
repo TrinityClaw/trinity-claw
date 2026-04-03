@@ -26,6 +26,7 @@ from typing import List, Dict, Optional
 # ============================================================================
 
 NAME = "self_improvement"  # Must match filename: self_improvement.py
+SHORT_DOC = "Analyze, patch, and health-check skill files; record mistakes and surface recurring error patterns."
 DOC = (
     "Self-healing and learning: analyze skills, record mistakes, auto-fix code, prevent repeat errors. "
     "Returns: audit(skill_name)→health report with issues; "

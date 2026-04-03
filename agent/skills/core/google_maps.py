@@ -5,6 +5,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 NAME = "google_maps"
+SHORT_DOC = "Geocoding, place search, directions, and nearby search via OpenStreetMap — no API key needed."
 DOC = (
     "Maps & location — geocoding, place search, directions, nearby search. "
     "100% free, no API key needed (uses OpenStreetMap/Nominatim + OSRM). "

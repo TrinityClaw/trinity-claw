@@ -6,6 +6,7 @@ from pathlib import Path
 
 # Updated to match your filename
 NAME = "create_skill"
+SHORT_DOC = "Create and install new Python skills into /app/skills/dynamic/; reload all skills."
 DOC = (
     "Create and install new Python skills into /app/skills/dynamic/. "
     "Returns: create_new_skill(skill_filename, code)→confirmation with the path where the file was saved, "

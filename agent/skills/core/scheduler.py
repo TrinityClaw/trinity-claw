@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 NAME = 'scheduler'
+SHORT_DOC = "Schedule agent prompts to run once or on a recurring schedule using natural language times."
 DOC = (
     'Schedule agent prompts to run once or recurring. Natural language: "tomorrow at 3pm", "in 2 hours", "every 1h". '
     'Functions: schedule(name, when, prompt), schedule_recurring(name, every, prompt), '

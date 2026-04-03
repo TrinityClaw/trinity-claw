@@ -6,6 +6,7 @@ from datetime import datetime, date, timedelta
 NAME = "notes"
 
 logger = logging.getLogger(__name__)
+SHORT_DOC = "Persistent notes storage — save, load, search, tag, and delete notes across sessions."
 DOC = (
     "Persistent notes storage across sessions. "
     "Functions: "

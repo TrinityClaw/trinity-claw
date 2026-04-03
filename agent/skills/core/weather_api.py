@@ -1,6 +1,7 @@
 import requests
 
 NAME = "weather_api"
+SHORT_DOC = "Real-time weather, forecast (up to 16 days), and air quality data — no API key required."
 DOC = (
     "Fetches real weather data (no API key required). "
     "Functions: get_weather(city), get_forecast(city, days=3, up to 16 days), get_air_quality(city)."

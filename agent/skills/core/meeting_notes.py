@@ -20,6 +20,7 @@ from pathlib import Path
 from datetime import datetime
 
 NAME = "meeting_notes"
+SHORT_DOC = "Extract structured info (summary, action items, decisions) from meeting transcripts."
 DOC = (
     "Extract structured info from meeting transcripts or documents. "
     "Functions: "

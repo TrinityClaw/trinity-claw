@@ -10,6 +10,7 @@ from pathlib import Path
 NAME = "files"
 
 logger = logging.getLogger(__name__)
+SHORT_DOC = "Read/write/patch files in /app/; checkpoint and rollback file changes."
 DOC = (
     "File operations: read/list anywhere in /app/, write/delete within /app/memory/ or /app/skills/dynamic/. "
     "Returns: cat(path)→full file text; ls(path)→directory listing with names; "

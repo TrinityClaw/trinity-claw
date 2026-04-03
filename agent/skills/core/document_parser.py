@@ -10,6 +10,7 @@ import csv
 from pathlib import Path
 
 NAME = "document_parser"
+SHORT_DOC = "Parse and extract text, tables, and metadata from PDF, DOCX, XLSX, CSV, and other file formats."
 DOC = (
     "Parse and extract content from PDF, DOCX, XLSX, CSV, TXT, MD, JSON, YAML files stored under /app/. "
     "Paths are relative to /app/memory/ unless absolute. "

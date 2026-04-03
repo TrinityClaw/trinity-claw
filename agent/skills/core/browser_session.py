@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime
 
 NAME = "browser_session"
+SHORT_DOC = "Control your logged-in Chrome browser via CDP — navigate, click, fill forms, and take screenshots."
 DOC = (
     "Control your existing logged-in Chrome browser from the agent via CDP (Chrome DevTools Protocol). "
     "Unlike the 'web' skill which launches a fresh private browser, this skill ATTACHES to your "
@@ -1124,6 +1125,10 @@ def scroll(direction: str = "down", tab_index: int = 0) -> str:
         if direction not in scroll_map:
             return f"❌ Unknown direction '{direction}'. Use: up / down / top / bottom"
         page.evaluate(scroll_map[direction])
+        # Wait for rendering to settle before returning — without this a
+        # screenshot() called immediately after scroll captures the page
+        # mid-animation (partially blank or still at the old position).
+        page.wait_for_timeout(900)
         return f"✅ Scrolled {direction}"
     except Exception as e:
         return f"❌ {e}"

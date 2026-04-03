@@ -2,6 +2,7 @@ import subprocess
 import shlex
 
 NAME = "terminal"
+SHORT_DOC = "Execute whitelisted shell commands (ls, git, touch, cat) inside the container."
 DOC = (
     "Execute whitelisted shell commands (ls, git, touch, cat) inside the container. "
     "Returns: run(command)→stdout/stderr text output of the command, or rejection message if "

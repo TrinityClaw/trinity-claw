@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 NAME = "database"
+SHORT_DOC = "SQLite structured data storage — create tables, insert, query, update, and export data."
 DOC = (
     "SQLite structured data storage. Databases live in /app/memory/databases/. "
     "Functions: "

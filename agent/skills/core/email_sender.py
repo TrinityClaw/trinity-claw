@@ -21,6 +21,7 @@ dotenv.load_dotenv('/app/.env', override=True)
 logger = logging.getLogger(__name__)
 
 NAME = "email_sender"
+SHORT_DOC = "Send emails via SMTP or SendGrid — credentials auto-loaded from .env, no setup needed."
 DOC = (
     "Email sending via SMTP (Gmail, Outlook, any server) or SendGrid. "
     "Credentials auto-loaded from .env — no setup() needed. "

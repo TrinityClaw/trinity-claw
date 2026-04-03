@@ -7,6 +7,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 NAME = "youtube"
+SHORT_DOC = "Search YouTube videos/channels, get video details and transcripts via YouTube Data API."
 DOC = (
     "YouTube Data API: search, analyze videos and channels. "
     "Setup: gcal_credentials.json + authorize() or activate(api_key). "

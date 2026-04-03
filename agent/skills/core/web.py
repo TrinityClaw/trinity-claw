@@ -14,6 +14,7 @@ from urllib.parse import urlparse, urljoin
 SKILL_TIMEOUT = 90  # seconds — browser ops need room beyond the default 30s
 
 NAME = "web"
+SHORT_DOC = "Web search, fetch URLs, download files, and find/download images; full browser automation via Playwright."
 DOC = (
     "Web operations: fetch, search (multiple engines), scrape, download binary files, "
     "find and download images, and full browser automation via Playwright (browser_* functions). "

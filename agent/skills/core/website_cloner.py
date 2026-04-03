@@ -28,6 +28,7 @@ from urllib.parse import urlparse, urljoin
 SKILL_TIMEOUT = int(os.getenv("WEBSITE_CLONER_TIMEOUT", "60"))
 
 NAME = "website_cloner"
+SHORT_DOC = "Clone a live website's design tokens (colors, fonts, sections) into a web_builder project."
 DOC = (
     "Clone a live website's design system into a web_builder project. "
     "extract_tokens(url) → scrape URL and return JSON with CSS variables, colors, fonts, nav links, per-section heading/CTA colors, interaction types, and full section structure. "

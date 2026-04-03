@@ -32,6 +32,7 @@ from typing import Optional
 
 # ── Skill metadata (required by skill loader) ────────────────────────────────
 NAME = "code_executor"
+SHORT_DOC = "Run Python snippets, test skills, execute bash commands, and evaluate math expressions safely."
 DOC = (
     "Safe Python sandbox: run code snippets, test existing skills, and calculate expressions in isolated subprocesses. "
     "Returns: run_snippet(code)→stdout output of the code (up to 2KB) or error message; "

@@ -27,6 +27,7 @@ from typing import Dict, List, Optional
 # ── Skill metadata ─────────────────────────────────────────────────────────────
 
 NAME = "autoimprove"
+SHORT_DOC = "Overnight self-improvement loops — auto-fix dynamic skills, suggest patches for core skills, run research loops."
 DOC = (
     "Autoresearch-style overnight self-improvement loops — two-track system: "
     "DYNAMIC skills auto-fix (snapshot→patch→test→keep/restore); "

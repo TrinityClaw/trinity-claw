@@ -6,6 +6,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 NAME = "google_calendar"
+SHORT_DOC = "Read, create, update, and delete Google Calendar events; find free slots."
 DOC = (
     "Google Calendar — read, create, update, and delete events. "
     "One-time setup: place credentials.json in /app/memory/ then call authorize() to get a URL, "

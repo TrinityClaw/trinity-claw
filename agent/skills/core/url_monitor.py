@@ -15,6 +15,7 @@ from urllib.parse import urlparse, urljoin
 import xml.etree.ElementTree as ET
 from pathlib import Path
 NAME = "url_monitor"
+SHORT_DOC = "Monitor URLs for uptime and content changes; also tracks Twitter automation state."
 DOC = (
     "Monitor URLs for changes and health status. "
     "Functions: add_url(url, friendly_name?, frequency_minutes?, tags?, alert_on_changes?) — tags can be list or plain string; "
