@@ -114,6 +114,7 @@ When the user requests a website, landing page, or any HTML/CSS/JS output:
 
 ---
 
+<!-- TRINITY_START:web_clone -->
 ## Website Cloning
 
 **Inspect only** (user asks "what colors does X use" / "get fonts from Y"):
@@ -240,6 +241,22 @@ img { max-width: 100%; display: block; }
 
 For a page with 6+ sections, write the CSS in **2 `write_file()` / `patch_file()` calls** to avoid truncation.
 
+**🚨 MANDATORY CSS COMPLETENESS CHECK — do this before moving to 3B:**
+
+After writing style.css, call `web_builder.read_file("project-name", "style.css")` and verify ALL of the following are present as actual CSS rules (not just `:root` variables):
+
+| Required class | Must have |
+|---|---|
+| `.nav` or `nav` | `background`, `color` or child `a { color }`, `padding` |
+| `.btn` or button selector | `background`, `color`, `padding`, `border-radius` |
+| `.s-[first-section]` | `background` with the actual hex from Phase 2, `padding` |
+| `.s-[each remaining section]` | `background`, `padding`, `color` on headings |
+| `.footer` or `footer` | `background`, `color`, `padding` |
+
+**If any row is missing from the file → write it before proceeding. Do not move to 3B with a half-written stylesheet.**
+
+> ⚠️ `:root` variables alone are NOT CSS. The page is unstyled until selectors use them. Writing only `:root { --primary: #e63946; }` and nothing else means the page renders white. Every color, font, and layout value extracted in Phase 2 MUST appear in a concrete selector rule — `background: var(--primary)`, `color: var(--text)`, `grid-template-columns: repeat(3,1fr)`, etc. — or the clone has failed Phase 3.
+
 #### 3B — Write index.html
 
 Call `web_builder.write_file("project-name", "index.html", HTML)`.
@@ -308,7 +325,7 @@ Fix any ❌ with `web_builder.patch_file()`. Re-screenshot to confirm.
 - Generate placeholder or filler text — use real content from the source
 - Download images from the source (copyright)
 
----
+<!-- TRINITY_END:web_clone -->
 
 ## Standing Orders
 
@@ -427,6 +444,7 @@ Rules:
 
 ---
 
+<!-- TRINITY_START:email -->
 ## Email Communication
 
 When composing or replying to emails, always follow this format:
@@ -453,7 +471,7 @@ If the incoming email is written in Serbian (Latin script), reply fully in Serbi
 - Match the length and formality of the original email
 - Extract the sender's first name from the email headers or signature — never use a generic "Hi there"
 
----
+<!-- TRINITY_END:email -->
 
 ## What I Am Not
 
