@@ -1492,6 +1492,58 @@ def _strip_fake_result_blocks(text: str) -> str:
     return '\n'.join(out)
 
 
+def _normalize_gemma_skill_tags(text: str) -> str:
+    """Convert Gemma 4's native <skill_call:name.func(kwarg='val')> to
+    <skill:name.func>val</skill:name.func> so execute_skill_tags can parse it.
+    Handles both single and double quoted kwarg values."""
+    def _convert(m):
+        skill_fn = m.group(1)   # e.g. "weather_api.get_weather"
+        args_str = m.group(2)   # e.g. "city='Niš'"
+        # Extract values from key="val", key='val', or key=bare_val pairs
+        values = []
+        for groups in re.findall(r'\w+\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([\w./\-\u0080-\uffff]+))', args_str):
+            v = groups[0] or groups[1] or groups[2]
+            if v:
+                values.append(v)
+        content = ",".join(values) if values else args_str.strip()
+        parts = skill_fn.split(".", 1)
+        skill_name = parts[0]
+        func_name = parts[1] if len(parts) > 1 else ""
+        tag = f"{skill_name}.{func_name}" if func_name else skill_name
+        return f"<skill:{tag}>{content}</skill:{tag}>"
+    return re.sub(r'<skill_call:([\w.]+)\(([^)]*)\)>', _convert, text)
+
+
+def _normalize_plain_skill_calls(text: str, known_skills: set) -> str:
+    """Convert bare function-call style output like weather_api.get_weather(Nis) to
+    <skill:weather_api.get_weather>Nis</skill:weather_api.get_weather>.
+    Only fires when no <skill:...> tags are already present, and only for known skills."""
+    if not known_skills or re.search(r'<skill:', text):
+        return text  # real tags already exist — don't interfere
+    def _convert(m):
+        skill_fn = m.group(1)   # e.g. "weather_api.get_weather"
+        args_str = m.group(2).strip()
+        parts = skill_fn.split(".", 1)
+        if len(parts) != 2:
+            return m.group(0)
+        skill_name = parts[0]
+        if skill_name not in known_skills:
+            return m.group(0)  # not a real skill — leave as-is
+        # Extract kwarg values (city='Niš') or bare positional (Nis)
+        kv_groups = re.findall(r'\w+\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([\w./\-\u0080-\uffff]+))', args_str)
+        if kv_groups:
+            values = []
+            for groups in kv_groups:
+                v = groups[0] or groups[1] or groups[2]
+                if v:
+                    values.append(v)
+            content = ",".join(values)
+        else:
+            content = args_str.strip("'\"")
+        return f"<skill:{skill_fn}>{content}</skill:{skill_fn}>"
+    return re.sub(r'\b([\w]+\.[\w]+)\(([^)]*)\)', _convert, text)
+
+
 def execute_skill_tags(response_text: str, auto_verify: bool = True, search_budget: int = 2) -> tuple:
     """
     Parse and execute <skill:name.function>args</skill:name.function> tags.
@@ -2083,7 +2135,7 @@ def _call_llm(
         # (enough for think block + response). When thinking is off, keep unlimited
         # so skill tags are never cut mid-generation.
         if _thinking_enabled:
-            _num_predict = int(os.getenv("OLLAMA_NUM_PREDICT_THINK", "4000"))
+            _num_predict = int(os.getenv("OLLAMA_NUM_PREDICT_THINK", "12000"))
         else:
             _num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", "-1"))
         payload = {
@@ -2092,19 +2144,40 @@ def _call_llm(
             "stream": False,
             "think": _thinking_enabled,
             "options": {
-                "temperature": 0.4,
-                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "65536")),
+                "temperature": 1.0,
+                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "8192")),
                 "num_predict": _num_predict,
             }
         }
+        if tools:
+            payload["tools"] = tools
         _ollama_timeout = int(os.getenv("OLLAMA_TIMEOUT", "120"))
         print(f"🔄 Calling Ollama at {ollama_base} (think={_thinking_enabled}, num_predict={_num_predict}, timeout={_ollama_timeout}s)...")
         resp = requests.post(f"{ollama_base}/api/chat", json=payload, timeout=_ollama_timeout)
         resp.raise_for_status()
-        raw = resp.json().get("message", {}).get("content", "No response from Ollama")
-        # Return raw content — <think> blocks are stripped in the chat loop
-        # BEFORE execute_skill_tags so reasoning never inflates stored messages.
-        return {"content": raw.strip(), "tool_calls": None}
+        _raw_msg = resp.json().get("message", {})
+        raw = _raw_msg.get("content") or ""
+        # Normalize Ollama tool_calls → OpenAI format expected by _execute_tool_calls
+        # Ollama: arguments is already a dict; OpenAI: arguments is a JSON string + needs id
+        _ollama_tool_calls = _raw_msg.get("tool_calls") or []
+        _normalized_tool_calls = []
+        for _tc in _ollama_tool_calls:
+            _fn = _tc.get("function", {})
+            _args = _fn.get("arguments", {})
+            if isinstance(_args, str):
+                try:
+                    _args = json.loads(_args)
+                except Exception:
+                    _args = {}
+            _normalized_tool_calls.append({
+                "id": str(uuid.uuid4()),
+                "type": "function",
+                "function": {"name": _fn.get("name", ""), "arguments": json.dumps(_args)},
+            })
+        return {
+            "content": raw.strip(),
+            "tool_calls": _normalized_tool_calls or None,
+        }
     else:
         headers = {"Authorization": f"Bearer {API_KEY}"}
         cloud_messages = list(messages)
@@ -2990,7 +3063,7 @@ One question. Short. Then wait.
         # 5. Agentic loop: Reason → Act → Observe → Reason …
         # Cloud mode uses native function calling (structured tool_calls).
         # Local/Ollama mode falls back to the legacy XML skill-tag system.
-        tools = _build_tools_schema() if model_source != "local" else []
+        tools = _build_tools_schema()  # used by both cloud (native) and local (Ollama) tool calling
 
         _continuation_pushes = 0        # cloud: how many "stop describing, act!" pushes sent so far
         _local_continuation_pushes = 0  # local: same, for Ollama/tag path
@@ -3022,7 +3095,32 @@ One question. Short. Then wait.
             )
 
             if model_source == "local":
-                # ── Legacy tag-based path (Ollama) ───────────────────────────
+                # ── Local/Ollama path ─────────────────────────────────────────
+                # Gemma 4 and other agentic Ollama models return structured tool_calls
+                # when tools are provided. Use them directly — no text parsing needed.
+                if llm_response.get("tool_calls"):
+                    tool_calls = llm_response["tool_calls"]
+                    ai_reply   = llm_response.get("content") or ""
+                    print(f"⚙️  Iteration {iteration}: {len(tool_calls)} Ollama tool call(s), looping…")
+                    tool_result_messages, execution_log = _execute_tool_calls(tool_calls)
+                    all_execution_logs.extend(execution_log)
+                    for _l in execution_log:
+                        _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
+                    messages.append({
+                        "role": "assistant",
+                        "content": ai_reply or None,
+                        "tool_calls": tool_calls,
+                    })
+                    messages.extend(tool_result_messages)
+                    ai_reply = "\n".join(
+                        f"[✅ {l['skill']}.{l.get('function','')} Result: {l.get('result','')}]"
+                        if l["status"] == "success"
+                        else f"[❌ {l['skill']}.{l.get('function','')} Error: {l.get('error','')}]"
+                        for l in execution_log
+                    )
+                    continue
+
+                # ── Fallback: XML tag-based path (non-agentic Ollama models) ──
                 ai_reply = llm_response["content"]
 
                 # Strip <think>...</think> blocks BEFORE tag execution.
@@ -3030,6 +3128,9 @@ One question. Short. Then wait.
                 # Thinking models (Qwen3.5, DeepSeek-R1) often emit skill tags inside
                 # <think> as part of their reasoning — those would silently vanish.
                 # We extract them and prepend to the response body so they still execute.
+                # Normalize Gemma 4's native <skill_call:name.func(args)> → <skill:name.func>args</skill:...>
+                ai_reply = _normalize_gemma_skill_tags(ai_reply)
+
                 _rescued_tags = []
                 for _think_match in re.finditer(r"<think>.*?</think>", ai_reply, flags=re.DOTALL):
                     _rescued_tags.extend(
@@ -3041,6 +3142,9 @@ One question. Short. Then wait.
                 # Only prepend rescued tags if the body has none (avoid double-execution).
                 if _rescued_tags and not re.search(r"<skill:\w+\.\w+>", ai_reply):
                     ai_reply = "\n".join(_rescued_tags) + ("\n" + ai_reply if ai_reply else "")
+                # Last resort: if model output bare calls like weather_api.get_weather(London)
+                # with no XML tags at all, convert them now (only touches known skills).
+                ai_reply = _normalize_plain_skill_calls(ai_reply, set(skills.keys()))
 
                 executed_reply, execution_log, pending_summary = execute_skill_tags(
                     ai_reply, auto_verify=req.require_verification
@@ -3290,8 +3394,13 @@ One question. Short. Then wait.
                         " or use create_skill to build a custom tool for this problem."
                     )
                     _consecutive_error_iters = 0  # reset after nudge
+                # Local models (Gemma, Qwen, etc.) only attend to the initial
+                # system message — mid-conversation "system" role injections are
+                # silently ignored by most Ollama chat templates.  Use "user" role
+                # instead so the continuation instruction actually reaches the model.
+                _continuation_role = "user" if model_source == "local" else "system"
                 messages.append({
-                    "role": "system",
+                    "role": _continuation_role,
                     "content": (
                         f"Step done.{brief_injection}{pending_note}{_deadend_nudge}"
                         f" Skill syntax: <skill:NAME.FUNC>args</skill:NAME.FUNC>"
