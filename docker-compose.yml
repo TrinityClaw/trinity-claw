@@ -38,7 +38,9 @@ services:
       - "11434:11434"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_KEEP_ALIVE=5m
+      - OLLAMA_KEEP_ALIVE=24h             # keep model loaded, avoid cold-start penalty
+      - OLLAMA_FLASH_ATTENTION=1          # reduces KV cache VRAM usage ~30%
+      - OLLAMA_KV_CACHE_TYPE=q8_0         # halves KV cache VRAM vs fp16 default
     volumes:
       - ollama_data:/root/.ollama
     deploy:
@@ -99,9 +101,11 @@ services:
       - AGENT_TEMPERATURE_LOCAL=1.0   # Ollama / local model (Gemma 4 optimal for agentic tasks)
       - AGENT_TEMPERATURE_CLOUD=0.2   # LiteLLM / cloud model
       # ── Local model context window ────────────────────────────────────────────
-      # Gemma 4 supports up to 262144. 32768 is fast for everyday tasks.
-      # Raise to 65536–131072 for long docs / deep research sessions.
-      - OLLAMA_NUM_CTX=32768
+      # 16GB VRAM - ~14GB model = ~2GB left for KV cache.
+      # With flash attention + q8_0 KV cache, 4096 fits entirely in VRAM.
+      # Bump to 8192 only for long doc / deep research sessions.
+      - OLLAMA_NUM_CTX=4096
+      - AGENT_MAX_ITERATIONS=10           # default 20 → 10 caps worst-case chains
     volumes:
       - "./memory:/app/memory:rw"
       - "./agent/skills/dynamic:/app/skills/dynamic:rw"

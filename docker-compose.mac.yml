@@ -72,9 +72,13 @@ services:
       - AGENT_TEMPERATURE_LOCAL=1.0   # Ollama / local model (Gemma 4 optimal for agentic tasks)
       - AGENT_TEMPERATURE_CLOUD=0.2   # LiteLLM / cloud model
       # ── Local model context window ────────────────────────────────────────────
-      # Gemma 4 supports up to 262144. 32768 is fast for everyday tasks.
-      # Raise to 65536–131072 for long docs / deep research sessions.
-      - OLLAMA_NUM_CTX=32768
+      # Apple Silicon: Ollama runs natively (not in Docker).
+      # Set OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0
+      # in your shell profile (~/.zshrc) or via: launchctl setenv.
+      # 4096 keeps KV cache in unified memory fast path.
+      # Bump to 8192 only for long doc / deep research sessions.
+      - OLLAMA_NUM_CTX=4096
+      - AGENT_MAX_ITERATIONS=10           # default 20 → 10 caps worst-case chains
     volumes:
       - "./memory:/app/memory:rw"
       - "./agent/skills/dynamic:/app/skills/dynamic:rw"
