@@ -1536,20 +1536,29 @@ def _loop_error_reduce(max_experiments=10) -> str:
 
 
 def _loop_daily_review() -> str:
-    """Loop 3 — learning review, no code changes."""
+    """Loop 3 — learning review + user model maintenance, no code changes."""
     try:
         si = _import_skill("self_improvement")
     except ImportError as e:
         return f"❌ {e}"
 
     review = si.daily_review()
+
+    # Prune stale inferred patterns and low-confidence preferences from user model
+    prune_note = ""
+    try:
+        notes = _import_skill("notes")
+        prune_note = "\n" + notes.prune_user_model(days_old=30)
+    except Exception as _exc:
+        prune_note = f"\n⚠️  prune_user_model skipped: {_exc}"
+
     _log({
         "timestamp": datetime.now().isoformat(),
         "loop":      "daily_review",
         "outcome":   "REVIEW",
         "summary":   review[:2000],
     })
-    return f"📋 daily_review:\n{review}"
+    return f"📋 daily_review:\n{review}{prune_note}"
 
 
 def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
@@ -2112,16 +2121,33 @@ def should_create_skill(
             "complexity_score": 0.0,
         }
 
+    # Skip informational queries — read-only lookups are never worth capturing as a skill.
+    _QUERY_SIGNALS = (
+        "how is", "how are", "how does", "what is", "what are", "show me",
+        "tell me", "check ", "can you show", "which ", "is there", "do you",
+        "kako je", "kako su", "šta je", "šta su", "kako radi", "da li",
+        "koliko", "gde je", "koji je", "trenutno", "podešen", "podešavanja",
+    )
+    _msg_lower = user_message.lower()
+    if any(sig in _msg_lower for sig in _QUERY_SIGNALS):
+        return {
+            "create": False,
+            "reason": "informational query — read-only tasks are not worth capturing as a skill",
+            "trigger": "none",
+            "complexity_score": 0.0,
+        }
+
     total_calls  = len(execution_logs)
     error_calls  = sum(1 for l in execution_logs if l.get("status") == "error")
     success_calls = total_calls - error_calls
     unique_skills = {l.get("skill", "") for l in execution_logs if l.get("skill")}
 
     # Composite score: how non-trivial was this task?
+    # error_recovery component now requires 2+ errors to reach full weight.
     complexity_score = round(
         0.4 * min(total_calls / 5.0, 1.0)           # up to 0.4 for 5+ calls
         + 0.3 * min(len(unique_skills) / 3.0, 1.0)  # up to 0.3 for 3+ distinct skills
-        + 0.3 * (1.0 if error_calls > 0 and success_calls > 0 else 0.0),  # error recovery
+        + 0.3 * min(error_calls / 2.0, 1.0),        # up to 0.3, needs 2+ errors for full score
         2,
     )
 
@@ -2130,7 +2156,7 @@ def should_create_skill(
         "wrong", "no,", "don't", "stop", "instead",
         "actually", "not that", "incorrect", "that's not",
     )
-    _has_correction = any(sig in user_message.lower() for sig in _CORRECTION_SIGNALS)
+    _has_correction = any(sig in _msg_lower for sig in _CORRECTION_SIGNALS)
 
     trigger: Optional[str] = None
     reason  = ""
@@ -2144,7 +2170,7 @@ def should_create_skill(
             f"Multi-skill workflow: {total_calls} calls across "
             f"{len(unique_skills)} skills ({', '.join(sorted(unique_skills))})"
         )
-    elif error_calls > 0 and success_calls > 0:
+    elif error_calls >= 2 and success_calls > 0 and total_calls >= 3:
         trigger = "error_recovery"
         reason  = (
             f"Recovered from {error_calls} error(s) before success — "
