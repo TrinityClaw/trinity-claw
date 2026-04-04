@@ -80,8 +80,6 @@ services:
       # Flash attention + q8_0 KV cache makes 6144 fit without RAM spillage.
       # Bump to 8192 only for long doc / deep research sessions.
       - OLLAMA_NUM_CTX=6144
-      - OLLAMA_THINK=true                 # Gemma 4: route thinking to separate field, content = clean response only
-      - OLLAMA_NUM_PREDICT_THINK=1500     # cap think+response tokens to prevent runaway generation
       - AGENT_MAX_ITERATIONS=10           # default 20 → 10 caps worst-case chains
     volumes:
       - "./memory:/app/memory:rw"
