@@ -102,6 +102,8 @@ def verify_api_key(api_key: str = Security(_api_key_header)) -> str:
 # Global skills registry
 skills: Dict[str, Any] = {}
 skill_metadata: Dict[str, Dict] = {}
+_skill_loaders: Dict[str, tuple] = {}   # skill_name -> (spec, unexec'd module object)
+_skill_load_lock = threading.Lock()     # guards lazy exec_module calls
 
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
 SESSION_MAX_MESSAGES = 40        # 20 turns (user + assistant pairs)
@@ -159,11 +161,17 @@ def _extract_short_doc(full_doc: str) -> str:
     return first[:120] if len(first) > 120 else first
 
 
+# Skills that must be exec'd immediately at startup (used before any request arrives).
+# Everything else is registered now and exec'd on first actual call.
+EAGER_SKILLS = {"telegram_bot"}
+
+
 def load_skills_improved():
     """
     Improved skill loading with cache invalidation and metadata extraction.
+    Eager skills are exec'd immediately; all others are registered for lazy loading.
     """
-    global skills, skill_metadata
+    global skills, skill_metadata, _skill_loaders
 
     # Clear old skill modules from cache to ensure fresh reloads
     modules_to_remove = [k for k in sys.modules.keys() if k.startswith('skills.') or k in skills]
@@ -173,6 +181,7 @@ def load_skills_improved():
 
     skills = {}
     skill_metadata = {}
+    _skill_loaders = {}
 
     # Load from skills directory
     skills_path = Path(__file__).parent / "skills"
@@ -206,34 +215,42 @@ def load_skills_improved():
             except Exception:
                 functions = []
 
-            # Import the module
-            module_name = f"skills.{skill_file.stem}"
+            skill_name = skill_file.stem
+            module_name = f"skills.{skill_name}"
             spec = importlib.util.spec_from_file_location(module_name, skill_file)
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
-            spec.loader.exec_module(module)
 
-            # Fallback: if AST found no functions, inspect the loaded module directly
-            if not functions:
-                import inspect as _inspect
-                functions = [
-                    {"name": n, "args": list(_inspect.signature(f).parameters.keys())}
-                    for n, f in _inspect.getmembers(module, _inspect.isfunction)
-                    if not n.startswith('_') and f.__module__ == module_name
-                ]
+            if skill_name in EAGER_SKILLS:
+                # Exec immediately — this skill is needed before the first request
+                spec.loader.exec_module(module)
 
-            skill_name = skill_file.stem
-            full_doc = getattr(module, 'DOC', doc)
-            skills[skill_name] = module
+                # Fallback: if AST found no functions, inspect the loaded module directly
+                if not functions:
+                    import inspect as _inspect
+                    functions = [
+                        {"name": n, "args": list(_inspect.signature(f).parameters.keys())}
+                        for n, f in _inspect.getmembers(module, _inspect.isfunction)
+                        if not n.startswith('_') and f.__module__ == module_name
+                    ]
+
+                full_doc = getattr(module, 'DOC', doc)
+                skills[skill_name] = module
+                print(f"✅ Loaded skill (eager): {skill_name}")
+            else:
+                # Defer exec — store loader stub, register metadata from AST only
+                _skill_loaders[skill_name] = (spec, module)
+                full_doc = doc
+                skills[skill_name] = None   # placeholder; exec'd on first use
+                print(f"📋 Registered skill (lazy): {skill_name}")
+
             skill_metadata[skill_name] = {
                 "doc": full_doc,
-                "short_doc": getattr(module, 'SHORT_DOC', None) or _extract_short_doc(full_doc),
+                "short_doc": _extract_short_doc(full_doc),
                 "functions": functions,
                 "path": str(skill_file),
                 "loaded_at": datetime.now().isoformat()
             }
-
-            print(f"✅ Loaded skill: {skill_name}")
 
         except Exception as e:
             print(f"❌ Failed to load skill {skill_file}: {e}")
@@ -247,6 +264,37 @@ def reload_skills():
     return f"Reloaded {len(skills)} skills"
 
 
+def _ensure_skill_loaded(skill_name: str) -> bool:
+    """
+    Exec a lazy skill's module on first use. Thread-safe via double-checked locking.
+    Returns True if the skill is loaded and ready, False if it failed or doesn't exist.
+    """
+    if skills.get(skill_name) is not None:
+        return True
+    if skill_name not in _skill_loaders:
+        return False
+    with _skill_load_lock:
+        # Double-check after acquiring lock (another thread may have loaded it first)
+        if skills.get(skill_name) is not None:
+            return True
+        spec, module = _skill_loaders[skill_name]
+        try:
+            spec.loader.exec_module(module)
+            # Update metadata with live values from the now-loaded module
+            if skill_name in skill_metadata:
+                full_doc = getattr(module, 'DOC', skill_metadata[skill_name]["doc"])
+                short_doc = getattr(module, 'SHORT_DOC', None) or _extract_short_doc(full_doc)
+                skill_metadata[skill_name]["doc"] = full_doc
+                skill_metadata[skill_name]["short_doc"] = short_doc
+                skill_metadata[skill_name]["loaded_at"] = datetime.now().isoformat()
+            skills[skill_name] = module
+            print(f"⚡ Lazy-loaded skill: {skill_name}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to lazy-load skill '{skill_name}': {e}")
+            return False
+
+
 def _build_tools_schema() -> list:
     """
     Build an OpenAI-style tools list from all loaded skill functions.
@@ -255,7 +303,12 @@ def _build_tools_schema() -> list:
     """
     import inspect
     tools = []
-    for skill_name, module in skills.items():
+    for skill_name, module in list(skills.items()):
+        if module is None:
+            _ensure_skill_loaded(skill_name)
+            module = skills[skill_name]
+        if module is None:
+            continue  # failed to load — skip from tool schema
         for func_info in skill_metadata.get(skill_name, {}).get("functions", []):
             func_name = func_info["name"]
             func = getattr(module, func_name, None)
@@ -329,7 +382,10 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     if skill_name not in skills:
         raise ValueError(f"Skill '{skill_name}' not found. Available: {list(skills.keys())}")
 
+    _ensure_skill_loaded(skill_name)
     module = skills[skill_name]
+    if module is None:
+        raise ValueError(f"Skill '{skill_name}' failed to load; check startup logs.")
 
     if not function_name:
         # Default to first non-private function
@@ -371,10 +427,12 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
             pass
         return {"success": False, "error": error_msg, "skill": skill_name, "function": function_name}
 
-# Load all skills on startup
-print("\n🎯 Loading TrinityClaw Skills...")
+# Register skills — eager ones exec'd now, lazy ones exec'd on first use
+print("\n🎯 Registering TrinityClaw Skills...")
 skills = load_skills_improved()
-print(f"✅ Loaded {len(skills)} skill(s)\n")
+_n_eager = sum(1 for v in skills.values() if v is not None)
+_n_lazy  = sum(1 for v in skills.values() if v is None)
+print(f"✅ {_n_eager} eager + {_n_lazy} lazy skills registered ({len(skills)} total)\n")
 
 # Auto-start Telegram polling if credentials are present in .env
 _telegram_mod = skills.get("telegram_bot")
