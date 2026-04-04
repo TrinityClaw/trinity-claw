@@ -3131,6 +3131,18 @@ One question. Short. Then wait.
                         # retry instruction fires instead of injecting a fake brief.
 
                 if not execution_log:
+                    # Gemma 4 sometimes outputs only a <think> block with no text after it.
+                    # After stripping, ai_reply is empty. Push once for a plain-text answer.
+                    if not ai_reply.strip() and _local_continuation_pushes < 2:
+                        _local_continuation_pushes += 1
+                        print(f"⚠️  Iteration {iteration}: empty reply after think-strip — nudging for plain answer #{_local_continuation_pushes}")
+                        messages.append({"role": "assistant", "content": ""})
+                        messages.append({
+                            "role": "user",
+                            "content": "Please answer my question directly in plain text.",
+                        })
+                        continue
+
                     # If the local model wrote a plan instead of a skill tag, push it to act.
                     # Fires on ANY iteration — including the first — so "I will check X" on
                     # iteration 1 (all_execution_logs still empty) still gets a push.
