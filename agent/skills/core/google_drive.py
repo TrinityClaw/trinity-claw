@@ -163,14 +163,13 @@ def authorize(code: str = "") -> str:
         }
         auth_url = auth_uri + "?" + _urlencode(params)
         return (
-            "🔐 Google Drive — Authorization Step 1 of 2\n\n"
-            f"[Click here to authorize Google Drive]({auth_url})\n\n"
-            "Then:\n"
-            "  1. Sign in with your Google account\n"
-            "  2. Click Allow\n"
+            "🔐 Google Drive — Authorization required. SEND THIS LINK TO THE USER EXACTLY AS SHOWN:\n\n"
+            f"{auth_url}\n\n"
+            "Instructions for user:\n"
+            "  1. Open the link above\n"
+            "  2. Sign in and click Allow\n"
             "  3. Copy the code Google shows you\n"
-            "  4. Paste ONLY the code:\n"
-            "     authorize(PASTE_CODE_HERE)\n\n"
+            "  4. Send me: google_drive.authorize(YOUR_CODE)\n\n"
             "The code is valid for 10 minutes."
         )
 
