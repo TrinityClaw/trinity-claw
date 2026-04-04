@@ -21,8 +21,15 @@ DOC = (
     "write_daily_entry(summary, learned, user_insights?, next_steps?)→save today's learning journal; "
     "get_journal(days=7)→retrieve last N days of journal entries; pass an integer e.g. get_journal(7); "
     "get_today()→get today's journal entry; "
-    "update_user_model(insight)→append a new insight about the user to the persistent profile; "
-    "get_user_model()→retrieve all accumulated user insights; "
+    "update_user_model(insight)→append a free-form insight about the user to the persistent profile; "
+    "get_user_model()→retrieve the full structured user model (preferences, patterns, context, rejections, insights); "
+    "set_preference(key, value, source?, confidence?)→set a named user preference; source: user|inferred|system, confidence 0.0-1.0; "
+    "get_preference(key, default?)→retrieve a single preference value; "
+    "set_context(key, value)→update current working context (e.g. project, focus, deadline); "
+    "record_pattern(pattern, evidence?, action?)→add or increment a behavioral pattern Trinity has observed; "
+    "add_rejection(idea, reason?)→record a dismissed idea so Trinity never suggests it again; "
+    "get_context_for_prompt()→compact user model summary for injection into system prompt — call at session start; "
+    "prune_user_model(days_old?)→remove stale inferred patterns and low-confidence inferred preferences (default 30 days); "
     "log_activity(action, result, source?)→log a completed manual task to the activity log (source defaults to 'manual'); "
     "get_activity_log(hours?)→show what the agent did in the last N hours, both scheduled and manual (default 24h); "
     "append(title, content)→add content to an existing note without overwriting it (creates note if it does not exist yet); "
@@ -300,38 +307,262 @@ def get_today() -> str:
 
 
 # ── User Model ─────────────────────────────────────────────────────────────────
+#
+# Schema v2:
+#   preferences:  {key: {value, confidence, source, updated_at}}
+#   patterns:     [{pattern, evidence, evidence_count, last_seen, suggested_action}]
+#   context:      {key: value}   — current project/focus/deadline
+#   rejections:   [{idea, reason, dismissed_at}]
+#   insights:     [{date, insight}]  — free-form, kept for backward compat
+#   meta:         {schema_version, last_updated}
+#
+# Migration: v1 files only had "insights" + "last_updated" — _load_user_model()
+# detects and upgrades them transparently on first read.
+
+def _load_user_model() -> dict:
+    """Load user model from disk, migrating from v1 (flat insights) if needed."""
+    _empty = {
+        "preferences": {}, "patterns": [], "context": {},
+        "rejections": [], "insights": [],
+        "meta": {"schema_version": 2, "last_updated": None},
+    }
+    if not USER_MODEL_FILE.exists():
+        return _empty
+    try:
+        model = json.loads(USER_MODEL_FILE.read_text(encoding="utf-8"))
+        if "preferences" not in model:          # v1 → v2 migration
+            model = {
+                **_empty,
+                "insights": model.get("insights", []),
+                "meta": {"schema_version": 2, "last_updated": model.get("last_updated")},
+            }
+        return model
+    except Exception as exc:
+        logger.error(f"Failed to load user model: {exc}")
+        return _empty
+
+
+def _save_user_model(model: dict) -> None:
+    model.setdefault("meta", {})["last_updated"] = datetime.now().isoformat()
+    USER_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    USER_MODEL_FILE.write_text(json.dumps(model, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def set_preference(key: str, value, source: str = "user", confidence: float = 1.0) -> str:
+    """Set a named preference. source: 'user'|'inferred'|'system'. confidence: 0.0–1.0."""
+    try:
+        model = _load_user_model()
+        model["preferences"][key] = {
+            "value": value,
+            "confidence": round(float(confidence), 2),
+            "source": source,
+            "updated_at": datetime.now().isoformat(),
+        }
+        _save_user_model(model)
+        icon = {"user": "👤", "inferred": "🤖", "system": "⚙️"}.get(source, "•")
+        return f"✅ Preference set: {key} = {value!r} {icon} (confidence: {float(confidence):.0%})"
+    except Exception as e:
+        return f"❌ set_preference error: {e}"
+
+
+def get_preference(key: str, default=None):
+    """Return a single preference value, or default if not set."""
+    try:
+        pref = _load_user_model()["preferences"].get(key)
+        return pref["value"] if pref else default
+    except Exception:
+        return default
+
+
+def set_context(key: str, value: str) -> str:
+    """Update one field of the current working context (e.g. project, focus, deadline)."""
+    try:
+        model = _load_user_model()
+        model.setdefault("context", {})[key] = value
+        _save_user_model(model)
+        return f"✅ Context updated: {key} = {value!r}"
+    except Exception as e:
+        return f"❌ set_context error: {e}"
+
+
+def record_pattern(pattern: str, evidence: str = "", action: str = "") -> str:
+    """Add or increment a behavioral pattern Trinity has observed about the user."""
+    try:
+        model = _load_user_model()
+        existing = next((p for p in model.get("patterns", []) if p["pattern"] == pattern), None)
+        if existing:
+            existing["evidence_count"] += 1
+            existing["last_seen"] = datetime.now().isoformat()
+            if action:
+                existing["suggested_action"] = action
+            count = existing["evidence_count"]
+        else:
+            model.setdefault("patterns", []).append({
+                "pattern": pattern,
+                "evidence": evidence,
+                "evidence_count": 1,
+                "last_seen": datetime.now().isoformat(),
+                "suggested_action": action,
+            })
+            count = 1
+        _save_user_model(model)
+        return f"📝 Pattern recorded: '{pattern}' (seen {count}×)"
+    except Exception as e:
+        return f"❌ record_pattern error: {e}"
+
+
+def add_rejection(idea: str, reason: str = "") -> str:
+    """Record a dismissed idea so Trinity doesn't suggest it again."""
+    try:
+        model = _load_user_model()
+        model.setdefault("rejections", []).append({
+            "idea": idea,
+            "reason": reason,
+            "dismissed_at": datetime.now().isoformat()[:10],
+        })
+        _save_user_model(model)
+        return f"🚫 Rejection recorded: '{idea}'"
+    except Exception as e:
+        return f"❌ add_rejection error: {e}"
+
+
+def get_context_for_prompt() -> str:
+    """
+    Return a compact user-model block for injection into Trinity's system prompt.
+    Only includes high-confidence preferences, strong patterns (≥3 evidence),
+    active context, and the last few rejections.
+    Returns an empty string if no useful data exists yet.
+    """
+    try:
+        model = _load_user_model()
+        lines = []
+
+        prefs = {k: v for k, v in model.get("preferences", {}).items()
+                 if v.get("confidence", 1.0) >= 0.6}
+        if prefs:
+            parts = [f"{k}={v['value']!r}" for k, v in prefs.items()]
+            lines.append("User preferences: " + ", ".join(parts))
+
+        ctx = model.get("context", {})
+        if ctx:
+            lines.append("Current context: " + ", ".join(f"{k}={v}" for k, v in ctx.items()))
+
+        strong = [p for p in model.get("patterns", []) if p.get("evidence_count", 0) >= 3]
+        if strong:
+            parts = [
+                p["pattern"] + (f" → {p['suggested_action']}" if p.get("suggested_action") else "")
+                for p in strong[-4:]
+            ]
+            lines.append("Observed patterns: " + "; ".join(parts))
+
+        rejections = model.get("rejections", [])
+        if rejections:
+            lines.append("Do not suggest: " + ", ".join(r["idea"] for r in rejections[-5:]))
+
+        insights = model.get("insights", [])
+        if insights:
+            lines.append("Recent user insight: " + insights[-1]["insight"])
+
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.error(f"get_context_for_prompt error: {exc}")
+        return ""
+
+
+def prune_user_model(days_old: int = 30) -> str:
+    """Remove stale inferred patterns and low-confidence inferred preferences."""
+    try:
+        days_old = int(days_old)
+        model = _load_user_model()
+        cutoff = (datetime.now() - timedelta(days=days_old)).isoformat()
+
+        before_p = len(model.get("patterns", []))
+        model["patterns"] = [
+            p for p in model.get("patterns", [])
+            if p.get("last_seen", "") >= cutoff
+        ]
+        pruned_p = before_p - len(model["patterns"])
+
+        pruned_pref = 0
+        for key in list(model.get("preferences", {}).keys()):
+            p = model["preferences"][key]
+            if (p.get("source") == "inferred"
+                    and p.get("confidence", 1.0) < 0.6
+                    and p.get("updated_at", "") < cutoff):
+                del model["preferences"][key]
+                pruned_pref += 1
+
+        _save_user_model(model)
+        return f"🧹 Pruned: {pruned_p} stale patterns, {pruned_pref} low-confidence preferences"
+    except Exception as e:
+        return f"❌ prune_user_model error: {e}"
+
 
 def update_user_model(insight: str) -> str:
-    """Append a new insight about the user to the persistent user model."""
+    """Append a free-form insight about the user to the persistent profile."""
     try:
-        model = {}
-        if USER_MODEL_FILE.exists():
-            model = json.loads(USER_MODEL_FILE.read_text(encoding="utf-8"))
+        model = _load_user_model()
         model.setdefault("insights", []).append({
             "date": datetime.now().isoformat()[:10],
             "insight": insight,
         })
-        model["last_updated"] = datetime.now().isoformat()
-        USER_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        USER_MODEL_FILE.write_text(json.dumps(model, indent=2), encoding="utf-8")
+        _save_user_model(model)
         return f"✅ User model updated: {insight[:80]}"
     except Exception as e:
         return f"❌ Error updating user model: {e}"
 
 
 def get_user_model() -> str:
-    """Return all accumulated insights about the user (last 30)."""
+    """Return the full structured user model."""
     try:
         if not USER_MODEL_FILE.exists():
             return "No user model built yet."
-        model = json.loads(USER_MODEL_FILE.read_text(encoding="utf-8"))
+        model = _load_user_model()
+        updated = (model.get("meta") or {}).get("last_updated") or "unknown"
+        lines = [f"👤 User Model  (last updated: {updated[:10]})"]
+
+        prefs = model.get("preferences", {})
+        lines.append(f"\n🔹 Preferences ({len(prefs)}):")
+        if prefs:
+            for k, v in prefs.items():
+                icon = {"user": "👤", "inferred": "🤖", "system": "⚙️"}.get(v.get("source", ""), "•")
+                lines.append(f"  {icon} {k}: {v['value']!r}  conf={v.get('confidence', 1.0):.0%}  [{v.get('updated_at', '')[:10]}]")
+        else:
+            lines.append("  (none set)")
+
+        patterns = model.get("patterns", [])
+        lines.append(f"\n🔹 Patterns ({len(patterns)}):")
+        if patterns:
+            for p in sorted(patterns, key=lambda x: -x.get("evidence_count", 0))[:8]:
+                action = f" → {p['suggested_action']}" if p.get("suggested_action") else ""
+                lines.append(f"  • {p['pattern']} ({p.get('evidence_count', 1)}×){action}")
+        else:
+            lines.append("  (none yet)")
+
+        ctx = model.get("context", {})
+        lines.append("\n🔹 Current Context:")
+        if ctx:
+            for k, v in ctx.items():
+                lines.append(f"  • {k}: {v}")
+        else:
+            lines.append("  (none active)")
+
+        rejections = model.get("rejections", [])
+        lines.append(f"\n🔹 Dismissed Ideas ({len(rejections)}):")
+        if rejections:
+            for r in rejections[-5:]:
+                reason = f" — {r['reason']}" if r.get("reason") else ""
+                lines.append(f"  • {r['idea']}{reason}")
+        else:
+            lines.append("  (none)")
+
         insights = model.get("insights", [])
-        if not insights:
-            return "No user insights recorded yet."
-        result = [f"User Model ({len(insights)} total insights, showing last 30):"]
-        for item in insights[-30:]:
-            result.append(f"[{item['date']}] {item['insight']}")
-        return "\n".join(result)
+        if insights:
+            lines.append(f"\n🔹 Free-form Insights (last 5 of {len(insights)}):")
+            for item in insights[-5:]:
+                lines.append(f"  [{item['date']}] {item['insight']}")
+
+        return "\n".join(lines)
     except Exception as e:
         return f"❌ Error reading user model: {e}"
 
