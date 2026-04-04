@@ -97,14 +97,18 @@ services:
       - CHROMA_PORT=8000
       - LITELLM_MASTER_KEY=sk-1234567890
       - PYTHONUNBUFFERED=1
+      - MODEL_SOURCE=local              # tells app.py to use Ollama path, skip ChromaDB
+      - SESSION_MAX_MESSAGES=16         # 8 turns; prevents context overflow at 4096 tokens
       # ── LLM temperatures ──────────────────────────────────────────────────────
       - AGENT_TEMPERATURE_LOCAL=1.0   # Ollama / local model (Gemma 4 optimal for agentic tasks)
       - AGENT_TEMPERATURE_CLOUD=0.2   # LiteLLM / cloud model
       # ── Local model context window ────────────────────────────────────────────
       # 16GB VRAM - ~14GB model = ~2GB left for KV cache.
-      # With flash attention + q8_0 KV cache, 4096 fits entirely in VRAM.
+      # Flash attention + q8_0 KV cache makes 6144 fit without RAM spillage.
       # Bump to 8192 only for long doc / deep research sessions.
-      - OLLAMA_NUM_CTX=4096
+      - OLLAMA_NUM_CTX=6144
+      - OLLAMA_THINK=true                 # Gemma 4: route thinking to separate field, content = clean response only
+      - OLLAMA_NUM_PREDICT_THINK=1500     # cap think+response tokens to prevent runaway generation
       - AGENT_MAX_ITERATIONS=10           # default 20 → 10 caps worst-case chains
     volumes:
       - "./memory:/app/memory:rw"
