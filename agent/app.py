@@ -106,7 +106,7 @@ _skill_loaders: Dict[str, tuple] = {}   # skill_name -> (spec, unexec'd module o
 _skill_load_lock = threading.Lock()     # guards lazy exec_module calls
 
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
-SESSION_MAX_MESSAGES = 40        # 20 turns (user + assistant pairs)
+SESSION_MAX_MESSAGES = int(os.getenv("SESSION_MAX_MESSAGES", "40"))
 SESSION_TIMEOUT_MINUTES = 120    # auto-expire after 2h inactivity
 SESSION_SUMMARY_KEEP = 10        # recent messages to keep verbatim after rolling summary
 JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds this
@@ -2330,7 +2330,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     # old scheduler sessions instead of the current question).
     _req_m_early = (req.model or "").lower()
     if (os.getenv("MODEL_SOURCE", "cloud") == "local"
-            or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi"))):
+            or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi", "gemma"))):
         collection = None
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
         try:
@@ -2455,7 +2455,8 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     _req_m = req.model.lower() if req.model else ""
     _is_local_model = (
         os.getenv("MODEL_SOURCE", "cloud") == "local"
-        or "ollama" in _req_m or "qwen" in _req_m or "llama" in _req_m or "deepseek" in _req_m or "phi" in _req_m
+        or "ollama" in _req_m or "qwen" in _req_m or "llama" in _req_m
+        or "deepseek" in _req_m or "phi" in _req_m or "gemma" in _req_m
     )
     _local_model = _is_local_model
 
