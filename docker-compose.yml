@@ -38,9 +38,7 @@ services:
       - "11434:11434"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_KEEP_ALIVE=24h             # keep model loaded, avoid cold-start penalty
-      - OLLAMA_FLASH_ATTENTION=1          # reduces KV cache VRAM usage ~30%
-      - OLLAMA_KV_CACHE_TYPE=q8_0         # halves KV cache VRAM vs fp16 default
+      - OLLAMA_KEEP_ALIVE=5m
     volumes:
       - ollama_data:/root/.ollama
     deploy:
@@ -97,17 +95,6 @@ services:
       - CHROMA_PORT=8000
       - LITELLM_MASTER_KEY=sk-1234567890
       - PYTHONUNBUFFERED=1
-      - MODEL_SOURCE=local              # tells app.py to use Ollama path, skip ChromaDB
-      - SESSION_MAX_MESSAGES=16         # 8 turns; prevents context overflow at 4096 tokens
-      # ── LLM temperatures ──────────────────────────────────────────────────────
-      - AGENT_TEMPERATURE_LOCAL=1.0   # Ollama / local model (Gemma 4 optimal for agentic tasks)
-      - AGENT_TEMPERATURE_CLOUD=0.2   # LiteLLM / cloud model
-      # ── Local model context window ────────────────────────────────────────────
-      # 16GB VRAM - ~14GB model = ~2GB left for KV cache.
-      # Flash attention + q8_0 KV cache makes 6144 fit without RAM spillage.
-      # Bump to 8192 only for long doc / deep research sessions.
-      - OLLAMA_NUM_CTX=6144
-      - AGENT_MAX_ITERATIONS=10           # default 20 → 10 caps worst-case chains
     volumes:
       - "./memory:/app/memory:rw"
       - "./agent/skills/dynamic:/app/skills/dynamic:rw"

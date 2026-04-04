@@ -68,19 +68,6 @@ services:
       - CHROMA_PORT=8000
       - LITELLM_MASTER_KEY=sk-1234567890
       - PYTHONUNBUFFERED=1
-      - MODEL_SOURCE=local              # tells app.py to use Ollama path, skip ChromaDB
-      - SESSION_MAX_MESSAGES=16         # 8 turns; prevents context overflow at 4096 tokens
-      # ── LLM temperatures ──────────────────────────────────────────────────────
-      - AGENT_TEMPERATURE_LOCAL=1.0   # Ollama / local model (Gemma 4 optimal for agentic tasks)
-      - AGENT_TEMPERATURE_CLOUD=0.2   # LiteLLM / cloud model
-      # ── Local model context window ────────────────────────────────────────────
-      # Apple Silicon: Ollama runs natively (not in Docker).
-      # Set OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0
-      # in your shell profile (~/.zshrc) or via: launchctl setenv.
-      # Flash attention + q8_0 KV cache makes 6144 fit without RAM spillage.
-      # Bump to 8192 only for long doc / deep research sessions.
-      - OLLAMA_NUM_CTX=6144
-      - AGENT_MAX_ITERATIONS=10           # default 20 → 10 caps worst-case chains
     volumes:
       - "./memory:/app/memory:rw"
       - "./agent/skills/dynamic:/app/skills/dynamic:rw"
