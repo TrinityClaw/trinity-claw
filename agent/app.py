@@ -2150,8 +2150,8 @@ def _call_llm(
             "stream": False,
             "think": _thinking_enabled,
             "options": {
-                "temperature": 0.4,
-                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "65536")),
+                "temperature": float(os.getenv("AGENT_TEMPERATURE_LOCAL", "1.0")),
+                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "32768")),
                 "num_predict": _num_predict,
             }
         }
@@ -2193,7 +2193,7 @@ def _call_llm(
                 else m
                 for m in cloud_messages
             ]
-        payload = {"model": model_name, "messages": cloud_messages, "temperature": 0.2}
+        payload = {"model": model_name, "messages": cloud_messages, "temperature": float(os.getenv("AGENT_TEMPERATURE_CLOUD", "0.2"))}
         if tools:
             payload["tools"]       = tools
             payload["tool_choice"] = "auto"
