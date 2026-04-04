@@ -68,6 +68,13 @@ services:
       - CHROMA_PORT=8000
       - LITELLM_MASTER_KEY=sk-1234567890
       - PYTHONUNBUFFERED=1
+      # ── LLM temperatures ──────────────────────────────────────────────────────
+      - AGENT_TEMPERATURE_LOCAL=1.0   # Ollama / local model (Gemma 4 optimal for agentic tasks)
+      - AGENT_TEMPERATURE_CLOUD=0.2   # LiteLLM / cloud model
+      # ── Local model context window ────────────────────────────────────────────
+      # Gemma 4 supports up to 262144. 32768 is fast for everyday tasks.
+      # Raise to 65536–131072 for long docs / deep research sessions.
+      - OLLAMA_NUM_CTX=32768
     volumes:
       - "./memory:/app/memory:rw"
       - "./agent/skills/dynamic:/app/skills/dynamic:rw"
