@@ -3132,14 +3132,17 @@ One question. Short. Then wait.
 
                 if not execution_log:
                     # Gemma 4 sometimes outputs only a <think> block with no text after it.
-                    # After stripping, ai_reply is empty. Push once for a plain-text answer.
+                    # After stripping, ai_reply is empty. Push once with a skill-friendly nudge.
                     if not ai_reply.strip() and _local_continuation_pushes < 2:
                         _local_continuation_pushes += 1
-                        print(f"⚠️  Iteration {iteration}: empty reply after think-strip — nudging for plain answer #{_local_continuation_pushes}")
-                        messages.append({"role": "assistant", "content": ""})
+                        print(f"⚠️  Iteration {iteration}: empty reply after think-strip — nudging for response #{_local_continuation_pushes}")
                         messages.append({
                             "role": "user",
-                            "content": "Please answer my question directly in plain text.",
+                            "content": (
+                                "Please respond to the question above. "
+                                "If you need to search or look something up, output a skill tag now.\n"
+                                "Example: <skill:web.search>your query here</skill:web.search>"
+                            ),
                         })
                         continue
 
