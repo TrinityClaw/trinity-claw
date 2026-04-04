@@ -2774,17 +2774,18 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
                              "nightly", "daily review", "autoimprove", "run loop")
                 if not any(k in _ns.lower() for k in _sched_kw):
                     _journal_lines.append(f"  Next steps promised: {_ns}")
-        _user_model_lines = []
-        _user_model_raw = _fcache.read_text("/app/memory/user_model.json")
-        if _user_model_raw:
-            _um = json.loads(_user_model_raw)
-            for _ins in _um.get("insights", [])[-15:]:
-                _user_model_lines.append(f"- [{_ins['date']}] {_ins['insight']}")
+        _user_model_block = ""
+        try:
+            _notes_skill = skills.get("notes")
+            if _notes_skill and hasattr(_notes_skill, "get_context_for_prompt"):
+                _user_model_block = _notes_skill.get_context_for_prompt()
+        except Exception:
+            pass
         _dm_parts = []
         if _journal_lines:
             _dm_parts.append("Recent Journal (last 3 days):\n" + "\n".join(_journal_lines))
-        if _user_model_lines:
-            _dm_parts.append("User Profile (accumulated):\n" + "\n".join(_user_model_lines))
+        if _user_model_block:
+            _dm_parts.append("User Profile:\n" + _user_model_block)
         _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
     except Exception:
         _daily_memory_block = "No journal entries yet."
