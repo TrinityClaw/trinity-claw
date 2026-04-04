@@ -102,11 +102,9 @@ def verify_api_key(api_key: str = Security(_api_key_header)) -> str:
 # Global skills registry
 skills: Dict[str, Any] = {}
 skill_metadata: Dict[str, Dict] = {}
-_skill_loaders: Dict[str, tuple] = {}   # skill_name -> (spec, unexec'd module object)
-_skill_load_lock = threading.Lock()     # guards lazy exec_module calls
 
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
-SESSION_MAX_MESSAGES = int(os.getenv("SESSION_MAX_MESSAGES", "40"))
+SESSION_MAX_MESSAGES = 40        # 20 turns (user + assistant pairs)
 SESSION_TIMEOUT_MINUTES = 120    # auto-expire after 2h inactivity
 SESSION_SUMMARY_KEEP = 10        # recent messages to keep verbatim after rolling summary
 JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds this
@@ -161,17 +159,11 @@ def _extract_short_doc(full_doc: str) -> str:
     return first[:120] if len(first) > 120 else first
 
 
-# Skills that must be exec'd immediately at startup (used before any request arrives).
-# Everything else is registered now and exec'd on first actual call.
-EAGER_SKILLS = {"telegram_bot"}
-
-
 def load_skills_improved():
     """
     Improved skill loading with cache invalidation and metadata extraction.
-    Eager skills are exec'd immediately; all others are registered for lazy loading.
     """
-    global skills, skill_metadata, _skill_loaders
+    global skills, skill_metadata
 
     # Clear old skill modules from cache to ensure fresh reloads
     modules_to_remove = [k for k in sys.modules.keys() if k.startswith('skills.') or k in skills]
@@ -181,7 +173,6 @@ def load_skills_improved():
 
     skills = {}
     skill_metadata = {}
-    _skill_loaders = {}
 
     # Load from skills directory
     skills_path = Path(__file__).parent / "skills"
@@ -215,42 +206,34 @@ def load_skills_improved():
             except Exception:
                 functions = []
 
-            skill_name = skill_file.stem
-            module_name = f"skills.{skill_name}"
+            # Import the module
+            module_name = f"skills.{skill_file.stem}"
             spec = importlib.util.spec_from_file_location(module_name, skill_file)
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
+            spec.loader.exec_module(module)
 
-            if skill_name in EAGER_SKILLS:
-                # Exec immediately — this skill is needed before the first request
-                spec.loader.exec_module(module)
+            # Fallback: if AST found no functions, inspect the loaded module directly
+            if not functions:
+                import inspect as _inspect
+                functions = [
+                    {"name": n, "args": list(_inspect.signature(f).parameters.keys())}
+                    for n, f in _inspect.getmembers(module, _inspect.isfunction)
+                    if not n.startswith('_') and f.__module__ == module_name
+                ]
 
-                # Fallback: if AST found no functions, inspect the loaded module directly
-                if not functions:
-                    import inspect as _inspect
-                    functions = [
-                        {"name": n, "args": list(_inspect.signature(f).parameters.keys())}
-                        for n, f in _inspect.getmembers(module, _inspect.isfunction)
-                        if not n.startswith('_') and f.__module__ == module_name
-                    ]
-
-                full_doc = getattr(module, 'DOC', doc)
-                skills[skill_name] = module
-                print(f"✅ Loaded skill (eager): {skill_name}")
-            else:
-                # Defer exec — store loader stub, register metadata from AST only
-                _skill_loaders[skill_name] = (spec, module)
-                full_doc = doc
-                skills[skill_name] = None   # placeholder; exec'd on first use
-                print(f"📋 Registered skill (lazy): {skill_name}")
-
+            skill_name = skill_file.stem
+            full_doc = getattr(module, 'DOC', doc)
+            skills[skill_name] = module
             skill_metadata[skill_name] = {
                 "doc": full_doc,
-                "short_doc": _extract_short_doc(full_doc),
+                "short_doc": getattr(module, 'SHORT_DOC', None) or _extract_short_doc(full_doc),
                 "functions": functions,
                 "path": str(skill_file),
                 "loaded_at": datetime.now().isoformat()
             }
+
+            print(f"✅ Loaded skill: {skill_name}")
 
         except Exception as e:
             print(f"❌ Failed to load skill {skill_file}: {e}")
@@ -264,37 +247,6 @@ def reload_skills():
     return f"Reloaded {len(skills)} skills"
 
 
-def _ensure_skill_loaded(skill_name: str) -> bool:
-    """
-    Exec a lazy skill's module on first use. Thread-safe via double-checked locking.
-    Returns True if the skill is loaded and ready, False if it failed or doesn't exist.
-    """
-    if skills.get(skill_name) is not None:
-        return True
-    if skill_name not in _skill_loaders:
-        return False
-    with _skill_load_lock:
-        # Double-check after acquiring lock (another thread may have loaded it first)
-        if skills.get(skill_name) is not None:
-            return True
-        spec, module = _skill_loaders[skill_name]
-        try:
-            spec.loader.exec_module(module)
-            # Update metadata with live values from the now-loaded module
-            if skill_name in skill_metadata:
-                full_doc = getattr(module, 'DOC', skill_metadata[skill_name]["doc"])
-                short_doc = getattr(module, 'SHORT_DOC', None) or _extract_short_doc(full_doc)
-                skill_metadata[skill_name]["doc"] = full_doc
-                skill_metadata[skill_name]["short_doc"] = short_doc
-                skill_metadata[skill_name]["loaded_at"] = datetime.now().isoformat()
-            skills[skill_name] = module
-            print(f"⚡ Lazy-loaded skill: {skill_name}")
-            return True
-        except Exception as e:
-            print(f"❌ Failed to lazy-load skill '{skill_name}': {e}")
-            return False
-
-
 def _build_tools_schema() -> list:
     """
     Build an OpenAI-style tools list from all loaded skill functions.
@@ -303,12 +255,7 @@ def _build_tools_schema() -> list:
     """
     import inspect
     tools = []
-    for skill_name, module in list(skills.items()):
-        if module is None:
-            _ensure_skill_loaded(skill_name)
-            module = skills[skill_name]
-        if module is None:
-            continue  # failed to load — skip from tool schema
+    for skill_name, module in skills.items():
         for func_info in skill_metadata.get(skill_name, {}).get("functions", []):
             func_name = func_info["name"]
             func = getattr(module, func_name, None)
@@ -382,10 +329,7 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     if skill_name not in skills:
         raise ValueError(f"Skill '{skill_name}' not found. Available: {list(skills.keys())}")
 
-    _ensure_skill_loaded(skill_name)
     module = skills[skill_name]
-    if module is None:
-        raise ValueError(f"Skill '{skill_name}' failed to load; check startup logs.")
 
     if not function_name:
         # Default to first non-private function
@@ -427,12 +371,10 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
             pass
         return {"success": False, "error": error_msg, "skill": skill_name, "function": function_name}
 
-# Register skills — eager ones exec'd now, lazy ones exec'd on first use
-print("\n🎯 Registering TrinityClaw Skills...")
+# Load all skills on startup
+print("\n🎯 Loading TrinityClaw Skills...")
 skills = load_skills_improved()
-_n_eager = sum(1 for v in skills.values() if v is not None)
-_n_lazy  = sum(1 for v in skills.values() if v is None)
-print(f"✅ {_n_eager} eager + {_n_lazy} lazy skills registered ({len(skills)} total)\n")
+print(f"✅ Loaded {len(skills)} skill(s)\n")
 
 # Auto-start Telegram polling if credentials are present in .env
 _telegram_mod = skills.get("telegram_bot")
@@ -2150,8 +2092,8 @@ def _call_llm(
             "stream": False,
             "think": _thinking_enabled,
             "options": {
-                "temperature": float(os.getenv("AGENT_TEMPERATURE_LOCAL", "1.0")),
-                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "32768")),
+                "temperature": 0.4,
+                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "65536")),
                 "num_predict": _num_predict,
             }
         }
@@ -2193,7 +2135,7 @@ def _call_llm(
                 else m
                 for m in cloud_messages
             ]
-        payload = {"model": model_name, "messages": cloud_messages, "temperature": float(os.getenv("AGENT_TEMPERATURE_CLOUD", "0.2"))}
+        payload = {"model": model_name, "messages": cloud_messages, "temperature": 0.2}
         if tools:
             payload["tools"]       = tools
             payload["tool_choice"] = "auto"
@@ -2330,7 +2272,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     # old scheduler sessions instead of the current question).
     _req_m_early = (req.model or "").lower()
     if (os.getenv("MODEL_SOURCE", "cloud") == "local"
-            or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi", "gemma"))):
+            or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi"))):
         collection = None
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
         try:
@@ -2455,8 +2397,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     _req_m = req.model.lower() if req.model else ""
     _is_local_model = (
         os.getenv("MODEL_SOURCE", "cloud") == "local"
-        or "ollama" in _req_m or "qwen" in _req_m or "llama" in _req_m
-        or "deepseek" in _req_m or "phi" in _req_m or "gemma" in _req_m
+        or "ollama" in _req_m or "qwen" in _req_m or "llama" in _req_m or "deepseek" in _req_m or "phi" in _req_m
     )
     _local_model = _is_local_model
 
@@ -2903,7 +2844,6 @@ This rule overrides "unrecognized entity → search" — if there is a URL, fetc
 - **SILENT COMPLIANCE**: NEVER narrate your internal rules or thought process. Just output the skill tag directly.
 - **NEVER answer from memory for real-time questions** (prices, weather, news, live scores). Always search first.
 - **NEVER output raw search result links/snippets** to the user. ALWAYS synthesize a natural-language answer.
-- **EXCEPTION — OAuth/auth URLs**: When a skill returns an authorization or OAuth link (e.g. gmail__authorize, google_calendar__authorize, google_drive__authorize, youtube__authorize), you MUST copy the EXACT full URL verbatim into your reply. Never summarize, shorten, or omit it. The user cannot authorize without seeing the link.
 - **NEVER include Chinese links or characters**. Filter them out completely silently.
 - **Judge result quality like a human**: After getting search results, ask yourself: "Is this actually answering the question? Is this current?" If results are clearly off-topic or outdated (e.g., a forum post about internet installation when asked about gold prices), try ONE different query. If results are relevant and recent, stop and synthesize your answer.
 - **When you have good results**: write your answer directly in plain text. State the key fact first. Add source links at the end if they are relevant and credible.
@@ -3131,21 +3071,6 @@ One question. Short. Then wait.
                         # retry instruction fires instead of injecting a fake brief.
 
                 if not execution_log:
-                    # Gemma 4 sometimes outputs only a <think> block with no text after it.
-                    # After stripping, ai_reply is empty. Push once with a skill-friendly nudge.
-                    if not ai_reply.strip() and _local_continuation_pushes < 2:
-                        _local_continuation_pushes += 1
-                        print(f"⚠️  Iteration {iteration}: empty reply after think-strip — nudging for response #{_local_continuation_pushes}")
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "Please respond to the question above. "
-                                "If you need to search or look something up, output a skill tag now.\n"
-                                "Example: <skill:web.search>your query here</skill:web.search>"
-                            ),
-                        })
-                        continue
-
                     # If the local model wrote a plan instead of a skill tag, push it to act.
                     # Fires on ANY iteration — including the first — so "I will check X" on
                     # iteration 1 (all_execution_logs still empty) still gets a push.
