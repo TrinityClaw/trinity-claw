@@ -33,7 +33,6 @@ import ast
 import importlib
 import importlib.util
 import subprocess
-import shlex
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import queue as _queue_module
 import asyncio
@@ -1551,7 +1550,7 @@ def _normalize_plain_skill_calls(text: str, known_skills: set) -> str:
     return re.sub(r'\b([\w]+\.[\w]+)\(([^)]*)\)', _convert, text)
 
 
-def execute_skill_tags(response_text: str, auto_verify: bool = True, search_budget: int = 2) -> tuple:
+def execute_skill_tags(response_text: str) -> tuple:
     """
     Parse and execute <skill:name.function>args</skill:name.function> tags.
     Returns: (processed_text, execution_log)
@@ -1782,7 +1781,6 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
     """
     tool_result_messages = []
     execution_log = []
-    _search_calls = 0
 
     for tc in tool_calls:
         tool_call_id = tc.get("id", str(uuid.uuid4()))
@@ -1790,8 +1788,13 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
         tool_name    = func_info.get("name", "")
 
         # Parse "skill_name__func_name" → split on first __
+        # Also handle LLMs that use ":" or "." as separator (e.g. youtube:search_videos)
         if "__" in tool_name:
             skill_name, func_name = tool_name.split("__", 1)
+        elif ":" in tool_name:
+            skill_name, func_name = tool_name.split(":", 1)
+        elif "." in tool_name:
+            skill_name, func_name = tool_name.split(".", 1)
         else:
             skill_name, func_name = tool_name, ""
 
@@ -2126,6 +2129,23 @@ def _call_llm(
         ollama_messages = []
         for i, msg in enumerate(messages):
             m = dict(msg)
+            # Ollama requires content to be a string, not None
+            if m.get("content") is None:
+                m["content"] = ""
+            # Convert stored OpenAI-format tool_calls (arguments as JSON string)
+            # back to Ollama's native format (arguments as dict, no id/type fields)
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                _ollama_tcs = []
+                for _tc in m["tool_calls"]:
+                    _fn = _tc.get("function", {})
+                    _args = _fn.get("arguments", {})
+                    if isinstance(_args, str):
+                        try:
+                            _args = json.loads(_args)
+                        except Exception:
+                            _args = {}
+                    _ollama_tcs.append({"function": {"name": _fn.get("name", ""), "arguments": _args}})
+                m["tool_calls"] = _ollama_tcs
             if ollama_images and i == len(messages) - 1 and m.get("role") == "user":
                 m["images"] = ollama_images
             ollama_messages.append(m)
@@ -2352,7 +2372,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     # old scheduler sessions instead of the current question).
     _req_m_early = (req.model or "").lower()
     if (os.getenv("MODEL_SOURCE", "cloud") == "local"
-            or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi"))):
+            or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi", "gemma"))):
         collection = None
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
         try:
@@ -2817,7 +2837,7 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
     if len(history) == 0:
         def _bg_daily_review():
             try:
-                from agent.skills.core import self_improvement as _si
+                from skills.core import self_improvement as _si
                 _dr_result = _si.daily_review()
                 _safe_types = ("bare_except", "missing_timeout")
                 _dyn_dir = Path("/app/skills/dynamic")
@@ -2990,7 +3010,23 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
                     continue
 
                 # ── Fallback: XML tag-based path (non-agentic Ollama models) ──
-                ai_reply = llm_response["content"]
+                # Guard against None content (common when the model just processed
+                # tool results and returns an empty turn instead of a text summary).
+                ai_reply = llm_response.get("content") or ""
+                # If the LLM returned nothing but we already have tool results from a
+                # previous iteration, surface them directly — no need to re-prompt.
+                if not ai_reply.strip() and all_execution_logs:
+                    parts = []
+                    for log in all_execution_logs:
+                        skill_label = f"{log['skill']}.{log.get('function', '')}"
+                        if log.get("status") == "success":
+                            res = str(log.get("result", "")).strip()
+                            short = (res[:600] + "…") if len(res) > 600 else res
+                            parts.append(short)
+                        else:
+                            parts.append(f"❌ {skill_label} — {log.get('error', 'failed')}")
+                    ai_reply = "\n\n".join(parts)
+                    break
 
                 # Strip <think>...</think> blocks BEFORE tag execution.
                 # But first: rescue any skill tags that Qwen placed inside <think>.
@@ -3016,7 +3052,7 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
                 ai_reply = _normalize_plain_skill_calls(ai_reply, set(skills.keys()))
 
                 executed_reply, execution_log, pending_summary = execute_skill_tags(
-                    ai_reply, auto_verify=req.require_verification
+                    ai_reply
                 )
                 all_execution_logs.extend(execution_log)
                 for _l in execution_log:
