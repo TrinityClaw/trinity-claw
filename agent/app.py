@@ -1294,16 +1294,59 @@ def store_memory_separate(user_msg: str, ai_reply: str, task_type: str = "genera
     except Exception as e:
         print(f"⚠️  Error storing in ChromaDB: {e}")
 
+def load_session_from_disk(session_id: str) -> List[Dict]:
+    """Parse session_logs.jsonl, convert to chat format, and hydrate session_store."""
+    if not os.path.exists(MEMORY_FILE):
+        return []
+
+    messages = []
+    try:
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                try:
+                    entry = json.loads(line)
+                    if entry.get("session_id") != session_id:
+                        continue
+                    # Skip system archive summaries to avoid polluting recent context
+                    if entry.get("user") == "[ARCHIVE SUMMARY]":
+                        continue
+                    if entry.get("user"):
+                        messages.append({"role": "user", "content": entry["user"]})
+                    if entry.get("assistant"):
+                        messages.append({"role": "assistant", "content": entry["assistant"]})
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        print(f"⚠️  Disk session load failed for {session_id[:12]}: {e}")
+        return []
+
+    # Enforce context cap
+    if len(messages) > SESSION_MAX_MESSAGES:
+        messages = messages[-SESSION_MAX_MESSAGES:]
+
+    # Hydrate in-memory store so subsequent turns don't re-parse JSONL
+    session_store[session_id] = {
+        "messages": messages,
+        "last_active": datetime.now()
+    }
+    print(f"💾 Restored {len(messages)//2} turn(s) for session {session_id[:12]} from disk")
+    return messages
+
+
 def get_session_history(session_id: str) -> List[Dict]:
     """Return active session message history, auto-expiring stale sessions."""
     if not session_id:
         return []
-    entry = session_store.get(session_id)
-    if not entry:
-        return []
+
+    # ← Fallback to disk if not in RAM
+    if session_id not in session_store:
+        return load_session_from_disk(session_id)
+
+    entry = session_store[session_id]
     elapsed_minutes = (datetime.now() - entry["last_active"]).total_seconds() / 60
     if elapsed_minutes > SESSION_TIMEOUT_MINUTES:
-        # Summarize the session and store in ChromaDB before discarding
         msgs = [m for m in entry["messages"] if m.get("role") != "system"]
         if msgs and collection:
             try:
@@ -1313,14 +1356,7 @@ def get_session_history(session_id: str) -> List[Dict]:
                     collection.add(
                         documents=[summary],
                         ids=[f"session_summary_{str(uuid.uuid4())[:12]}"],
-                        metadatas=[{
-                            "type": "session_summary",
-                            "session_id": session_id,
-                            "timestamp": now_iso,
-                            "turn_count": len(msgs) // 2,
-                            "hit_count": 0,
-                            "last_accessed": now_iso,
-                        }]
+                        metadatas=[{"type": "session_summary", "session_id": session_id, "timestamp": now_iso, "turn_count": len(msgs) // 2, "hit_count": 0, "last_accessed": now_iso}]
                     )
                     print(f"💾 Stored expiry summary for session {session_id[:12]}...")
             except Exception as e:
@@ -2533,7 +2569,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
         "code_executor":     {"execute", "python", "script", "calculate",
                               "compute", "eval"},
         "knowledge_base":    {"knowledge", "recall", "kb", "semantic", "embed"},
-        "notes":             {"note", "notes", "jot", "memo"},
+        "notes":             {"note", "notes", "note:", "jot", "memo", "lesson", "remember"},
         "google_maps":       {"map", "maps", "location", "directions", "place",
                               "address", "navigate", "distance", "route", "nearby"},
         "database":          {"database", "sql", "query", "db", "table", "postgres",
@@ -2878,11 +2914,73 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
             f"Fetch the URL, read the result, then answer the user's question about it.\n\n"
         )
 
+    # Detect "write a note:" / "this is your lesson" / correction patterns and inject
+    # a top-of-prompt directive so the model sees the instruction BEFORE identity.md,
+    # bypassing any context-window truncation that may hide the Quick Reference table.
+    _msg_lower = req.message.lower()
+    _note_directive = ""
+    _NOTE_SAVE_PATTERNS = (
+        "write a note:", "save a note:", "add to notes:", "remember this:",
+        "don't forget:", "note this:", "note:", "jot this:",
+    )
+    _LESSON_PATTERNS = (
+        "this is your lesson", "this should be your lesson",
+        "don't do this again", "remember for next time",
+        "remember this for next time", "this is a lesson",
+        "save this as a lesson", "write this as a lesson",
+    )
+    _is_note_command   = any(_msg_lower.startswith(p) or (p in _msg_lower and len(req.message) < 600) for p in _NOTE_SAVE_PATTERNS)
+    _is_lesson_command = any(p in _msg_lower for p in _LESSON_PATTERNS)
+    if (_is_note_command or _is_lesson_command) and _is_local_model:
+        if _is_lesson_command:
+            # Lesson pattern: save note + update user model
+            _note_directive = (
+                "⚠️ IMMEDIATE ACTION — NO PLAN NEEDED:\n"
+                "The user is correcting your behavior. This is a lesson to save.\n"
+                "Step 1 — save a note (derive a short title, use today's date):\n"
+                f"<skill:notes.save>lesson-{_today_str},{req.message[:300]}</skill:notes.save>\n"
+                "Step 2 — after the save confirms, update your user model:\n"
+                "<skill:notes.update_user_model>USER LESSON: [one-sentence summary of correction]</skill:notes.update_user_model>\n"
+                "Do NOT write a plan. Do NOT ask for clarification. Emit the skill tags now.\n\n"
+            )
+        else:
+            # Plain note-save pattern
+            _note_directive = (
+                "⚠️ IMMEDIATE ACTION — NO PLAN NEEDED:\n"
+                "The user wants to save a note. Derive a short title from the content.\n"
+                "Output this skill tag immediately as your FIRST and ONLY action:\n"
+                f"<skill:notes.save>SHORT_TITLE_HERE,{req.message}</skill:notes.save>\n"
+                "Replace SHORT_TITLE_HERE with a 2-5 word title derived from the note content.\n"
+                "Do NOT write a plan. Do NOT ask for clarification. Emit the tag now.\n\n"
+            )
+
     # Build system prompt from template (loaded at startup from prompts/system.md)
     _identity_prefix    = (_identity_content + "\n\n") if _identity_content else ""
     _notes_index_str    = _notes_index if _notes_index else "no notes saved yet"
     _pref_content_str   = _pref_content if _pref_content else "None saved yet."
     _chroma_context_str = chroma_context if chroma_context else "None yet."
+
+    # Load scheduled tasks for system prompt injection
+    _scheduled_tasks_block = ""
+    try:
+        _sched_file = Path("/app/memory/scheduled_tasks.json")
+        if _sched_file.exists():
+            _sched_data = json.loads(_sched_file.read_text(encoding="utf-8"))
+            if _sched_data:
+                _sched_lines = [f"Active scheduled tasks ({len(_sched_data)}):"]
+                for _sn, _st in _sched_data.items():
+                    _kind = "recurring" if _st.get("type") == "recurring" else "once"
+                    _ivl = f" every {_st['interval_seconds']}s" if _st.get("interval_seconds") else ""
+                    _sched_lines.append(
+                        f'  - "{_sn}" [{_kind}{_ivl}] next: {_st.get("next_run","?")[:16]}'
+                        f' | prompt: "{str(_st.get("prompt",""))[:80]}"'
+                    )
+                _scheduled_tasks_block = "\n".join(_sched_lines)
+    except Exception:
+        pass
+
+    # Prepend note/lesson directive to url_directive so both share the top-of-prompt slot
+    _url_directive = _note_directive + _url_directive
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.safe_substitute(
         _url_directive       = _url_directive,
         _identity_prefix     = _identity_prefix,
@@ -2901,6 +2999,7 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _daily_memory_block  = _daily_memory_block,
         _chroma_context_str  = _chroma_context_str,
         _local_model_reminder = _local_model_reminder,
+        _scheduled_tasks_block = _scheduled_tasks_block,
     )
 
     try:
