@@ -1,5 +1,3 @@
-version: '3.8'
-
 # ============================================================
 # Trinity Claw — Mac M4 (Apple Silicon) Configuration
 # ============================================================
@@ -72,6 +70,7 @@ services:
       - "./memory:/app/memory:rw"
       - "./agent/skills/dynamic:/app/skills/dynamic:rw"
       - "./.env:/app/.env"
+      - "./agent/prompts:/app/prompts:ro"
       - "./config/litellm_config.yaml:/app/litellm_config.yaml"
       - "./agent/app.py:/app/app.py:ro"
       - "./agent/skills/core:/app/skills/core:ro"
