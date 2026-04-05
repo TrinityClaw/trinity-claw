@@ -157,7 +157,7 @@ def check_for_learned_fix(skill_name: str, error_type: str) -> Optional[str]:
     """Check if we've already learned a fix for this error type in this skill."""
     lessons = _load_lessons()
     for lesson in reversed(lessons):  # most recent fix wins
-        if lesson["skill"] == skill_name and lesson["error_type"] == error_type:
+        if lesson.get("skill") == skill_name and lesson.get("error_type") == error_type:
             return lesson.get("fix_applied")
     return None
 
