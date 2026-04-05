@@ -2658,7 +2658,7 @@ No arguments needed: <skill:dashboard.status></skill:dashboard.status>"""
 5. If you see [❌ Error], [⚠️ Skill not found], or any error block, YOU MUST acknowledge the failure to the user. Do NOT continue as if it worked.
 6. The ONLY skills that exist are those listed in "YOUR TOOLS" above. If a skill is not listed there, it does NOT exist — tell the user it doesn't exist yet instead of pretending it does. EXCEPTION: web.search always exists and can answer real-time questions.
 7. After creating a skill: it is saved to /app/skills/dynamic/ and immediately usable.
-8. For multi-step tasks, write a brief numbered plan before your first skill call.
+8. For multi-step tasks, write a brief numbered plan before your first skill call. EXCEPTION: single-step natural language commands ("write a note:", "search for", "show notes", etc.) need NO plan — emit the skill tag immediately in the same response.
 9. VERBATIM OUTPUT RULE: When a skill result contains a URL, authorization code, token, or any exact string the user must copy — reproduce it word-for-word in your reply.
 10. BROWSER SCREENSHOTS: Call web.browser_screenshot AT MOST TWICE per task (once with full_page=True captures the entire page — no scrolling and re-shooting). Report the saved_to path from the result."""
 
