@@ -6,7 +6,7 @@ model_list:
       api_base: "http://ollama:11434"
       supports_function_calling: true
     model_info:
-      supports_vision: false
+      supports_vision: true
 
   # Cloud models — switch by setting OLLAMA_MODEL env var or updating litellm code
   # Uncomment below and use MODEL_SOURCE=cloud to enable
