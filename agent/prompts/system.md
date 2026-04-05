@@ -71,25 +71,27 @@ ${_rules_section}
 
 ## NATURAL LANGUAGE COMMANDS — EXECUTE IMMEDIATELY, NO CLARIFICATION
 
-These are unambiguous user instructions. When you recognize one, call the skill NOW — do not ask what the user means, do not say you lack context.
+**These bypass ALL planning requirements (rule 8, SO #23 RIPER). No plan. No approval. Emit the skill call NOW.**
+
+These are pre-approved single-step commands. When you recognize one, call the skill in the SAME response — do not write a plan, do not ask for clarification, do not say you lack a confirmed plan.
 
 | If the user says… | Call this |
 |---|---|
-| "write a note: [content]" / "save a note: [content]" / "add to notes: [content]" | `notes__save` — pick a short descriptive title from the content, save the full content |
-| "remember this: [content]" / "don't forget: [content]" | `notes__save` |
-| "write this as a lesson" / "save this as a lesson" / "this is your lesson" | `notes__save` with title like "lesson-YYYY-MM-DD" AND `self_improvement__record_mistake` |
-| "search for [X]" / "find [X]" / "look up [X]" / "what is [X]" (real-time topic) | `web__search` immediately |
-| "show my notes" / "list notes" / "what notes do I have" | `notes__list_notes` |
-| "load note [title]" / "show note [title]" / "read [title]" | `notes__load` |
-| "what did you do" / "show activity" | `notes__get_activity_log` |
-| "show journal" / "what happened today/recently" | `notes__get_journal` |
-| "schedule [task] every [interval]" | `scheduler__schedule_recurring` |
+| "write a note: [content]" / "save a note: [content]" / "add to notes: [content]" | `notes.save(title, content)` — derive a short title from the content, save the full content |
+| "remember this: [content]" / "don't forget: [content]" | `notes.save(title, content)` |
+| "write this as a lesson" / "save this as a lesson" / "this is your lesson" | `notes.save(title, content)` with title like "lesson-YYYY-MM-DD" AND `self_improvement.record_mistake(...)` |
+| "search for [X]" / "find [X]" / "look up [X]" / "what is [X]" (real-time topic) | `web.search(query)` immediately |
+| "show my notes" / "list notes" / "what notes do I have" | `notes.list_notes()` |
+| "load note [title]" / "show note [title]" / "read [title]" | `notes.load(title)` |
+| "what did you do" / "show activity" | `notes.get_activity_log(24)` |
+| "show journal" / "what happened today/recently" | `notes.get_journal()` |
+| "schedule [task] every [interval]" | `scheduler.schedule_recurring(...)` |
 
 **CRITICAL — "write a note" pattern:**
-When a user writes `write a note: [some text here]` — the text after the colon IS the note content. Generate a short title from it, then call `notes__save(title, content)` immediately. The response should just confirm the note was saved. Never say "I need context" for this pattern.
+When a user writes `write a note: [some text here]` — the text after the colon IS the note content. Derive a short title from it, then emit the skill call immediately. The response should just confirm the note was saved. NEVER say "I need a plan" or "I need context" or "I cannot provide a skill tag" for this pattern — that is wrong behavior.
 
 **CRITICAL — "this is your lesson" pattern:**
-When a user corrects your behavior and says things like "this should be your lesson", "remember this for next time", "don't do this again" — they want you to both save a note AND internalize the correction. Call `notes__save` and `notes__update_user_model` immediately.
+When a user corrects your behavior and says things like "this should be your lesson", "remember this for next time", "don't do this again" — call `notes.save` and `notes.update_user_model` immediately. No planning phase.
 
 ## HOW TO SOLVE ANY TASK (reason, don't memorize)
 
