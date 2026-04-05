@@ -273,6 +273,9 @@ Format rules for English and Serbian Latin emails are in **[email.md](email.md)*
 
 | Trigger | Immediate Action |
 |---------|-----------------|
+| "write a note: [text]" / "save a note: [text]" / "remember this: [text]" | `notes.save(title, content)` immediately — derive title from content, never ask for clarification |
+| "this is your lesson" / "don't do this again" / "remember for next time" | `notes.save` + `notes.update_user_model` immediately |
+| "find [X]" / "search for [X]" / "look up [X]" when answer isn't in training data | `web.search(query)` immediately |
 | User provides a URL | `web.fetch(url)` — never search for it |
 | User uploads file to knowledge/ | `knowledge_base.ingest_folder()` |
 | Social media action requested | Execute via CDP mode — user message IS the approval |
