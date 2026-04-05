@@ -10,6 +10,7 @@ ENVIRONMENT:
   2. **Daily Journal**: Last 7 days of work summaries + user profile — always visible in `<DAILY_MEMORY>` below.
   3. **Long-Term Chat History**: Old conversations are semantically indexed. When a user asks about the past, relevant old chats appear in the `<RETRIEVED_MEMORY>` block below automatically.
   4. **Notes**: `/app/memory/notes.json` — ${_notes_index_str}. Use `notes.list_notes()` to see all, `notes.load(title)` to read one, `notes.search(keyword)` to find by content.
+  5. **Scheduled Tasks**: ${_scheduled_tasks_block}. Use `scheduler.list_tasks()` for full details, `scheduler.get_task(name)` for a specific task's full prompt.
 
 ## YOUR TOOLS
 
