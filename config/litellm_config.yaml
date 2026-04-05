@@ -1,15 +1,44 @@
 model_list:
-  # One model for everything — text, vision, and tool calls.
-  # To switch providers, only change this file. No code changes needed.
-  # Examples:
-  #   Claude:   model: "claude-sonnet-4-6"  api_key: "os.environ/ANTHROPIC_API_KEY"
-  #   GPT-4o:   model: "gpt-4o"             api_key: "os.environ/OPENAI_API_KEY"
-  #   NVIDIA:   model: "openai/meta/llama-3.2-90b-vision-instruct"  (current)
+  # Local Gemma 4 26B — fast, no latency, no cost
   - model_name: trinity-default
+    litellm_params:
+      model: "ollama/gemma4:26b-a4b-it-q4_K_M"
+      api_base: "http://ollama:11434"
+      supports_function_calling: true
+    model_info:
+      supports_vision: false
+
+  # Cloud models — switch by setting OLLAMA_MODEL env var or updating litellm code
+  # Uncomment below and use MODEL_SOURCE=cloud to enable
+  
+  # NVIDIA Llama 3.2 90B Vision (free tier, requires NVIDIA_API_KEY)
+  - model_name: nvidia-llama-90b
     litellm_params:
       model: "openai/meta/llama-3.2-90b-vision-instruct"
       api_key: "os.environ/NVIDIA_API_KEY"
       api_base: "https://integrate.api.nvidia.com/v1"
       supports_function_calling: true
     model_info:
-      supports_vision: true      # tells LiteLLM to preserve image content in requests
+      supports_vision: true
+
+  # OpenAI GPT-4o (requires OPENAI_API_KEY)
+  # - model_name: gpt-4o
+  #   litellm_params:
+  #     model: "gpt-4o"
+  #     api_key: "os.environ/OPENAI_API_KEY"
+  #     supports_function_calling: true
+  #   model_info:
+  #     supports_vision: true
+
+  # Anthropic Claude Sonnet 4.1 (requires ANTHROPIC_API_KEY)
+  # - model_name: claude-sonnet
+  #   litellm_params:
+  #     model: "claude-sonnet-4-20250514"
+  #     api_key: "os.environ/ANTHROPIC_API_KEY"
+  #     supports_function_calling: true
+  #   model_info:
+  #     supports_vision: true
+
+# Generic timeout for all API calls
+generic_api_handler_config:
+  timeout: 600
