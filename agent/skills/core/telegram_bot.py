@@ -243,12 +243,14 @@ def _handle_incoming_message(text: str, from_chat_id: str = ""):
 
         # Use the Telegram chat_id as a stable session so Trinity keeps context
         session_id = f"telegram_{from_chat_id or _chat_id}"
-
+        
+        queue_message("🤔 <i>Thinking... (this may take a moment)</i>")
+        
         response = _session.post(
             _trinity_url,
             json={"message": text, "session_id": session_id},
             headers={"X-API-Key": _api_key, "Content-Type": "application/json"},
-            timeout=(5, 90),  # 5s connect, 90s read (AI can be slow)
+            timeout=(5, 300),  # 5s connect, 300s read (AI can be slow)
         )
 
         if response.status_code == 200:
@@ -519,6 +521,8 @@ def _handle_incoming_photo(photo_list: list, caption: str, from_chat_id: str):
 
         message_text = caption if caption else "What is in this image?"
         session_id = f"telegram_{from_chat_id}"
+        
+        queue_message("👁️ <i>Analyzing image... this may take a moment</i>")
 
         payload = {"message": message_text, "image": image_data_url, "session_id": session_id}
         headers = {"X-API-Key": _api_key, "Content-Type": "application/json"}
@@ -578,6 +582,8 @@ def _handle_incoming_voice(voice_obj: dict, from_chat_id: str):
 
         # Echo transcript so user can see what was understood
         queue_message(f"🎤 <i>{text}</i>")
+        
+        queue_message("🤔 <i>Thinking about your voice message...</i>")
 
         # Forward transcribed text to Trinity
         session_id = f"telegram_{from_chat_id}"
