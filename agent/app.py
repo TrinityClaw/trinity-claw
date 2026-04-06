@@ -104,7 +104,7 @@ skills: Dict[str, Any] = {}
 skill_metadata: Dict[str, Dict] = {}
 
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
-SESSION_MAX_MESSAGES = 40        # 20 turns (user + assistant pairs)
+SESSION_MAX_MESSAGES = 20        # 10 turns (user + assistant pairs) — tight for 12288 ctx
 SESSION_TIMEOUT_MINUTES = 120    # auto-expire after 2h inactivity
 SESSION_SUMMARY_KEEP = 10        # recent messages to keep verbatim after rolling summary
 JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds this
@@ -1193,8 +1193,11 @@ _IDENTITY_SECTION_RE = re.compile(
     re.DOTALL
 )
 _IDENTITY_TRIGGERS: dict = {
-    "web_clone": {"clone", "cloner", "cloning", "website_cloner", "scrape", "replicate", "copy site", "copy website"},
-    "email":     {"email", "mail", "gmail", "compose", "inbox", "draft", "reply", "send message"},
+    "web_clone":       {"clone", "cloner", "cloning", "website_cloner", "scrape", "replicate", "copy site", "copy website"},
+    "email":           {"email", "mail", "gmail", "compose", "inbox", "draft", "reply", "send message"},
+    "web_design":      {"website", "html", "css", "site", "build", "scaffold", "design", "web", "page", "ui", "frontend", "webpage", "landing", "preview"},
+    "decision_support": {"choose", "decide", "decision", "tradeoff", "option", "compare", "recommend", "evaluate", "which", "vs", "versus", "better", "should i"},
+    "business_kb":     {"knowledge", "business", "kb", "client", "company", "brand", "knowled"},
 }
 
 def _build_identity(content: str, msg_words: set) -> str:
@@ -1307,7 +1310,8 @@ def load_session_from_disk(session_id: str) -> List[Dict]:
                 if not line: continue
                 try:
                     entry = json.loads(line)
-                    if entry.get("session_id") != session_id:
+                    entry_sid = entry.get("session_id") or "default"
+                    if entry_sid != session_id:
                         continue
                     # Skip system archive summaries to avoid polluting recent context
                     if entry.get("user") == "[ARCHIVE SUMMARY]":
@@ -2083,6 +2087,60 @@ def session_info(session_id: str):
         "active": True
     }
 
+@app.get("/session/debug", dependencies=[Depends(verify_api_key)])
+def session_debug(session_id: str):
+    """Diagnose session state: what's in RAM vs disk for a given session_id.
+    Use this when TC seems to have lost memory — compare the RAM and disk counts.
+    """
+    normalized = session_id or "default"
+
+    # RAM state
+    ram_entry = session_store.get(normalized)
+    ram_turns = len(ram_entry["messages"]) // 2 if ram_entry else 0
+    ram_preview = [
+        {"role": m["role"], "preview": str(m.get("content", ""))[:80]}
+        for m in (ram_entry["messages"][:4] if ram_entry else [])
+    ]
+
+    # Disk state — scan JSONL for matching entries
+    disk_matches = []
+    disk_session_ids_seen = set()
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        sid = entry.get("session_id") or "default"
+                        disk_session_ids_seen.add(sid)
+                        if sid == normalized:
+                            disk_matches.append({
+                                "ts": entry.get("timestamp", ""),
+                                "user_preview": str(entry.get("user", ""))[:60],
+                                "assistant_preview": str(entry.get("assistant", ""))[:60],
+                            })
+                    except Exception:
+                        continue
+        except Exception as e:
+            return {"error": str(e)}
+
+    return {
+        "session_id_queried": normalized,
+        "ram": {"turns": ram_turns, "preview": ram_preview},
+        "disk": {
+            "turns": len(disk_matches),
+            "matches": disk_matches[-5:],  # last 5 turns
+            "all_session_ids_in_jsonl": sorted(disk_session_ids_seen),
+        },
+        "diagnosis": (
+            "OK — RAM and disk in sync" if ram_turns == len(disk_matches)
+            else f"MISMATCH — RAM has {ram_turns} turns, disk has {len(disk_matches)} turns"
+        ),
+    }
+
 # ============================================================================
 # LLM CALL HELPER
 # ============================================================================
@@ -2208,11 +2266,12 @@ def _call_llm(
             "think": _thinking_enabled,
             "options": {
                 "temperature": 1.0,
-                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "8192")),
+                "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "12288")),
                 "num_predict": _num_predict,
             }
         }
-        if tools:
+        _native_tools_enabled = os.getenv("OLLAMA_NATIVE_TOOLS", "false").lower() == "true"
+        if tools and _native_tools_enabled:
             payload["tools"] = tools
         _ollama_timeout = int(os.getenv("OLLAMA_TIMEOUT", "600"))
         print(f"🔄 Calling Ollama at {ollama_base} (think={_thinking_enabled}, num_predict={_num_predict}, timeout={_ollama_timeout}s)...")
@@ -2533,7 +2592,8 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     _req_m = req.model.lower() if req.model else ""
     _is_local_model = (
         os.getenv("MODEL_SOURCE", "cloud") == "local"
-        or "ollama" in _req_m or "qwen" in _req_m or "llama" in _req_m or "deepseek" in _req_m or "phi" in _req_m
+        or "ollama" in _req_m or "qwen" in _req_m or "llama" in _req_m
+        or "deepseek" in _req_m or "phi" in _req_m or "gemma" in _req_m
     )
     _local_model = _is_local_model
 
@@ -2762,7 +2822,7 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
     # Append external capability files so _build_identity's trigger logic can
     # conditionally inject them exactly as when they lived inside identity.md.
     # web_clone and email are keyword-gated (TRINITY_START/END tags).
-    # web_design was never gated — always append it unconditionally.
+    # web_design is keyword-gated (TRINITY_START/END) — only injected on web/design requests.
     for _ext_name, _ext_paths in (
         ("web_clone", ("/app/web_clone.md", "/app/../web_clone.md")),
         ("email",     ("/app/email.md",     "/app/../email.md")),
@@ -2779,7 +2839,11 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         or _fcache.read_text("/app/../web_design.md").strip()
     )
     if _web_design:
-        _identity_raw += f"\n\n{_web_design}"
+        _identity_raw += (
+            f"\n\n<!-- TRINITY_START:web_design -->\n"
+            f"{_web_design}\n"
+            f"<!-- TRINITY_END:web_design -->"
+        )
     _identity_content = _build_identity(_identity_raw, _msg_words)
 
     # Load lessons: deduplicated by skill+error_type (most recent fix wins), sorted newest first (cached)
@@ -2802,8 +2866,9 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
                         _seen_keys[_key] = _l
             except Exception:
                 pass
-        # Sort by timestamp descending, cap at 20
-        _deduped = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:20]
+        # Sort by timestamp descending, cap at 10 for local (tight ctx), 20 for cloud
+        _lessons_cap = 10 if _is_local_model else 20
+        _deduped = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:_lessons_cap]
         for _l in _deduped:
             _safe_fix = _sanitize_external_content(_l["fix_applied"], source="lessons.jsonl")
             if _l.get("type") == "correction" and _l.get("bad_reply_preview"):
@@ -3340,22 +3405,24 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
                         if l.get("skill") == "web" and l.get("function") == "search"
                         and l.get("status") == "success"
                     )
+                    # Always embed the original request so the model can answer
+                    # even if context overflow truncated it from the message history.
+                    _orig_q = f'"{req.message[:200].replace(chr(34), chr(39))}"'
                     if _successful_web_searches >= 1:
-                        # Search results are in context. Let the model decide if they're good enough.
                         pending_note = (
                             f"{_done_note}"
-                            " You have web search results above. Use your judgment:"
-                            " If the results directly answer the question with current data, synthesize your answer now in plain text."
-                            " If the results are clearly off-topic or obviously outdated, you may try ONE different query."
-                            " Do not repeat queries you already tried."
+                            f" User asked: {_orig_q}."
+                            " You have web search results above."
+                            " If the results directly answer the question, synthesize your answer now in plain text."
+                            " If results are off-topic or outdated, try ONE different query. Do not repeat queries."
                         )
                     else:
                         pending_note = (
                             f"{_done_note}{_fail_note}"
-                            " Re-read the original user request."
-                            " For EACH required action, check: does a confirmed ✅ result already exist above?"
-                            " If ANY required action has no ✅ yet → OUTPUT ITS SKILL TAG NOW. Zero text before the tag."
-                            " Only write a final text reply when EVERY required action has a confirmed ✅."
+                            f" User asked: {_orig_q}."
+                            " Is the user's full request now answered by the ✅ results above?"
+                            " YES → write your final text answer now, using the results."
+                            " NO → output the next skill tag immediately. No intro text."
                         )
                 # Build brief injection for the continuation message.
                 brief_injection = ""
@@ -3533,7 +3600,7 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _exec_logs_snap = list(all_execution_logs)
         _req_message    = req.message
         _req_model      = req.model
-        _req_session_id = req.session_id
+        _req_session_id = session_id  # use the normalized value (req.session_id or "default"), not the raw req.session_id
         task_type = _detect_task_type(
             _req_message, [log["skill"] for log in _exec_logs_snap if log.get("skill")]
         )
