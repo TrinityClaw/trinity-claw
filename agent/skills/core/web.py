@@ -72,9 +72,11 @@ _consecutive_errors = 0
 _max_backoff = 20  # Must stay under SKILL_TIMEOUT_SECONDS (default 30s)
 
 def _get_random_user_agent() -> str:
+    """Return a random browser User-Agent string to reduce fingerprinting."""
     return random.choice(USER_AGENTS)
 
 def _apply_rate_limit():
+    """Sleep as needed to honour per-request rate limiting with exponential back-off on errors."""
     global _last_request_time, _consecutive_errors
     if _last_request_time is not None:
         base_delay = min(_min_delay * (1.5 ** _consecutive_errors), _max_backoff)
@@ -87,11 +89,13 @@ def _apply_rate_limit():
     _last_request_time = datetime.now()
 
 def _record_success():
+    """Reset the consecutive-error counter after a successful request."""
     global _consecutive_errors
     if _consecutive_errors > 0:
         _consecutive_errors = 0
 
 def _record_error():
+    """Increment the consecutive-error counter to increase back-off delay."""
     global _consecutive_errors
     _consecutive_errors += 1
 
@@ -141,6 +145,7 @@ def _bw_run(coro, timeout: int = 30) -> Any:
 
 
 def _get_session():
+    """Return the shared requests Session, creating it with retry middleware on first call."""
     global _session
     if _session is None and HAS_REQUESTS:
         _session = requests.Session()
@@ -237,9 +242,11 @@ def fetch(url: str, timeout: int = 30) -> str:
         return f"❌ Error: {str(e)}"
 
 def get(url: str) -> str:
+    """Alias for fetch(url). Returns the raw HTML/text content of a URL."""
     return fetch(url)
 
 def head(url: str) -> str:
+    """Send a HEAD request and return status code, Content-Type, and Content-Length."""
     if not HAS_REQUESTS:
         return "❌ requests library not installed"
     
@@ -268,12 +275,14 @@ def head(url: str) -> str:
 # ============================================
 
 def read(url: str) -> str:
+    """Fetch a URL and return its visible text content with tags and boilerplate stripped."""
     content = fetch(url)
     if content.startswith("❌"):
         return content
     return extract_text(content)
 
 def extract_text(html_content: str) -> str:
+    """Strip HTML tags and return clean plain text. Uses BeautifulSoup when available."""
     if HAS_BS4:
         soup = BeautifulSoup(html_content, 'html.parser')
         for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
@@ -294,12 +303,14 @@ def extract_text(html_content: str) -> str:
 # ============================================
 
 def scrape(url: str, selector: str = "body") -> str:
+    """Fetch a URL and extract text from elements matching a CSS selector."""
     content = fetch(url)
     if content.startswith("❌"):
         return content
     return extract_elements(content, selector)
 
 def extract_elements(html_content: str, selector: str) -> str:
+    """Return text content of elements matching a CSS selector in the given HTML."""
     if HAS_BS4:
         soup = BeautifulSoup(html_content, 'html.parser')
         elements = soup.select(selector)
@@ -424,6 +435,7 @@ def scrape_images(url: str, absolute: bool = True) -> str:
     return "\n".join(results)
 
 def scrape_table(url: str, table_index: int = 0) -> str:
+    """Fetch a URL and return the specified HTML table (0-indexed) as formatted text."""
     content = fetch(url)
     if content.startswith("❌"):
         return content
@@ -763,6 +775,7 @@ def _search_bing(query: str, n: int) -> str:
 # ============================================
 
 def find_text(url: str, pattern: str) -> str:
+    """Search for a regex pattern (or plain string) in a page's visible text and return matches with context."""
     content = fetch(url)
     if content.startswith("❌"):
         return content
@@ -784,9 +797,11 @@ def find_text(url: str, pattern: str) -> str:
     return f"Pattern '{pattern}' not found"
 
 def grep(url: str, pattern: str) -> str:
+    """Alias for find_text(). Search a page for a pattern and return matches."""
     return find_text(url, pattern)
 
 def download(url: str, filename: str = "") -> str:
+    """Download a binary file from url and save it to /app/memory/. Returns the saved path and size."""
     if not HAS_REQUESTS:
         return "❌ requests library not installed"
     
@@ -942,6 +957,7 @@ def find_and_download_image(query: str, save_as: str = "") -> str:
 
 
 def extract_meta(url: str) -> str:
+    """Fetch a URL and return its title, meta description, keywords, and Open Graph tags."""
     content = fetch(url)
     if content.startswith("❌"):
         return content
@@ -974,6 +990,7 @@ def extract_meta(url: str) -> str:
         return "\n".join(meta) if meta else "No metadata found"
 
 def status() -> str:
+    """Return a summary of the web skill's runtime dependencies and rate-limiting state."""
     bw_status = "❌ (not installed)"
     if HAS_PLAYWRIGHT:
         bw_status = "✅ launched" if _bw_browser is not None else "✅ installed (idle)"
