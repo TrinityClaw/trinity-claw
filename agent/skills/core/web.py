@@ -1010,6 +1010,7 @@ def status() -> str:
 # ============================================
 
 async def _bw_async_launch(headless: bool = True, slow_mo: int = 0) -> Dict:
+    """Launch a Chromium browser instance via Playwright and initialise the shared context/page."""
     global _bw_playwright, _bw_browser, _bw_context, _bw_page
     if _bw_browser is not None:
         return {"ok": True, "msg": "Browser already running"}
@@ -1029,6 +1030,7 @@ async def _bw_async_launch(headless: bool = True, slow_mo: int = 0) -> Dict:
 
 
 async def _bw_async_goto(url: str, wait_until: str = "networkidle", timeout: int = 30000) -> Dict:
+    """Navigate the browser page to url, launching the browser first if needed."""
     global _bw_page
     if _bw_page is None:
         await _bw_async_launch()
@@ -1042,6 +1044,7 @@ async def _bw_async_goto(url: str, wait_until: str = "networkidle", timeout: int
 
 
 async def _bw_async_screenshot(path: str = "", full_page: bool = False) -> Dict:
+    """Capture a screenshot of the current page, optionally saving it to path."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open. Call browser_goto() first."}
     raw = await _bw_page.screenshot(full_page=full_page, type="png")
@@ -1054,6 +1057,7 @@ async def _bw_async_screenshot(path: str = "", full_page: bool = False) -> Dict:
 
 
 async def _bw_async_get_text() -> Dict:
+    """Return the visible text (innerText) of the current page."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     text = await _bw_page.evaluate("() => document.body.innerText")
@@ -1061,6 +1065,7 @@ async def _bw_async_get_text() -> Dict:
 
 
 async def _bw_async_get_html() -> Dict:
+    """Return the full HTML content of the current page."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     content = await _bw_page.content()
@@ -1068,6 +1073,7 @@ async def _bw_async_get_html() -> Dict:
 
 
 async def _bw_async_click(selector: str, timeout: int = 5000) -> Dict:
+    """Click the element matching selector on the current page."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.click(selector, timeout=timeout)
@@ -1075,6 +1081,7 @@ async def _bw_async_click(selector: str, timeout: int = 5000) -> Dict:
 
 
 async def _bw_async_type(selector: str, text: str, delay: int = 40, clear_first: bool = True) -> Dict:
+    """Type text into the element matching selector, optionally clearing it first."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.click(selector)
@@ -1085,6 +1092,7 @@ async def _bw_async_type(selector: str, text: str, delay: int = 40, clear_first:
 
 
 async def _bw_async_fill(selector: str, value: str) -> Dict:
+    """Set the value of a form element (input/textarea) identified by selector."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.fill(selector, value)
@@ -1092,6 +1100,7 @@ async def _bw_async_fill(selector: str, value: str) -> Dict:
 
 
 async def _bw_async_select(selector: str, value: str) -> Dict:
+    """Select an option by value in a <select> element identified by selector."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     selected = await _bw_page.select_option(selector, value=value)
@@ -1099,6 +1108,7 @@ async def _bw_async_select(selector: str, value: str) -> Dict:
 
 
 async def _bw_async_evaluate(js: str) -> Dict:
+    """Execute arbitrary JavaScript in the current page context and return the result."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     result = await _bw_page.evaluate(js)
@@ -1106,6 +1116,7 @@ async def _bw_async_evaluate(js: str) -> Dict:
 
 
 async def _bw_async_wait_for(selector: str, state: str = "visible", timeout: int = 5000) -> Dict:
+    """Wait until the element matching selector reaches the given state (visible/hidden/attached)."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.wait_for_selector(selector, state=state, timeout=timeout)
@@ -1113,6 +1124,7 @@ async def _bw_async_wait_for(selector: str, state: str = "visible", timeout: int
 
 
 async def _bw_async_new_tab(url: str = "") -> Dict:
+    """Open a new browser tab, optionally navigating to url, and make it the active page."""
     global _bw_page
     if _bw_context is None:
         return {"ok": False, "error": "Browser not launched. Call browser_launch() or browser_goto() first."}
@@ -1123,6 +1135,7 @@ async def _bw_async_new_tab(url: str = "") -> Dict:
 
 
 async def _bw_async_close_tab() -> Dict:
+    """Close the current browser tab and switch focus to the last remaining tab."""
     global _bw_page
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
@@ -1133,6 +1146,7 @@ async def _bw_async_close_tab() -> Dict:
 
 
 async def _bw_async_go_back(timeout: int = 5000) -> Dict:
+    """Navigate the browser back one step in history."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.go_back(timeout=timeout)
@@ -1140,6 +1154,7 @@ async def _bw_async_go_back(timeout: int = 5000) -> Dict:
 
 
 async def _bw_async_go_forward(timeout: int = 5000) -> Dict:
+    """Navigate the browser forward one step in history."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.go_forward(timeout=timeout)
@@ -1147,6 +1162,7 @@ async def _bw_async_go_forward(timeout: int = 5000) -> Dict:
 
 
 async def _bw_async_scroll(x: int = 0, y: int = 500) -> Dict:
+    """Scroll the current page by (x, y) pixels using window.scrollBy."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.evaluate(f"window.scrollBy({x}, {y})")
@@ -1154,6 +1170,7 @@ async def _bw_async_scroll(x: int = 0, y: int = 500) -> Dict:
 
 
 async def _bw_async_hover(selector: str) -> Dict:
+    """Hover the mouse over the element matching selector."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.hover(selector)
@@ -1161,6 +1178,7 @@ async def _bw_async_hover(selector: str) -> Dict:
 
 
 async def _bw_async_press(key: str) -> Dict:
+    """Send a keyboard key press (e.g. 'Enter', 'Escape', 'Tab') to the current page."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     await _bw_page.keyboard.press(key)
@@ -1168,6 +1186,7 @@ async def _bw_async_press(key: str) -> Dict:
 
 
 async def _bw_async_get_links() -> Dict:
+    """Return all http/https anchor links visible on the current page (up to 100)."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     links = await _bw_page.evaluate("""
@@ -1180,6 +1199,7 @@ async def _bw_async_get_links() -> Dict:
 
 
 async def _bw_async_get_inputs() -> Dict:
+    """Return all input, textarea, select, and button elements on the current page."""
     if _bw_page is None:
         return {"ok": False, "error": "No page open."}
     inputs = await _bw_page.evaluate("""
