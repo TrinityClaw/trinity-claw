@@ -372,6 +372,7 @@ def dismiss_idea(idea_id: str) -> str:
 
 
 def _suggestion_key(skill_name: str, issue_type: str) -> str:
+    """Build a deduplication key for a (skill, issue_type) pair to avoid re-suggesting the same fix."""
     return f"{skill_name}::{issue_type}"
 
 
