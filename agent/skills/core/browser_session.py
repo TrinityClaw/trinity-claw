@@ -38,6 +38,9 @@ DOC = (
     "screenshot(tab_index?)→capture screenshot; "
     "goto(url, tab_index?)→navigate to a URL; "
     "get_text(tab_index?)→extract visible text (up to 5000 chars); "
+    "get_dom_text(tab_index?, max_chars?)→extract STRUCTURED semantic page text: headings as # markers, paragraphs, lists, nav landmarks. "
+    "Better than get_text() when you need to understand page layout and content before deciding what to interact with. "
+    "Use get_snapshot() for interactive elements, get_dom_text() for reading/understanding page content; "
     "get_html(tab_index?, selector?)→get HTML of page or a CSS-selected element; "
     "click(target, tab_index?)→click by CSS selector or 'text=Foo' (use click_accessible instead when possible); "
     "type_text(target, text, clear_first?, tab_index?)→type into CSS selector target (use type_accessible instead when possible); "
@@ -946,6 +949,148 @@ def get_html(tab_index: int = 0, selector: str = "") -> str:
         )
     except Exception as e:
         return f"❌ {e}"
+
+
+_DOM_TEXT_JS = """
+(maxChars) => {
+    const lines = [];
+    const visited = new WeakSet();
+
+    function visible(el) {
+        try {
+            const s = window.getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity || '1') > 0;
+        } catch(e) { return false; }
+    }
+
+    function walk(el, depth, inNav) {
+        if (!el || visited.has(el)) return;
+        visited.add(el);
+        if (!visible(el)) return;
+
+        const tag = (el.tagName || '').toLowerCase();
+        const SKIP = ['script','style','noscript','svg','canvas','template','iframe','head'];
+        if (SKIP.includes(tag)) return;
+
+        const indent = '  '.repeat(Math.min(depth, 4));
+
+        // Headings — take innerText and stop recursing
+        if (/^h[1-6]$/.test(tag)) {
+            const lvl = parseInt(tag[1]);
+            const txt = (el.innerText || '').trim().slice(0, 200);
+            if (txt) lines.push('\\n' + '#'.repeat(lvl) + ' ' + txt);
+            return;
+        }
+        // Paragraphs — stop recursing
+        if (tag === 'p') {
+            const txt = (el.innerText || '').trim().slice(0, 300);
+            if (txt) lines.push(txt);
+            return;
+        }
+        // List items — stop recursing
+        if (tag === 'li') {
+            const txt = (el.innerText || '').trim().slice(0, 200);
+            if (txt) lines.push(indent + '• ' + txt);
+            return;
+        }
+        // Buttons — show outside nav only
+        if (tag === 'button' || el.getAttribute('role') === 'button') {
+            if (!inNav) {
+                const txt = (el.innerText || '').trim().slice(0, 80);
+                if (txt) lines.push(indent + '[btn: ' + txt + ']');
+            }
+            return;
+        }
+        // Links — show outside nav only
+        if (tag === 'a') {
+            if (!inNav) {
+                const txt = (el.innerText || '').trim().slice(0, 80);
+                if (txt) lines.push(indent + '[link: ' + txt + ']');
+            }
+            return;
+        }
+        // Form labels
+        if (tag === 'label') {
+            const txt = (el.innerText || '').trim().slice(0, 80);
+            if (txt) lines.push(indent + 'Label: ' + txt);
+            return;
+        }
+        // Table cells
+        if (tag === 'td' || tag === 'th') {
+            const txt = (el.innerText || '').trim().slice(0, 100);
+            if (txt) lines.push(indent + (tag === 'th' ? '[th] ' : '') + txt);
+            return;
+        }
+
+        // Landmark containers — annotate and recurse
+        const isNav = tag === 'nav' || el.getAttribute('role') === 'navigation';
+        const isSemantic = ['main','article','section','header','footer','nav','aside','form','ul','ol','table','tr'].includes(tag);
+
+        if (isSemantic) {
+            const label = el.getAttribute('aria-label') || el.id || '';
+            const role = el.getAttribute('role') || tag;
+            if (label && !['ul','ol','tr','table'].includes(tag)) {
+                lines.push('\\n[' + role + ': ' + label + ']');
+            } else if (['main','article','header','footer','nav','aside'].includes(tag) && !inNav) {
+                lines.push('\\n[' + role + ']');
+            }
+            // Nav: summarize links, skip individual ones
+            if (isNav) {
+                const links = Array.from(el.querySelectorAll('a'));
+                const texts = links.map(a => (a.innerText || '').trim()).filter(t => t).slice(0, 8);
+                if (texts.length) lines.push('  Nav: ' + texts.join(' | '));
+                return;
+            }
+        }
+
+        for (const child of el.children) {
+            if (lines.join('').length > maxChars) break;
+            walk(child, depth + 1, inNav || isNav);
+        }
+    }
+
+    const root = document.querySelector('main,[role="main"],article') || document.body;
+    walk(root, 0, false);
+    return lines.join('\\n').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, maxChars);
+}
+"""
+
+
+def get_dom_text(tab_index: int = 0, max_chars: int = 4000) -> str:
+    """Extract a structured semantic text outline of the current page.
+
+    Unlike get_text() which returns flat raw text, this preserves page structure:
+    headings appear as # markers, paragraphs as prose, list items with bullets,
+    nav regions summarized, and landmark containers labeled.
+
+    Use this when you need to understand what is on a page (content, layout)
+    before deciding what to interact with. Use get_snapshot() for interactive
+    elements. Use get_html() when you need the raw HTML source.
+
+    max_chars: maximum characters to return (default 4000).
+    """
+    try:
+        pw, browser = _get_connection()
+        page = _get_page(browser, tab_index)
+        result = page.evaluate(_DOM_TEXT_JS, max_chars)
+        if not result or not result.strip():
+            return (
+                f"⚠️ DOM text extraction returned empty — page may still be loading.\n"
+                f"Try get_text() for raw text or get_snapshot() for interactive elements."
+            )
+        total = len(result)
+        suffix = (
+            f"\n\n... [truncated at {max_chars} chars — pass a larger max_chars or use get_html() for full content]"
+            if total >= max_chars else ""
+        )
+        return (
+            f"📄 DOM Structure — {page.url}\n"
+            f"Title: {page.title()}\n"
+            + "─" * 50 + "\n"
+            + result + suffix
+        )
+    except Exception as e:
+        return f"❌ get_dom_text failed: {e}"
 
 
 def click(target: str = "", tab_index: int = 0, **kwargs) -> str:
