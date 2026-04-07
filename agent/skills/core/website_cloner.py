@@ -752,6 +752,7 @@ def _parse_structure_bs4(html: str, soup=None) -> dict:
     seen = set()
 
     def _process(el):
+        """Recursively walk a BeautifulSoup element and extract meaningful page sections."""
         eid = id(el)
         if eid in seen:
             return

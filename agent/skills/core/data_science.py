@@ -111,6 +111,7 @@ def _load_data(file_path: str) -> pd.DataFrame:
 def _safe_json_dump(obj) -> str:
     """Safely convert any object to JSON string, handling numpy/pandas types"""
     def convert(o):
+        """Recursively convert numpy/pandas types to JSON-serializable Python primitives."""
         if isinstance(o, (np.integer, np.int64, np.int32)):
             return int(o)
         elif isinstance(o, (np.floating, np.float64, np.float32)):
