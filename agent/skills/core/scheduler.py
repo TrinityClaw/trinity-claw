@@ -11,6 +11,8 @@ from pathlib import Path
 NAME = 'scheduler'
 SHORT_DOC = "Schedule agent prompts to run once or on a recurring schedule using natural language times."
 DOC = (
+    'USAGE: schedule(name:str, when:str, prompt:str) — Schedule a one-time task. '
+    'EXAMPLE: schedule("backup", "in 2 hours", "Run database backup and notify admin")\n\n'
     'Schedule agent prompts to run once or recurring. Natural language: "tomorrow at 3pm", "in 2 hours", "every 1h". '
     'Functions: schedule(name, when, prompt), schedule_recurring(name, every, prompt), '
     'list_tasks()→all tasks with truncated prompt preview, '
@@ -20,6 +22,12 @@ DOC = (
     'get_task_report(name, limit=50)→full result history for one task. '
     'IMPORTANT: list_tasks() truncates prompts. Always use get_task(name) when the user wants to read or edit a specific task.'
 )
+
+__all__ = [
+    "schedule", "schedule_recurring", "remove", "list_tasks",
+    "get_task", "edit_task_prompt", "clear", "status",
+    "get_activity_log", "get_task_report", "parse_preview", "help_schedule",
+]
 
 _TASKS_FILE    = Path("/app/memory/scheduled_tasks.json")
 _ACTIVITY_LOG  = Path("/app/memory/activity_log.jsonl")
@@ -302,6 +310,10 @@ def schedule(name: str, when: str, prompt: str) -> str:
              'next friday at 9am', '2026-03-01 10:00'
     prompt — what the agent should do at that time
     """
+    if not all([name, when, prompt]):
+        missing = [arg for arg, val in [('name', name), ('when', when), ('prompt', prompt)] if not val]
+        return f"❌ scheduler.schedule missing required argument(s): {', '.join(missing)}. Usage: schedule(name, when, prompt)"
+
     try:
         run_at = _parse_when(when)
     except ValueError as e:
@@ -530,6 +542,21 @@ def get_task_report(name: str, limit: int = 50) -> str:
         return "\n".join(lines)
     except Exception as ex:
         return f"❌ get_task_report error: {ex}"
+
+
+def help_schedule() -> str:
+    """Return usage documentation for the schedule skill."""
+    return (
+        "📋 schedule(name, when, prompt)\n"
+        "  name:   unique task ID (e.g., 'daily_backup')\n"
+        "  when:   natural language time ('in 2h', 'tomorrow at 9am', 'next monday')\n"
+        "  prompt: what the agent should execute\n"
+        "Example: schedule('report', 'every monday at 8am', 'Generate weekly metrics')\n\n"
+        "Other functions: schedule_recurring(name, every, prompt), list_tasks(), "
+        "get_task(name), edit_task_prompt(name, new_prompt), remove(name), "
+        "clear(), status(), parse_preview(when), get_activity_log(hours=24), "
+        "get_task_report(name, limit=50)"
+    )
 
 
 def parse_preview(when: str) -> str:
