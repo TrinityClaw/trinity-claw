@@ -818,12 +818,14 @@ def _auto_enhance_css(model_css: str) -> str:
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _slugify(name: str) -> str:
+    """Convert a project name to a lowercase, URL-safe slug (hyphens replace special chars)."""
     name = name.strip().lower()
     name = re.sub(r"[^a-z0-9\-_]", "-", name)
     name = re.sub(r"-+", "-", name).strip("-")
     return name or "project"
 
 def _safe_filename(filename: str) -> bool:
+    """Return True if filename has an allowed extension and contains no path traversal sequences."""
     p = Path(filename)
     return p.suffix in ALLOWED_EXTENSIONS and p.name == str(p) and ".." not in filename
 

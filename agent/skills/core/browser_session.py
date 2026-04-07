@@ -2171,6 +2171,7 @@ def _cookies_read(cookie_file: Path) -> list:
 
 
 def _stealth_human_delay(min_s: float = 0.5, max_s: float = 1.8):
+    """Pause for a random duration within [min_s, max_s] to mimic human interaction timing."""
     time.sleep(random.uniform(min_s, max_s))
 
 

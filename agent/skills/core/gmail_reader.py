@@ -78,6 +78,7 @@ _SKIP_SUBJECT_PREFIXES = (
 # ── Dependency check ───────────────────────────────────────────────────────────
 
 def _check_deps() -> tuple:
+    """Check that required Google API client libraries are installed. Returns (ok, message)."""
     try:
         import googleapiclient   # noqa
         import google_auth_oauthlib  # noqa
