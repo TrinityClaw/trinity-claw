@@ -209,6 +209,7 @@ def search_logs(keyword: str) -> str:
 # ── Daily Journal ──────────────────────────────────────────────────────────────
 
 def _load_journal() -> dict:
+    """Load all daily journal entries from the JSONL file. Returns a dict keyed by date string."""
     entries = {}
     if not JOURNAL_FILE.exists():
         return entries

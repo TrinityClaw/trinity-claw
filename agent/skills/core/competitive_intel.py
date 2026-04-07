@@ -81,6 +81,7 @@ except ImportError:
 # ── Storage helpers ───────────────────────────────────────────────────────────
 
 def _ensure_dirs() -> None:
+    """Create the competitive_intel storage directory if it does not already exist."""
     _BASE.mkdir(parents=True, exist_ok=True)
 
 

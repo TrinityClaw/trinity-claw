@@ -105,6 +105,7 @@ def _resolve(path: str) -> Path:
     return candidate
 
 def _ext(p: Path) -> str:
+    """Return the lowercase extension of a Path without the leading dot."""
     return p.suffix.lower().lstrip(".")
 
 # ── PDF ────────────────────────────────────────────────────────────────────────
