@@ -37,6 +37,7 @@ _api_key = os.getenv("YOUTUBE_API_KEY", "")
 _last_authorize_msg = {"timestamp": 0}
 
 def _check_deps() -> tuple[bool, str]:
+    """Check that the required Google API client libraries are installed. Returns (ok, message)."""
     try:
         import googleapiclient  # noqa
         import google_auth_oauthlib  # noqa

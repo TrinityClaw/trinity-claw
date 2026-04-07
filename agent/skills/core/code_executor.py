@@ -73,6 +73,7 @@ _BASH_FORBIDDEN_CHARS = frozenset({";", "&", "|", ">", "<", "$", "(", ")", "`", 
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
 def _clamp_timeout(t: int) -> int:
+    """Clamp a timeout value to [1, MAX_TIMEOUT] seconds."""
     return min(max(int(t), 1), MAX_TIMEOUT)
 
 

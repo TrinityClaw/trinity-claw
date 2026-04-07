@@ -12,6 +12,7 @@ DOC = (
 
 
 def _build_bar(percent: float, width: int = 10) -> str:
+    """Render a colour-coded ASCII progress bar for a given percentage (0–100)."""
     filled = int(percent / 100 * width)
     empty = width - filled
     icon = "🔴" if percent > 80 else ("🟡" if percent > 50 else "🟢")
