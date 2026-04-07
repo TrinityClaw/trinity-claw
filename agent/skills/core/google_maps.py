@@ -59,6 +59,7 @@ _OSM_TAGS = {
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _get(url: str, params: dict) -> dict:
+    """Send a GET request to a Nominatim/OSRM endpoint and return the parsed JSON response."""
     resp = requests.get(url, params=params, headers=_HEADERS, timeout=10)
     resp.raise_for_status()
     return resp.json()

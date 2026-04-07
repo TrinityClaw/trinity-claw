@@ -70,6 +70,7 @@ _SUPPORTED = {
 # ── ChromaDB ───────────────────────────────────────────────────────────────────
 
 def _get_collection():
+    """Connect to ChromaDB and return (or create) the business_knowledge collection."""
     try:
         import chromadb
         client = chromadb.HttpClient(host=_CHROMA_HOST, port=8000)
@@ -80,6 +81,7 @@ def _get_collection():
 # ── Index (tracks ingested files by content hash) ─────────────────────────────
 
 def _load_index() -> dict:
+    """Load the ingestion index from disk. Returns an empty dict if missing or corrupt."""
     _KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
     if _INDEX_FILE.exists():
         try:
@@ -89,10 +91,12 @@ def _load_index() -> dict:
     return {}
 
 def _save_index(index: dict):
+    """Persist the ingestion index to disk."""
     _KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
     _INDEX_FILE.write_text(json.dumps(index, indent=2), encoding="utf-8")
 
 def _file_hash(path: Path) -> str:
+    """Return the MD5 hex digest of a file's contents (used for change detection)."""
     h = hashlib.md5()
     h.update(path.read_bytes())
     return h.hexdigest()
@@ -100,6 +104,7 @@ def _file_hash(path: Path) -> str:
 # ── Text extraction (delegates to document_parser) ────────────────────────────
 
 def _extract_text(path: Path) -> str:
+    """Extract plain text from any supported document via document_parser.read."""
     return _document_parser.read(str(path))
 
 # ── LLM summarization (optional — skipped gracefully if LLM unavailable) ───────
@@ -162,6 +167,7 @@ def _chunk_text(text: str, rel_path: str, project: str) -> list:
 # ── Core ingestion logic ───────────────────────────────────────────────────────
 
 def _ingest_one(path: Path, col, index: dict) -> str:
+    """Chunk a single file and upsert its chunks into ChromaDB. Returns a status line."""
     # Use path relative to knowledge dir as the unique key — avoids same-name collisions
     try:
         rel_path = str(path.relative_to(_KNOWLEDGE_DIR))

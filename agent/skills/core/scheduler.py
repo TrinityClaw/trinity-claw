@@ -56,6 +56,7 @@ def _append_activity(source: str, action: str, result: str):
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def _load() -> dict:
+    """Load the scheduled tasks dict from disk. Returns an empty dict if missing or corrupt."""
     _TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
     if _TASKS_FILE.exists():
         try:
@@ -66,6 +67,7 @@ def _load() -> dict:
 
 
 def _save(tasks: dict):
+    """Persist the scheduled tasks dict to disk."""
     _TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
     _TASKS_FILE.write_text(json.dumps(tasks, indent=2, default=str))
 
@@ -199,6 +201,7 @@ def _parse_interval(interval_str: str) -> int:
 
 
 def _human_interval(seconds: int) -> str:
+    """Convert a seconds count to a compact human-readable string (e.g. '2h', '30m')."""
     if seconds < 60:    return f"{seconds}s"
     if seconds < 3600:  return f"{seconds // 60}m"
     if seconds < 86400: return f"{seconds // 3600}h"
@@ -206,6 +209,7 @@ def _human_interval(seconds: int) -> str:
 
 
 def _eta(next_run: datetime) -> str:
+    """Return a human-readable ETA string for a future datetime (e.g. 'in 2h 15m')."""
     diff = next_run - datetime.now()
     secs = int(diff.total_seconds())
     if secs <= 0:
@@ -249,6 +253,7 @@ def _dispatch(prompt: str, task_name: str) -> str:
 # ── Background Loop ───────────────────────────────────────────────────────────
 
 def _run():
+    """Background loop: check every 30 s and fire any tasks whose next_run has passed."""
     global _running
     while _running:
         try:
@@ -288,6 +293,7 @@ def _run():
 
 
 def _ensure_running():
+    """Start the background scheduler thread if it is not already running."""
     global _running, _thread
     if not _running:
         _running = True
