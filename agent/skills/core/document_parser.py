@@ -16,6 +16,7 @@ DOC = (
     "Paths are relative to /app/memory/ unless absolute. "
     "Returns: read(path)→full document text ready for analysis; metadata(path)→author/date/page count as text; "
     "extract_tables(path)→tab-separated table rows as text; "
+    "ocr(path, lang?)→extract text from an image file using Tesseract OCR; lang defaults to 'eng', supports 'eng+fra', 'ita', 'spa', etc.; "
     "convert_to_text(path, outpath)→extracts text from any file and saves to /app/memory/knowledge/; "
     "create_text(filename, content)→save a plain text or markdown document to /app/memory/knowledge/; "
     "create_pdf(filename, content)→generate a PDF from plain text, saved to /app/memory/knowledge/; "
@@ -648,6 +649,40 @@ def create_pdf_from_markdown(filename, markdown_text) -> str:
         return f"Security error: {e}"
     except Exception as e:
         return f"Error creating PDF: {e}"
+
+
+def ocr(path: str, lang: str = "eng") -> str:
+    """
+    Extract text from an image file using Tesseract OCR.
+    Works on screenshots, scanned documents, receipts, and any image with printed text.
+
+    Args:
+        path: Path to the image (PNG, JPG, TIFF, BMP, WebP, etc.)
+        lang: Tesseract language code. Default 'eng'. Combine with '+': 'eng+fra', 'eng+srp_latn'.
+              Common codes: eng, ita, spa, fra, deu, ell, srp, srp_latn.
+
+    Returns:
+        Extracted text as a plain string, or an error message prefixed with ❌.
+    """
+    if not HAS_PILLOW:
+        return "❌ OCR unavailable — Pillow not installed. Run: pip install Pillow"
+    if not HAS_PYTESSERACT:
+        return "❌ OCR unavailable — pytesseract not installed. Run: pip install pytesseract (and apt-get install tesseract-ocr)"
+    try:
+        p = _resolve(path)
+        if not p.exists():
+            return f"❌ File not found: {path}"
+        img = _PILImage.open(p)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        text = _pytesseract.image_to_string(img, lang=lang).strip()
+        return text if text else "(no text detected in image)"
+    except _pytesseract.TesseractNotFoundError:
+        return "❌ Tesseract binary not found. Install: apt-get install -y tesseract-ocr"
+    except ValueError as e:
+        return f"❌ Security error: {e}"
+    except Exception as e:
+        return f"❌ OCR error: {e}"
 
 
 def list_supported(*args) -> str:

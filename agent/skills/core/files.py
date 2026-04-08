@@ -14,6 +14,7 @@ SHORT_DOC = "Read/write/patch files in /app/; checkpoint and rollback file chang
 DOC = (
     "File operations: read/list anywhere in /app/, write/delete within /app/memory/ or /app/skills/dynamic/. "
     "Returns: cat(path)→full file text; ls(path)→directory listing with names; "
+    "list_images(path)→list image files in a directory with sizes; "
     "write(path, content)→confirmation string; append(path, content)→confirmation string; "
     "patch(path, old_text, new_text)→find-and-replace in a file; "
     "exists(path)→'yes' or 'no'; "
@@ -77,6 +78,24 @@ def ls(path: str = "/app") -> str:
         for item in items:
             lines.append(f"  {'[D]' if item.is_dir() else '[F]'} {item.name}")
         return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def list_images(path: str = "/app/memory") -> str:
+    """List image files in a directory with their sizes."""
+    import mimetypes
+    try:
+        p = _read_path(path)
+        if not p.exists():
+            return f"Not found: {path}"
+        images = []
+        for f in sorted(p.iterdir()):
+            if f.is_file():
+                mime, _ = mimetypes.guess_type(f.name)
+                if mime and mime.startswith("image/"):
+                    images.append(f"  {f.name}  ({f.stat().st_size / 1024 / 1024:.2f} MB)")
+        return "\n".join(images) if images else "No image files found."
     except Exception as e:
         return f"Error: {e}"
 
