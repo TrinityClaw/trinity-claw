@@ -35,16 +35,18 @@ DOC = (
     "append(title, content)→add content to an existing note without overwriting it (creates note if it does not exist yet); "
     "end_day(summary, next_steps?)→wrap the day: writes today's journal entry with auto-pulled activity log and returns a full day overview; "
     "set_user_fact(key, value)→store a permanent fact about the user (e.g. language, name, projects); always call when learning stable user info; "
-    "get_user_facts_card()→return compact user fact card for inspection."
+    "get_user_facts_card()→return compact user fact card for inspection; "
+    "compress_journal(days_old=15)→compress journal entries older than N days: archives originals to daily_journal_archive.jsonl and replaces them with summary-only stubs to reduce token load; called automatically by end_day()."
 )
 
 _LOGS_FILE    = Path("/app/memory/session_logs.jsonl")
 _ACTIVITY_LOG = Path("/app/memory/activity_log.jsonl")
 
-NOTES_FILE      = Path("/app/memory/notes.json")
-JOURNAL_FILE    = Path("/app/memory/daily_journal.jsonl")
-USER_MODEL_FILE = Path("/app/memory/user_model.json")
-USER_FACTS_FILE = Path("/app/memory/user_facts.json")
+NOTES_FILE             = Path("/app/memory/notes.json")
+JOURNAL_FILE           = Path("/app/memory/daily_journal.jsonl")
+JOURNAL_ARCHIVE_FILE   = Path("/app/memory/daily_journal_archive.jsonl")
+USER_MODEL_FILE        = Path("/app/memory/user_model.json")
+USER_FACTS_FILE        = Path("/app/memory/user_facts.json")
 
 def _load_notes():
     """Load notes from file"""
@@ -234,6 +236,42 @@ def _save_journal(entries: dict) -> None:
     JOURNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps(e) for e in sorted(entries.values(), key=lambda x: x["date"])]
     JOURNAL_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def compress_journal(days_old: int = 15) -> str:
+    """Compress journal entries older than days_old days to save tokens.
+    Archives full originals to daily_journal_archive.jsonl, then replaces
+    old entries in the main journal with a lean summary-only stub.
+    Returns a brief status string. Called automatically by end_day()."""
+    try:
+        days_old = int(days_old)
+        cutoff = (date.today() - timedelta(days=days_old)).isoformat()
+        entries = _load_journal()
+
+        old = {k: v for k, v in entries.items()
+               if k < cutoff and not v.get("compressed")}
+        if not old:
+            return f"(journal already compact — no entries older than {days_old} days to compress)"
+
+        # Archive originals first (append-safe)
+        JOURNAL_ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with JOURNAL_ARCHIVE_FILE.open("a", encoding="utf-8") as f:
+            for e in sorted(old.values(), key=lambda x: x["date"]):
+                f.write(json.dumps(e) + "\n")
+
+        # Replace with compressed stubs in the live journal
+        for date_key, e in old.items():
+            entries[date_key] = {
+                "date":       e["date"],
+                "written_at": e.get("written_at", ""),
+                "summary":    e.get("summary", "")[:250],
+                "compressed": True,
+            }
+
+        _save_journal(entries)
+        return f"compressed {len(old)} journal entries older than {days_old} days (originals archived)"
+    except Exception as ex:
+        return f"compress_journal error: {ex}"
 
 
 def write_daily_entry(summary: str, learned: str, user_insights: str = "", next_steps: str = "") -> str:
@@ -649,6 +687,9 @@ def end_day(summary: str, next_steps: str = "") -> str:
             learned=learned,
             next_steps=next_steps,
         )
+
+        # Silently compress old journal entries to keep memory lean
+        compress_journal(days_old=15)
 
         lines = [
             f"🌙 Day wrapped — {today}",
