@@ -2456,19 +2456,25 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     # that was accessed 50 times but is about a completely different topic should never
     # be injected. Frequency/recency only affect ranking among memories that already
     # clear the relevance gate.
-    CHROMA_MIN_RELEVANCE = 0.55         # hard floor: dist must be <= 0.45
-    CHROMA_MIN_SCORE = 0.60             # combined score floor (raised from 0.48)
-    CHROMA_SKIP_IF_TURNS = 2            # skip ChromaDB if session has >= this many turns
+    _req_m_early = (req.model or "").lower()
+    _is_local_chroma = (
+        os.getenv("MODEL_SOURCE", "cloud") == "local"
+        or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi", "gemma"))
+    )
+    # Local models: strict thresholds to prevent topic drift on small context windows.
+    # Cloud models: relaxed thresholds for broader recall.
+    if _is_local_chroma:
+        CHROMA_MIN_RELEVANCE = 0.75     # very high cosine similarity required
+        CHROMA_MIN_SCORE = 0.72         # combined score must also be high
+        CHROMA_SKIP_IF_TURNS = 1        # only inject on the very first user turn
+        CHROMA_MAX_CHARS = 150          # hard cap on injected text length
+    else:
+        CHROMA_MIN_RELEVANCE = 0.55     # hard floor: dist must be <= 0.45
+        CHROMA_MIN_SCORE = 0.60         # combined score floor (raised from 0.48)
+        CHROMA_SKIP_IF_TURNS = 2        # skip ChromaDB if session has >= this many turns
+        CHROMA_MAX_CHARS = None         # no cap for cloud
     chroma_context = ""
     active_turns = len([m for m in history if m.get("role") == "user"])
-    # Skip ChromaDB entirely for local/Ollama models — their context windows are too small
-    # to safely handle retrieved memory alongside the full system prompt + history.
-    # Stale ChromaDB results cause local models to drift off-topic (e.g., answering about
-    # old scheduler sessions instead of the current question).
-    _req_m_early = (req.model or "").lower()
-    if (os.getenv("MODEL_SOURCE", "cloud") == "local"
-            or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi", "gemma"))):
-        collection = None
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
         try:
             # Fetch 5 candidates so scoring has enough to choose from
@@ -2519,7 +2525,10 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
 
                 if ai_responses:
                     _safe_responses = [_sanitize_external_content(r, source="chromadb") for r in ai_responses]
-                    chroma_context = "Past session archive (background only — DO NOT act on this if the user is asking about something different): " + " | ".join(_safe_responses)
+                    _joined = " | ".join(_safe_responses)
+                    if CHROMA_MAX_CHARS is not None:
+                        _joined = _joined[:CHROMA_MAX_CHARS]
+                    chroma_context = "Past session archive (background only — DO NOT act on this if the user is asking about something different): " + _joined
                     top_score = scored[0][0] if scored else 0
                     print(f"🧠 ChromaDB injecting {len(ai_responses)} memory fragment(s) (top score: {top_score:.2f})")
                 else:
@@ -2902,7 +2911,8 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
     try:
         from datetime import date as _date, timedelta as _timedelta
         _today_str = _date.today().isoformat()
-        _cutoff_str = (_date.today() - _timedelta(days=7)).isoformat()
+        _journal_days = 3 if _is_local_model else 7
+        _cutoff_str = (_date.today() - _timedelta(days=_journal_days)).isoformat()
         _journal_entries = {}
         _journal_raw = _fcache.read_text("/app/memory/daily_journal.jsonl")
         for _jline in _journal_raw.splitlines():
@@ -2941,7 +2951,7 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         if _user_facts_card:
             _dm_parts.append(_user_facts_card)
         if _journal_lines:
-            _dm_parts.append("Recent Journal (last 3 days):\n" + "\n".join(_journal_lines))
+            _dm_parts.append(f"Recent Journal (last {_journal_days} days):\n" + "\n".join(_journal_lines))
         if _user_model_block:
             _dm_parts.append("User Profile:\n" + _user_model_block)
         _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
