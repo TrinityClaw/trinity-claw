@@ -110,6 +110,8 @@ ${_skill_health_section}
 ${_daily_memory_block}
 </DAILY_MEMORY>
 
+**Maintaining user facts:** When you learn a stable fact about the user (language, name, active projects, timezone, preferences, tools they use), call `notes.set_user_fact(key, value)` immediately — no permission needed. Examples: `notes.set_user_fact(language, English)`, `notes.set_user_fact(projects, Trinity Claw agent)`. These facts persist across all sessions and all models.
+
 ## LONG-TERM CHAT HISTORY (Past conversations retrieved via semantic search)
 
 <RETRIEVED_MEMORY>
