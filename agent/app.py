@@ -2798,6 +2798,19 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
             "Always overwrite the whole note — don't append partial updates."
         )
 
+    # Load user facts card (always injected, works for every model — no branching)
+    _user_facts_card = ""
+    try:
+        _facts_raw = _fcache.read_text("/app/memory/user_facts.json")
+        if _facts_raw:
+            _facts = json.loads(_facts_raw)
+            _fact_lines = [f"  {k}: {v}" for k, v in _facts.items() if not k.startswith("_")]
+            if _fact_lines:
+                _updated = _facts.get("_updated", "")[:10]
+                _user_facts_card = f"User Facts (last updated {_updated}):\n" + "\n".join(_fact_lines)
+    except Exception:
+        pass
+
     # Auto-load user preferences from notes.json and build notes index (cached)
     _pref_content = ""
     _notes_index = ""
@@ -2925,6 +2938,8 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         except Exception:
             pass
         _dm_parts = []
+        if _user_facts_card:
+            _dm_parts.append(_user_facts_card)
         if _journal_lines:
             _dm_parts.append("Recent Journal (last 3 days):\n" + "\n".join(_journal_lines))
         if _user_model_block:
