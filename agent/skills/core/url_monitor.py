@@ -50,6 +50,7 @@ class UrlMonitor:
     """Advanced URL monitoring system with change detection and response tracking."""
     
     def __init__(self, db_path: str = "/app/memory/url_monitor.db"):
+        """Initialize the URL monitor with a SQLite database at db_path."""
         self.db_path = db_path
         self.setup_database()
         self.setup_logging()
