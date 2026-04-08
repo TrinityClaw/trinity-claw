@@ -2643,6 +2643,11 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                               "address", "navigate", "distance", "route", "nearby"},
         "database":          {"database", "sql", "query", "db", "table", "postgres",
                               "insert", "select", "delete", "record"},
+        "browser_session":   {"browser", "chrome", "cdp", "click", "screenshot",
+                              "navigate", "tab", "scrape", "login", "session", "webpage",
+                              "fill", "form", "stealth", "automate", "selenium"},
+        "autoimprove":       {"improve", "design", "spec", "autoimprove", "overnight",
+                              "research", "loop", "proposal", "approach", "plan"},
     }
     _msg_words = set(req.message.lower().split())
 
@@ -2892,11 +2897,11 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _lessons_cap = 10 if _is_local_model else 20
         _deduped = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:_lessons_cap]
         for _l in _deduped:
-            _safe_fix = _sanitize_external_content(_l["fix_applied"], source="lessons.jsonl")
+            _safe_fix = _sanitize_external_content(_l["fix_applied"][:150], source="lessons.jsonl")
             if _l.get("type") == "correction" and _l.get("bad_reply_preview"):
-                _safe_bad = _sanitize_external_content(_l["bad_reply_preview"][:150], source="lessons.jsonl")
+                _safe_bad = _sanitize_external_content(_l["bad_reply_preview"][:100], source="lessons.jsonl")
                 _lessons_lines.append(
-                    f"- [user_correction] I said: \"{_safe_bad}\" → user flagged it wrong: {_safe_fix}"
+                    f"- [user_correction] I said: \"{_safe_bad}\" → {_safe_fix}"
                 )
             else:
                 _lessons_lines.append(
