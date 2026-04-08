@@ -33,15 +33,18 @@ DOC = (
     "log_activity(action, result, source?)→log a completed manual task to the activity log (source defaults to 'manual'); "
     "get_activity_log(hours?)→show what the agent did in the last N hours, both scheduled and manual (default 24h); "
     "append(title, content)→add content to an existing note without overwriting it (creates note if it does not exist yet); "
-    "end_day(summary, next_steps?)→wrap the day: writes today's journal entry with auto-pulled activity log and returns a full day overview."
+    "end_day(summary, next_steps?)→wrap the day: writes today's journal entry with auto-pulled activity log and returns a full day overview; "
+    "set_user_fact(key, value)→store a permanent fact about the user (e.g. language, name, projects); always call when learning stable user info; "
+    "get_user_facts_card()→return compact user fact card for inspection."
 )
 
 _LOGS_FILE    = Path("/app/memory/session_logs.jsonl")
 _ACTIVITY_LOG = Path("/app/memory/activity_log.jsonl")
 
-NOTES_FILE = Path("/app/memory/notes.json")
-JOURNAL_FILE = Path("/app/memory/daily_journal.jsonl")
+NOTES_FILE      = Path("/app/memory/notes.json")
+JOURNAL_FILE    = Path("/app/memory/daily_journal.jsonl")
 USER_MODEL_FILE = Path("/app/memory/user_model.json")
+USER_FACTS_FILE = Path("/app/memory/user_facts.json")
 
 def _load_notes():
     """Load notes from file"""
@@ -660,6 +663,45 @@ def end_day(summary: str, next_steps: str = "") -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"❌ Error in end_day: {e}"
+
+
+# ── User Facts Card ────────────────────────────────────────────────────────────
+# A flat key-value store of permanent facts about the user.
+# Separate from user_model.json (which is complex and underused).
+# Always injected into every system prompt — tiny, always relevant.
+
+def set_user_fact(key: str, value: str) -> str:
+    """Store a permanent fact about the user. key examples: language, name, projects, timezone.
+    Call this whenever you learn something stable about the user that should persist across sessions."""
+    try:
+        facts: dict = {}
+        if USER_FACTS_FILE.exists():
+            try:
+                facts = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                facts = {}
+        facts[key.strip().lower()] = value.strip()
+        facts["_updated"] = datetime.now().isoformat()
+        USER_FACTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        USER_FACTS_FILE.write_text(json.dumps(facts, indent=2, ensure_ascii=False), encoding="utf-8")
+        return f"✅ User fact saved: {key} = {value!r}"
+    except Exception as e:
+        return f"❌ set_user_fact error: {e}"
+
+
+def get_user_facts_card() -> str:
+    """Return all stored user facts as a readable card. Shows what Trinity knows about the user."""
+    try:
+        if not USER_FACTS_FILE.exists():
+            return "No user facts saved yet."
+        facts = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
+        lines = [f"  {k}: {v}" for k, v in facts.items() if not k.startswith("_")]
+        if not lines:
+            return "No user facts saved yet."
+        updated = facts.get("_updated", "")[:10]
+        return f"User Facts (last updated {updated}):\n" + "\n".join(lines)
+    except Exception as e:
+        return f"❌ get_user_facts_card error: {e}"
 
 
 def get_activity_log(hours: int = 24) -> str:
