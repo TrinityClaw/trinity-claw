@@ -1640,7 +1640,7 @@ def _loop_error_reduce(max_experiments=10) -> str:
 
 
 def _loop_daily_review() -> str:
-    """Loop 3 — learning review + user model maintenance, no code changes."""
+    """Loop 3 — learning review + user model maintenance + self-reflection. No code changes."""
     try:
         si = _import_skill("self_improvement")
     except ImportError as e:
@@ -1656,13 +1656,68 @@ def _loop_daily_review() -> str:
     except Exception as _exc:
         prune_note = f"\n⚠️  prune_user_model skipped: {_exc}"
 
+    # Self-reflection: inspect recent experiment outcomes and surface systemic
+    # observations as parked ideas — "did we actually improve anything? what
+    # keeps failing?" — so they feed the discover_patterns and suggest_core loops.
+    reflection_note = ""
+    try:
+        recent = _load_log(days=7)
+        experiments = [e for e in recent if e.get("outcome") in ("IMPROVED", "REVERTED", "NO_CHANGE")]
+        if experiments:
+            n_improved = sum(1 for e in experiments if e["outcome"] == "IMPROVED")
+            n_reverted = sum(1 for e in experiments if e["outcome"] == "REVERTED")
+            n_total    = len(experiments)
+            win_rate   = n_improved / n_total
+
+            # Count how often each skill appears in REVERTED/NO_CHANGE outcomes
+            failure_counts: Dict[str, int] = {}
+            for e in experiments:
+                if e["outcome"] in ("REVERTED", "NO_CHANGE"):
+                    skill = e.get("skill", "unknown")
+                    failure_counts[skill] = failure_counts.get(skill, 0) + 1
+
+            top_failures = sorted(failure_counts.items(), key=lambda x: -x[1])[:3]
+
+            # Park an idea only when win rate is poor or a skill keeps failing
+            ideas_parked: List[str] = []
+            if win_rate < 0.3 and n_total >= 5:
+                idea = (
+                    f"Self-reflection (7d): win rate is {win_rate:.0%} "
+                    f"({n_improved}/{n_total} experiments improved). "
+                    f"Consider: are AUTO_FIXABLE patterns too aggressive? "
+                    f"Are patches being applied to the wrong scope?"
+                )
+                park_idea(idea, source="daily_review")
+                ideas_parked.append(f"low win-rate ({win_rate:.0%})")
+
+            for skill, count in top_failures:
+                if count >= 3:
+                    idea = (
+                        f"Self-reflection (7d): '{skill}' failed or reverted {count}x "
+                        f"in the last week — may need a suggest_core audit or manual review."
+                    )
+                    park_idea(idea, source="daily_review")
+                    ideas_parked.append(f"{skill} failed {count}x")
+
+            if ideas_parked:
+                reflection_note = f"\n💭 self-reflection: parked {len(ideas_parked)} idea(s) — {'; '.join(ideas_parked)}"
+            else:
+                reflection_note = (
+                    f"\n💭 self-reflection: {n_improved}/{n_total} improved "
+                    f"({n_reverted} reverted) over 7d — no systemic issues detected"
+                )
+        else:
+            reflection_note = "\n💭 self-reflection: no experiment history yet"
+    except Exception as _exc:
+        reflection_note = f"\n⚠️  self-reflection skipped: {_exc}"
+
     _log({
         "timestamp": datetime.now().isoformat(),
         "loop":      "daily_review",
         "outcome":   "REVIEW",
         "summary":   review[:2000],
     })
-    return f"📋 daily_review:\n{review}{prune_note}"
+    return f"📋 daily_review:\n{review}{prune_note}{reflection_note}"
 
 
 def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
@@ -1967,7 +2022,9 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
     if deadline is not None:
         results.append(f"   runtime cap: {deadline:.0f}s")
 
-    loop_roi_data: List[Dict] = []
+    # Track (loop_name, start_ts, end_ts, elapsed) so we can do a single
+    # _load_log(1) call after all loops finish and attribute entries in memory.
+    loop_timing: List[Dict] = []
 
     for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core", "pattern_mining", "discover_patterns"):
         elapsed_so_far = time.time() - start
@@ -1978,30 +2035,45 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
             )
             break
 
-        # Snapshot log entry count before loop so we can attribute new entries to it
         loop_start_ts = datetime.now().isoformat()
         loop_start_t  = time.time()
 
         results.append(f"\n{divider}\n🔬 {loop_name}")
         results.append(run_loop(loop_name, max_experiments))
 
-        loop_elapsed = time.time() - loop_start_t
-
-        # Tally outcomes logged during this loop by timestamp
-        new_entries  = [e for e in _load_log(1) if e.get("timestamp", "") >= loop_start_ts]
-        experiments  = [e for e in new_entries if e.get("outcome") in ("IMPROVED", "REVERTED", "NO_CHANGE")]
-        n_improved   = sum(1 for e in experiments if e["outcome"] == "IMPROVED")
-        n_total      = len(experiments)
-        roi          = round(n_improved / n_total, 2) if n_total else None
-
-        loop_roi_data.append({
+        loop_timing.append({
             "loop":     loop_name,
-            "elapsed":  round(loop_elapsed, 1),
-            "improved": n_improved,
-            "total":    n_total,
-            "roi":      roi,
+            "start_ts": loop_start_ts,
+            "end_ts":   datetime.now().isoformat(),
+            "elapsed":  round(time.time() - loop_start_t, 1),
         })
         time.sleep(2)
+
+    # Single log read — filter in memory per loop instead of one read per loop.
+    all_new_entries = _load_log(1)
+    loop_roi_data: List[Dict] = []
+    for lt in loop_timing:
+        loop_entries = [
+            e for e in all_new_entries
+            if lt["start_ts"] <= e.get("timestamp", "") < lt["end_ts"]
+        ]
+        if lt["loop"] == "discover_patterns":
+            # discover_patterns logs DISCOVERED entries with proposed/qualifying counts
+            # rather than per-experiment IMPROVED/REVERTED/NO_CHANGE outcomes.
+            discovered = [e for e in loop_entries if e.get("outcome") == "DISCOVERED"]
+            n_improved = sum(e.get("proposed", 0) for e in discovered)
+            n_total    = sum(e.get("qualifying", 0) for e in discovered)
+        else:
+            experiments = [e for e in loop_entries if e.get("outcome") in ("IMPROVED", "REVERTED", "NO_CHANGE")]
+            n_improved  = sum(1 for e in experiments if e["outcome"] == "IMPROVED")
+            n_total     = len(experiments)
+        loop_roi_data.append({
+            "loop":     lt["loop"],
+            "elapsed":  lt["elapsed"],
+            "improved": n_improved,
+            "total":    n_total,
+            "roi":      round(n_improved / n_total, 2) if n_total else None,
+        })
 
     elapsed = time.time() - start
 
@@ -2239,7 +2311,7 @@ def loop_roi(runs: int = 10) -> str:
     lines = [
         f"📊 Loop ROI — last {len(recent)} run_all() run(s)",
         "=" * 58,
-        f"  {'Loop':<22} {'Avg ROI':>8}  {'Improved':>9}  {'Total':>7}  {'Avg Time':>9}",
+        f"  {'Loop':<22} {'Avg ROI':>8}  {'Count':>9}  {'Total':>7}  {'Avg Time':>9}",
         f"  {'-'*22} {'-'*8}  {'-'*9}  {'-'*7}  {'-'*9}",
     ]
 
@@ -2248,15 +2320,25 @@ def loop_roi(runs: int = 10) -> str:
         avg_time = s["elapsed"] / max(1, s["runs"])
         roi_str  = f"{avg_roi:.0%}" if s["total"] > 0 else "—"
         flag     = " ⚠️" if s["total"] > 0 and avg_roi == 0.0 else ""
-        lines.append(
-            f"  {name:<22} {roi_str:>8}  {s['improved']:>9}  {s['total']:>7}  {avg_time:>7.1f}s{flag}"
-        )
+        # discover_patterns uses proposed/qualifying counts — annotate so the
+        # column values are not mistaken for experiment outcomes.
+        if name == "discover_patterns":
+            count_label = f"{s['improved']} proposed"
+            total_label = f"{s['total']} qualifying"
+            lines.append(
+                f"  {name:<22} {roi_str:>8}  {count_label:>9}  {total_label:>7}  {avg_time:>7.1f}s{flag}"
+            )
+        else:
+            lines.append(
+                f"  {name:<22} {roi_str:>8}  {s['improved']:>9}  {s['total']:>7}  {avg_time:>7.1f}s{flag}"
+            )
 
     lines += [
         f"  {'='*58}",
         "⚠️  = zero improvements across all sampled runs",
         "    → consider running: autoimprove.run_loop('<name>') to spot-check",
         "    → or skip that loop in a custom run_all call",
+        "  discover_patterns: Count = patterns proposed; Total = patterns qualifying",
         f"\nData from {len(recent)} of {len(run_summaries)} total recorded run_all() runs.",
     ]
     return "\n".join(lines)
