@@ -37,8 +37,10 @@ DOC = (
     "depth='deep' runs 4 iterations with 4 sources each vs quick's 2×2; "
     "coverage metric = 0.4×source_yield + 0.6×query_term_coverage; "
     "run_experiment(skill_name, issue_type)→one autoresearch cycle on a dynamic skill; "
-    "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining; "
-    "run_all(max_experiments=5, max_runtime_seconds=None)→all loops in sequence (overnight autopilot); max_runtime_seconds caps total wall time — remaining loops are skipped cleanly if the deadline is hit; "
+    "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining|discover_patterns; "
+    "run_all(max_experiments=5, max_runtime_seconds=None)→all loops in sequence (overnight autopilot): daily_review→ast_audit→error_reduce→suggest_core→pattern_mining→discover_patterns; max_runtime_seconds caps total wall time — remaining loops are skipped cleanly if the deadline is hit; "
+    "discover_patterns loop→scan lessons.jsonl for error types NOT in error_patterns.json → use LLM to analyze and classify each → park proposals via park_idea(); fills the blind spot where error_reduce ignores unknown failure modes; "
+    "loop_roi(runs=10)→show per-loop historical ROI (improved/total experiments, avg wall time) averaged over the last N run_all() runs; ⚠️ flags loops that consistently produce 0 improvements; "
     "pattern_mining loop→scan session_logs.jsonl for recurring task_type patterns → park skill proposals via park_idea(); review with list_ideas(); "
     "suggest_core(skill_name=None, max_skills=30)→audit core skills, save proposed patches to memory; skill_name targets one skill (e.g. 'browser_session'); "
     "list_suggestions(status='pending', skill_name=None)→show pending|applied|failed|all core suggestions; skill_name filters to one skill; "
@@ -410,6 +412,57 @@ def _import_skill(module_name: str, reload: bool = False):
     return importlib.import_module(module_name)
 
 
+# ── Minimal LLM helper ────────────────────────────────────────────────────────
+
+def _call_llm_simple(prompt: str, max_tokens: int = 256) -> str:
+    """Single-turn LLM call via LiteLLM proxy (cloud) or Ollama (local).
+
+    Returns empty string on any failure — callers must always have a non-LLM
+    fallback path.  Mirrors the pattern in self_improvement._call_llm_verdict()
+    so both skills route through the same env-var config.
+    """
+    try:
+        import requests as _req
+    except ImportError:
+        return ""
+
+    model_source = os.getenv("MODEL_SOURCE", "cloud")
+    try:
+        if model_source == "local":
+            base    = os.getenv("OLLAMA_API_BASE", "http://ollama:11434")
+            model   = os.getenv("OLLAMA_MODEL", "llama3.2")
+            payload = {
+                "model":   model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream":  False,
+                "options": {"temperature": 0.0, "num_predict": max_tokens},
+            }
+            resp = _req.post(f"{base}/api/chat", json=payload, timeout=30)
+            resp.raise_for_status()
+            return resp.json().get("message", {}).get("content", "").strip()
+        else:
+            base    = os.getenv("LITELLM_API_BASE", "http://litellm:4000")
+            api_key = os.getenv("LITELLM_MASTER_KEY", "")
+            model   = os.getenv("DEFAULT_MODEL", "trinity-default")
+            headers = {"Authorization": f"Bearer {api_key}"}
+            payload = {
+                "model":       model,
+                "messages":    [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "max_tokens":  max_tokens,
+            }
+            resp = _req.post(
+                f"{base}/v1/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return ""
+
+
 # ── Research loop constants ────────────────────────────────────────────────────
 
 # Converge when ≥72% of query terms are covered by collected sources.
@@ -442,7 +495,11 @@ def _score_coverage(query: str, sources: List[Dict]) -> float:
     """
     Coverage metric 0.0–1.0: how well collected sources answer the query.
 
-    0.4 × source yield  +  0.6 × query-term coverage in collected content.
+    0.4 × source yield  +  0.6 × query-term coverage in collected content,
+    scaled by a domain-diversity factor so that N sources from the same site
+    score lower than N sources from N different domains.
+
+    Diversity scale: all one domain → ×0.75 (25% penalty); fully diverse → ×1.0.
     Mirrors autoresearch's val_bpb — one number that drives keep/refine decisions.
     """
     if not sources:
@@ -453,15 +510,21 @@ def _score_coverage(query: str, sources: List[Dict]) -> float:
     ]
     yield_score = len(successful) / len(sources)
 
+    # Domain-diversity penalty — penalise echo chambers where all URLs share a host.
+    urls           = [s.get("url") for s in successful if s.get("url")]
+    unique_domains = len({u.split("/")[2] for u in urls if u.count("/") >= 2}) or 1
+    diversity_factor = min(1.0, unique_domains / max(1, len(successful)))
+    diversity_scale  = 0.75 + 0.25 * diversity_factor
+
     combined = " ".join(s.get("content", "") for s in successful).lower()
     terms = [
         t.lower() for t in re.findall(r'\w+', query)
         if t.lower() not in _RESEARCH_STOP and len(t) > 3
     ]
     if not terms:
-        return yield_score
+        return round(yield_score * diversity_scale, 3)
     term_score = sum(1 for t in terms if t in combined) / len(terms)
-    return round(0.4 * yield_score + 0.6 * term_score, 3)
+    return round((0.4 * yield_score + 0.6 * term_score) * diversity_scale, 3)
 
 
 def _missing_terms(query: str, sources: List[Dict]) -> List[str]:
@@ -495,8 +558,45 @@ def _fetch_with_retry(web, url: str, max_retries: int = 3, base_delay: float = 1
     raise last_exc
 
 
-def _refine_query(base_query: str, iteration: int, missing: List[str]) -> str:
-    """Build next iteration's search query guided by uncovered terms."""
+def _refine_query(
+    base_query: str,
+    iteration: int,
+    missing: List[str],
+    sources: Optional[List[Dict]] = None,
+) -> str:
+    """Build next iteration's search query guided by uncovered terms.
+
+    When `sources` are provided, attempts an LLM-driven refinement that reads
+    collected content and crafts a genuinely better next query rather than
+    mechanically appending missing keywords.  Falls back to keyword append if
+    the LLM is unavailable or returns an implausibly long result.
+    """
+    if sources:
+        # Build a compact context from the most recent successful sources
+        snippets = [
+            s["content"][:300]
+            for s in sources[-4:]
+            if s.get("content") and not str(s["content"]).startswith("fetch error")
+        ]
+        if snippets:
+            source_summary = "\n---\n".join(snippets)
+            missing_str = (", ".join(missing[:5])) if missing else "(none — coverage below threshold)"
+            prompt = (
+                f"You are refining a web research query. The original topic is:\n"
+                f"  {base_query}\n\n"
+                f"After {iteration} search iteration(s), these terms are still missing from "
+                f"the collected sources:\n"
+                f"  {missing_str}\n\n"
+                f"Sample content collected so far:\n{source_summary[:1200]}\n\n"
+                f"Write ONE refined search query (max 12 words) that will surface the missing "
+                f"information. Return only the query, no explanation or quotes."
+            )
+            refined = _call_llm_simple(prompt, max_tokens=64)
+            # Accept only plausible short queries — reject walls of text or empty
+            if refined and 2 <= len(refined.split()) <= 20:
+                return refined.strip().strip('"').strip("'")
+
+    # Fallback: mechanical keyword append (original behaviour)
     if missing:
         return f"{base_query} {' '.join(missing[:3])}"
     fallbacks = [
@@ -616,7 +716,10 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
             decision       = "MAX_ITERS"
             final_decision = "MAX_ITERS"
         else:
-            next_query = _refine_query(query, iteration, missing)
+            # Compute once — reused for both the log label and the actual next query.
+            # Pass all_sources so the LLM path has content context; falls back to
+            # keyword append automatically if LLM is unavailable.
+            next_query = _refine_query(query, iteration, missing, sources=all_sources)
             decision   = f"REFINE → \"{next_query}\""
 
         iter_log.append({
@@ -632,7 +735,7 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
         if final_decision in ("CONVERGED", "NO_IMPROVEMENT"):
             break
         if decision.startswith("REFINE"):
-            current_query = _refine_query(query, iteration, missing)
+            current_query = next_query  # already computed above — avoid second LLM call
 
     # ── Build report ──────────────────────────────────────────────────────────
     conv_marker = (
@@ -1666,6 +1769,131 @@ def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
     )
 
 
+# ── Discover new error pattern types ─────────────────────────────────────────
+
+def _discover_new_patterns(min_occurrences: int = 2) -> str:
+    """
+    Scan lessons.jsonl for error/failure types NOT already tracked in
+    error_patterns.json.  Uses the LLM to analyze recurring unknown failure modes
+    and propose new pattern definitions.  Results are parked via park_idea() for
+    human review — nothing is auto-added.
+
+    This closes the blind spot where error_reduce only improves patterns it already
+    knows about while silently ignoring new categories accumulating in lessons.jsonl.
+
+    Args:
+        min_occurrences: Min times an untracked type must appear before analysis
+                         (default 2 — low bar since the LLM decides severity).
+
+    Returns:
+        Summary of untracked types found and ideas parked.
+    """
+    try:
+        min_occurrences = int(min_occurrences)
+    except (ValueError, TypeError):
+        min_occurrences = 2
+
+    if not LESSONS_FILE.exists():
+        return "NO_DATA: lessons.jsonl not found — run skills first to accumulate lessons"
+
+    # Build the set of already-known pattern types
+    known_types: set = set(AUTO_FIXABLE)
+    if PATTERNS_FILE.exists():
+        try:
+            with PATTERNS_FILE.open(encoding="utf-8") as f:
+                known_types |= set(json.load(f).keys())
+        except Exception:
+            pass
+
+    # Tally untracked error types, collecting example messages for context
+    unknown_counts: Dict[str, List[str]] = {}
+    try:
+        for line in LESSONS_FILE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                lesson = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            et  = (lesson.get("error_type") or lesson.get("type", "")).strip()
+            msg = (lesson.get("error_msg")  or lesson.get("message", "")).strip()
+            if not et or et in known_types:
+                continue
+            unknown_counts.setdefault(et, []).append(msg[:200])
+    except Exception as e:
+        return f"❌ _discover_new_patterns: could not read lessons.jsonl — {e}"
+
+    if not unknown_counts:
+        return "✅ discover_patterns: no untracked error types in lessons.jsonl"
+
+    qualifying = {
+        et: msgs
+        for et, msgs in unknown_counts.items()
+        if len(msgs) >= min_occurrences
+    }
+
+    if not qualifying:
+        below = len(unknown_counts)
+        return (
+            f"✅ discover_patterns: {below} untracked type(s) in lessons — "
+            f"none meet the {min_occurrences}x threshold yet"
+        )
+
+    proposed = 0
+    lines = [f"🔍 discover_patterns: {len(qualifying)} qualifying untracked type(s):"]
+
+    for et, msgs in sorted(qualifying.items(), key=lambda x: -len(x[1])):
+        # Dedupe while preserving order
+        unique_msgs = list(dict.fromkeys(msgs))
+        examples_str = "\n".join(f"  - {m}" for m in unique_msgs[:5])
+
+        prompt = (
+            f"You are analyzing a recurring failure type in an AI agent skill system.\n\n"
+            f"Error type name : {et}\n"
+            f"Occurrences     : {len(msgs)}\n"
+            f"Example messages:\n{examples_str}\n\n"
+            f"Respond in this EXACT format (3 lines, no extra text):\n"
+            f"DESCRIPTION: <one sentence — what this failure pattern is>\n"
+            f"FIX: <one sentence — how to prevent or fix it in Python code>\n"
+            f"SEVERITY: low|medium|high|critical"
+        )
+
+        analysis = _call_llm_simple(prompt, max_tokens=150)
+
+        if analysis:
+            idea_text = (
+                f"New error pattern discovered: '{et}' ({len(msgs)}x in lessons.jsonl).\n"
+                f"LLM analysis:\n{analysis}\n"
+                f"Consider adding to error_patterns.json — and to AUTO_FIXABLE if a safe "
+                f"deterministic fix exists."
+            )
+        else:
+            # LLM unavailable — surface raw data so a human can still act on it
+            sample = "; ".join(unique_msgs[:3])
+            idea_text = (
+                f"New error pattern discovered: '{et}' ({len(msgs)}x in lessons.jsonl). "
+                f"Examples: {sample}. "
+                f"Consider adding to error_patterns.json."
+            )
+
+        park_idea(idea_text, source="discover_patterns")
+        lines.append(f"  • '{et}' ({len(msgs)}x) → parked for review")
+        proposed += 1
+
+    _log({
+        "timestamp":       datetime.now().isoformat(),
+        "loop":            "discover_patterns",
+        "outcome":         "DISCOVERED",
+        "untracked_total": len(unknown_counts),
+        "qualifying":      len(qualifying),
+        "proposed":        proposed,
+        "min_occurrences": min_occurrences,
+    })
+
+    lines.append(f"\nReview with: autoimprove.list_ideas()")
+    return "\n".join(lines)
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def run_loop(loop_name: str, max_experiments=10) -> str:
@@ -1681,11 +1909,12 @@ def run_loop(loop_name: str, max_experiments=10) -> str:
     """
     max_experiments = int(max_experiments)
     _loops = {
-        "ast_audit":       lambda: _loop_ast_audit(max_experiments),
-        "error_reduce":    lambda: _loop_error_reduce(max_experiments),
-        "daily_review":    _loop_daily_review,
-        "suggest_core":    lambda: suggest_core(max_experiments),
-        "pattern_mining":  _loop_pattern_mining,
+        "ast_audit":         lambda: _loop_ast_audit(max_experiments),
+        "error_reduce":      lambda: _loop_error_reduce(max_experiments),
+        "daily_review":      _loop_daily_review,
+        "suggest_core":      lambda: suggest_core(max_experiments),
+        "pattern_mining":    _loop_pattern_mining,
+        "discover_patterns": _discover_new_patterns,
     }
     if loop_name not in _loops:
         return f"❌ Unknown loop '{loop_name}'. Available: {list(_loops.keys())}"
@@ -1730,7 +1959,9 @@ def run_all(max_experiments=5, max_runtime_seconds=None) -> str:
     if deadline is not None:
         results.append(f"   runtime cap: {deadline:.0f}s")
 
-    for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core", "pattern_mining"):
+    loop_roi_data: List[Dict] = []
+
+    for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core", "pattern_mining", "discover_patterns"):
         elapsed_so_far = time.time() - start
         if deadline is not None and elapsed_so_far >= deadline:
             results.append(
@@ -1738,14 +1969,59 @@ def run_all(max_experiments=5, max_runtime_seconds=None) -> str:
                 f"— skipping '{loop_name}' and remaining loops"
             )
             break
+
+        # Snapshot log entry count before loop so we can attribute new entries to it
+        loop_start_ts = datetime.now().isoformat()
+        loop_start_t  = time.time()
+
         results.append(f"\n{divider}\n🔬 {loop_name}")
         results.append(run_loop(loop_name, max_experiments))
+
+        loop_elapsed = time.time() - loop_start_t
+
+        # Tally outcomes logged during this loop by timestamp
+        new_entries  = [e for e in _load_log(1) if e.get("timestamp", "") >= loop_start_ts]
+        experiments  = [e for e in new_entries if e.get("outcome") in ("IMPROVED", "REVERTED", "NO_CHANGE")]
+        n_improved   = sum(1 for e in experiments if e["outcome"] == "IMPROVED")
+        n_total      = len(experiments)
+        roi          = round(n_improved / n_total, 2) if n_total else None
+
+        loop_roi_data.append({
+            "loop":     loop_name,
+            "elapsed":  round(loop_elapsed, 1),
+            "improved": n_improved,
+            "total":    n_total,
+            "roi":      roi,
+        })
         time.sleep(2)
 
     elapsed = time.time() - start
+
+    # Log the full run summary for historical ROI tracking (readable by loop_roi())
+    _log({
+        "timestamp":     datetime.now().isoformat(),
+        "loop":          "run_all",
+        "outcome":       "RUN_ALL",
+        "loops":         loop_roi_data,
+        "total_elapsed": round(elapsed, 1),
+    })
+
+    # Inline ROI table — quick overnight read
+    results.append(f"\n{divider}\n📊 Loop ROI (this run):")
+    results.append(f"  {'Loop':<22} {'Time':>6}  {'Impr/Total':>11}  {'ROI':>6}")
+    results.append(f"  {'-'*22} {'-'*6}  {'-'*11}  {'-'*6}")
+    for lr in loop_roi_data:
+        roi_str  = f"{lr['roi']:.0%}" if lr["roi"] is not None else "—"
+        flag     = " ⚠️" if lr["total"] > 0 and lr["roi"] == 0.0 else ""
+        results.append(
+            f"  {lr['loop']:<22} {lr['elapsed']:>5.1f}s  "
+            f"{lr['improved']}/{lr['total']:>2} improved  {roi_str:>5}{flag}"
+        )
+
     results.append(f"\n{divider}\n✅ run_all complete — {elapsed:.1f}s total")
     results.append("Review core suggestions: autoimprove.list_suggestions()")
     results.append("Review skill proposals:  autoimprove.list_ideas()")
+    results.append("Historical loop ROI:     autoimprove.loop_roi()")
     return "\n".join(results)
 
 
@@ -1883,6 +2159,101 @@ def report(days=7) -> str:
     return "\n".join(lines)
 
 
+def loop_roi(runs: int = 10) -> str:
+    """
+    Show per-loop historical ROI averaged over the last N run_all() runs.
+
+    ROI = experiments that improved / total experiments run per loop.
+    Loops with consistently 0 ROI are flagged — candidates for skipping or
+    reducing frequency once you have enough history to trust the signal.
+
+    Args:
+        runs: Max number of past run_all() runs to average over (default 10)
+
+    Returns:
+        Per-loop ROI table sorted by average ROI descending.
+    """
+    try:
+        runs = int(runs)
+    except (ValueError, TypeError):
+        runs = 10
+
+    if not IMPROVE_LOG.exists():
+        return (
+            "📭 No improvement log yet.\n"
+            "Run autoimprove.run_all() — ROI data is collected each time it completes."
+        )
+
+    # Collect the last N RUN_ALL summary entries from the log
+    run_summaries: List[Dict] = []
+    try:
+        for line in IMPROVE_LOG.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+                if e.get("loop") == "run_all" and e.get("outcome") == "RUN_ALL":
+                    run_summaries.append(e)
+            except json.JSONDecodeError:
+                continue
+    except Exception as exc:
+        return f"❌ Could not read improvement log: {exc}"
+
+    if not run_summaries:
+        return (
+            "📭 No run_all() history yet — ROI data appears after the first completed run.\n"
+            "Run: autoimprove.run_all()"
+        )
+
+    recent = run_summaries[-runs:]
+
+    # Aggregate per-loop stats across all runs
+    loop_stats: Dict[str, Dict] = {}
+    for run_entry in recent:
+        for lr in run_entry.get("loops", []):
+            name = lr.get("loop", "?")
+            if name not in loop_stats:
+                loop_stats[name] = {"improved": 0, "total": 0, "elapsed": 0.0, "runs": 0}
+            loop_stats[name]["improved"] += lr.get("improved", 0)
+            loop_stats[name]["total"]    += lr.get("total", 0)
+            loop_stats[name]["elapsed"]  += lr.get("elapsed", 0.0)
+            loop_stats[name]["runs"]     += 1
+
+    if not loop_stats:
+        return "📭 No per-loop data in the stored run_all() entries — run again to populate."
+
+    sorted_loops = sorted(
+        loop_stats.items(),
+        key=lambda x: x[1]["improved"] / max(1, x[1]["total"]),
+        reverse=True,
+    )
+
+    lines = [
+        f"📊 Loop ROI — last {len(recent)} run_all() run(s)",
+        "=" * 58,
+        f"  {'Loop':<22} {'Avg ROI':>8}  {'Improved':>9}  {'Total':>7}  {'Avg Time':>9}",
+        f"  {'-'*22} {'-'*8}  {'-'*9}  {'-'*7}  {'-'*9}",
+    ]
+
+    for name, s in sorted_loops:
+        avg_roi  = s["improved"] / max(1, s["total"])
+        avg_time = s["elapsed"] / max(1, s["runs"])
+        roi_str  = f"{avg_roi:.0%}" if s["total"] > 0 else "—"
+        flag     = " ⚠️" if s["total"] > 0 and avg_roi == 0.0 else ""
+        lines.append(
+            f"  {name:<22} {roi_str:>8}  {s['improved']:>9}  {s['total']:>7}  {avg_time:>7.1f}s{flag}"
+        )
+
+    lines += [
+        f"  {'='*58}",
+        "⚠️  = zero improvements across all sampled runs",
+        "    → consider running: autoimprove.run_loop('<name>') to spot-check",
+        "    → or skip that loop in a custom run_all call",
+        f"\nData from {len(recent)} of {len(run_summaries)} total recorded run_all() runs.",
+    ]
+    return "\n".join(lines)
+
+
 def status() -> str:
     """Show autoimprove config, loops, and skills in scope."""
     dynamic_skills = [p.stem for p in SKILLS_DYNAMIC_DIR.glob("*.py") if not p.name.startswith("_")]
@@ -1908,7 +2279,8 @@ def status() -> str:
         "  • daily_review — learning review, no code changes",
         "  • ast_audit    — auto-fix bare_except & missing_timeout in dynamic skills",
         "  • error_reduce — auto-fix top error pattern + surface lesson proposals",
-        "  • suggest_core — audit core skills, queue suggestions for your review",
+        "  • suggest_core      — audit core skills, queue suggestions for your review",
+        "  • discover_patterns — scan lessons.jsonl for untracked error types, propose via LLM",
         "",
         f"Dynamic skills ({len(dynamic_skills)}): {', '.join(dynamic_skills) or 'none'}",
         f"Core skills    ({len(core_skills)}): {len(core_skills)} files in /app/skills/core/",
@@ -1928,6 +2300,7 @@ def status() -> str:
         "  autoimprove.park_idea('description', 'source')      → park an idea for later",
         "  autoimprove.list_ideas()                            → show open improvement ideas",
         "  autoimprove.dismiss_idea('<id>')                    → mark idea as done/dismissed",
+        "  autoimprove.loop_roi()                              → per-loop historical ROI",
         "  autoimprove.schedule_nightly('2am')                 → set on autopilot",
         "  autoimprove.report(7)                               → last 7 days",
         "",
