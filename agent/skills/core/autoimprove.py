@@ -38,7 +38,7 @@ DOC = (
     "coverage metric = 0.4×source_yield + 0.6×query_term_coverage; "
     "run_experiment(skill_name, issue_type)→one autoresearch cycle on a dynamic skill; "
     "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining|discover_patterns; "
-    "run_all(max_experiments=5, max_runtime_seconds=None)→all loops in sequence (overnight autopilot): daily_review→ast_audit→error_reduce→suggest_core→pattern_mining→discover_patterns; max_runtime_seconds caps total wall time — remaining loops are skipped cleanly if the deadline is hit; "
+    "run_all(max_experiments=5, max_runtime_seconds=25)→all loops in sequence; direct calls capped at 25s (dispatcher limit) — use schedule_nightly() for full overnight runs with no cap; pass max_runtime_seconds=None only from a scheduled context; "
     "discover_patterns loop→scan lessons.jsonl for error types NOT in error_patterns.json → use LLM to analyze and classify each → park proposals via park_idea(); fills the blind spot where error_reduce ignores unknown failure modes; "
     "loop_roi(runs=10)→show per-loop historical ROI (improved/total experiments, avg wall time) averaged over the last N run_all() runs; ⚠️ flags loops that consistently produce 0 improvements; "
     "pattern_mining loop→scan session_logs.jsonl for recurring task_type patterns → park skill proposals via park_idea(); review with list_ideas(); "
@@ -1896,12 +1896,12 @@ def _discover_new_patterns(min_occurrences: int = 2) -> str:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def run_loop(loop_name: str, max_experiments=10) -> str:
+def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
     """
     Run a single named improvement loop.
 
     Args:
-        loop_name:       ast_audit | error_reduce | daily_review | suggest_core | pattern_mining
+        loop_name:       ast_audit | error_reduce | daily_review | suggest_core | pattern_mining | discover_patterns
         max_experiments: Max experiments / skills to scan
 
     Returns:
@@ -1925,33 +1925,41 @@ def run_loop(loop_name: str, max_experiments=10) -> str:
     return f"{result}\n\n⏱ Loop '{loop_name}' finished in {elapsed:.1f}s"
 
 
-def run_all(max_experiments=5, max_runtime_seconds=None) -> str:
+def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
     """
-    Run all loops in sequence. Designed for overnight autopilot.
+    Run all loops in sequence.
+
+    IMPORTANT: Direct calls are capped at 25s (dispatcher limit). Only 1-2 loops
+    will run before the cap is hit — this is expected behaviour for interactive use.
+    For a full overnight run across all loops, use schedule_nightly() instead:
+        autoimprove.schedule_nightly('2am')
 
     Order:
-      1. daily_review  — learn what happened, no changes
-      2. ast_audit     — auto-fix dynamic skills
-      3. error_reduce  — target top error pattern in dynamic skills
+      1. daily_review     — learn what happened, no code changes
+      2. ast_audit        — auto-fix dynamic skills
+      3. error_reduce     — target top error pattern in dynamic skills
       4. suggest_core     — audit core skills, queue suggestions for your review
-      5. pattern_mining   — scan session history for recurring task patterns, park skill proposals
+      5. pattern_mining   — scan session history for recurring task patterns
+      6. discover_patterns — scan lessons.jsonl for untracked error types
 
     Args:
-        max_experiments:    Max experiments per loop (default 5)
-        max_runtime_seconds: Hard wall-time cap in seconds. If elapsed time exceeds
-                             this before a loop starts, remaining loops are skipped
-                             and the run exits cleanly. None = no cap (default).
+        max_experiments:     Max experiments per loop (default 5)
+        max_runtime_seconds: Hard wall-time cap in seconds (default 25 — fits
+                             dispatcher limit). Pass None only from a scheduled
+                             context where no timeout applies.
 
     Returns:
-        Combined results from all loops.
+        Combined results from all loops that ran before the cap.
     """
     max_experiments = int(max_experiments)
     deadline: Optional[float] = None
-    if max_runtime_seconds is not None:
+    if max_runtime_seconds is not None and str(max_runtime_seconds).strip().lower() not in ("none", "null", ""):
         try:
             deadline = float(max_runtime_seconds)
         except (ValueError, TypeError):
-            deadline = None
+            deadline = 25.0
+    else:
+        deadline = None
 
     start   = time.time()
     divider = "=" * 52
@@ -2044,7 +2052,7 @@ def schedule_nightly(run_time: str = "2am", max_experiments=5) -> str:
 
     prompt = (
         f"Run overnight self-improvement on all skills. "
-        f"Call autoimprove.run_all({max_experiments}) — this audits and fixes dynamic skills "
+        f"Call autoimprove.run_all({max_experiments}, max_runtime_seconds=None) — this audits and fixes dynamic skills "
         f"automatically, and queues suggestions for core skills for the user to review."
     )
     result = sched.schedule_recurring(
