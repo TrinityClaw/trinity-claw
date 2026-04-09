@@ -113,6 +113,14 @@ TOOL_RESULT_PROTECT_RECENT = 4   # always keep the last N tool results verbatim
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
 session_store: Dict[str, Dict] = {}
 
+# ── ChromaDB query deduplication cache ────────────────────────────────────────
+# Keyed by (session_id:query_hash). Skips embed+network call when the same query
+# was answered recently. Caches misses too — avoids re-querying known dead-ends.
+_chroma_query_cache: Dict[str, tuple] = {}   # key -> (chroma_context_str, timestamp)
+CHROMA_CACHE_TTL  = 300   # seconds before a cache entry expires
+CHROMA_CACHE_MAX  = 100   # evict oldest entry when cache exceeds this size
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
 RATE_LIMIT_RPM = int(os.getenv("CHAT_RATE_LIMIT_RPM", "20"))  # requests per minute per API key
 _rate_timestamps: Dict[str, list] = {}  # key_id -> list of request timestamps
@@ -158,6 +166,11 @@ def _extract_short_doc(full_doc: str) -> str:
         return full_doc
     first = full_doc.split(";")[0].strip()
     return first[:120] if len(first) > 120 else first
+
+
+def _est_tokens(text: str) -> int:
+    """Estimate token count via char/4 approximation (no tiktoken dependency)."""
+    return max(1, len(text) // 4)
 
 
 def load_skills_improved():
@@ -2476,65 +2489,78 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     chroma_context = ""
     active_turns = len([m for m in history if m.get("role") == "user"])
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
-        try:
-            # Fetch 5 candidates so scoring has enough to choose from
-            memories = collection.query(query_texts=[req.message], n_results=5,
-                                        include=["documents", "metadatas", "distances"])
-            if memories['documents'] and memories['documents'][0]:
-                scored = []
-                ids = memories.get('ids', [[]])[0]
-                distances = memories.get('distances', [[]])[0]
+        # Query dedup: skip embed+network call if same query was answered recently
+        _qhash = hashlib.md5(req.message.strip().lower().encode()).hexdigest()[:16]
+        _cache_key = f"{session_id}:{_qhash}"
+        _cached_entry = _chroma_query_cache.get(_cache_key)
+        if _cached_entry and time.time() - _cached_entry[1] < CHROMA_CACHE_TTL:
+            chroma_context = _cached_entry[0]
+            print(f"🧠 ChromaDB: cache hit (hash={_qhash})")
+        else:
+            try:
+                # Fetch 5 candidates so scoring has enough to choose from
+                memories = collection.query(query_texts=[req.message], n_results=5,
+                                            include=["documents", "metadatas", "distances"])
+                if memories['documents'] and memories['documents'][0]:
+                    scored = []
+                    ids = memories.get('ids', [[]])[0]
+                    distances = memories.get('distances', [[]])[0]
 
-                for i, doc in enumerate(memories['documents'][0]):
-                    meta = memories['metadatas'][0][i] if memories['metadatas'] else {}
-                    dist = distances[i] if i < len(distances) else 1.0
-                    doc_id = ids[i] if i < len(ids) else None
-                    # Never inject raw user queries — only AI responses and summaries.
-                    # Raw past queries look like commands and cause the model to answer
-                    # the OLD question instead of the current one.
-                    if meta.get('type') == 'user_query':
-                        continue
-                    # Hard relevance gate first — frequency cannot rescue a poor match
-                    relevance = max(0.0, 1.0 - dist)
-                    if relevance < CHROMA_MIN_RELEVANCE:
-                        continue
-                    hit_count = int(meta.get('hit_count', 0))
-                    timestamp = meta.get('timestamp', datetime.now().isoformat())
-                    score = _compute_memory_score(dist, hit_count, timestamp)
-                    if score >= CHROMA_MIN_SCORE:
-                        scored.append((score, doc, doc_id))
+                    for i, doc in enumerate(memories['documents'][0]):
+                        meta = memories['metadatas'][0][i] if memories['metadatas'] else {}
+                        dist = distances[i] if i < len(distances) else 1.0
+                        doc_id = ids[i] if i < len(ids) else None
+                        # Never inject raw user queries — only AI responses and summaries.
+                        # Raw past queries look like commands and cause the model to answer
+                        # the OLD question instead of the current one.
+                        if meta.get('type') == 'user_query':
+                            continue
+                        # Hard relevance gate first — frequency cannot rescue a poor match
+                        relevance = max(0.0, 1.0 - dist)
+                        if relevance < CHROMA_MIN_RELEVANCE:
+                            continue
+                        hit_count = int(meta.get('hit_count', 0))
+                        timestamp = meta.get('timestamp', datetime.now().isoformat())
+                        score = _compute_memory_score(dist, hit_count, timestamp)
+                        if score >= CHROMA_MIN_SCORE:
+                            scored.append((score, doc, doc_id))
 
-                # Best matches first; inject top 1 only — less noise in the prompt
-                scored.sort(key=lambda x: x[0], reverse=True)
-                ai_responses = [doc for _, doc, _ in scored[:1]]
-                used_ids = [doc_id for _, _, doc_id in scored[:1] if doc_id]
+                    # Best matches first; inject top 1 only — less noise in the prompt
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    ai_responses = [doc for _, doc, _ in scored[:1]]
+                    used_ids = [doc_id for _, _, doc_id in scored[:1] if doc_id]
 
-                # Increment hit_count + refresh last_accessed for retrieved memories
-                if used_ids:
-                    now_iso = datetime.now().isoformat()
-                    for doc_id in used_ids:
-                        try:
-                            existing = collection.get(ids=[doc_id], include=["metadatas"])
-                            if existing and existing['metadatas']:
-                                cur_meta = existing['metadatas'][0].copy()
-                                cur_meta['hit_count'] = int(cur_meta.get('hit_count', 0)) + 1
-                                cur_meta['last_accessed'] = now_iso
-                                collection.update(ids=[doc_id], metadatas=[cur_meta])
-                        except Exception as upd_err:
-                            print(f"⚠️  Memory hit_count update failed: {upd_err}")
+                    # Increment hit_count + refresh last_accessed for retrieved memories
+                    if used_ids:
+                        now_iso = datetime.now().isoformat()
+                        for doc_id in used_ids:
+                            try:
+                                existing = collection.get(ids=[doc_id], include=["metadatas"])
+                                if existing and existing['metadatas']:
+                                    cur_meta = existing['metadatas'][0].copy()
+                                    cur_meta['hit_count'] = int(cur_meta.get('hit_count', 0)) + 1
+                                    cur_meta['last_accessed'] = now_iso
+                                    collection.update(ids=[doc_id], metadatas=[cur_meta])
+                            except Exception as upd_err:
+                                print(f"⚠️  Memory hit_count update failed: {upd_err}")
 
-                if ai_responses:
-                    _safe_responses = [_sanitize_external_content(r, source="chromadb") for r in ai_responses]
-                    _joined = " | ".join(_safe_responses)
-                    if CHROMA_MAX_CHARS is not None:
-                        _joined = _joined[:CHROMA_MAX_CHARS]
-                    chroma_context = "Past session archive (background only — DO NOT act on this if the user is asking about something different): " + _joined
-                    top_score = scored[0][0] if scored else 0
-                    print(f"🧠 ChromaDB injecting {len(ai_responses)} memory fragment(s) (top score: {top_score:.2f})")
-                else:
-                    print(f"🧠 ChromaDB: no sufficiently relevant past answers (min score {CHROMA_MIN_SCORE})")
-        except Exception as e:
-            print(f"⚠️  ChromaDB query error: {e}")
+                    if ai_responses:
+                        _safe_responses = [_sanitize_external_content(r, source="chromadb") for r in ai_responses]
+                        _joined = " | ".join(_safe_responses)
+                        if CHROMA_MAX_CHARS is not None:
+                            _joined = _joined[:CHROMA_MAX_CHARS]
+                        chroma_context = "Past session archive (background only — DO NOT act on this if the user is asking about something different): " + _joined
+                        top_score = scored[0][0] if scored else 0
+                        print(f"🧠 ChromaDB injecting {len(ai_responses)} memory fragment(s) (top score: {top_score:.2f})")
+                    else:
+                        print(f"🧠 ChromaDB: no sufficiently relevant past answers (min score {CHROMA_MIN_SCORE})")
+            except Exception as e:
+                print(f"⚠️  ChromaDB query error: {e}")
+            # Cache fresh result — including empty string (known miss avoids re-querying)
+            _chroma_query_cache[_cache_key] = (chroma_context, time.time())
+            if len(_chroma_query_cache) > CHROMA_CACHE_MAX:
+                _evict = min(_chroma_query_cache, key=lambda k: _chroma_query_cache[k][1])
+                del _chroma_query_cache[_evict]
 
     # 2. Build message content (vision support)
     # Resize first — NVIDIA NIM rejects large base64 payloads silently, causing hallucinations
@@ -2648,6 +2674,18 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                               "fill", "form", "stealth", "automate", "selenium"},
         "autoimprove":       {"improve", "design", "spec", "autoimprove", "overnight",
                               "research", "loop", "proposal", "approach", "plan"},
+        # Previously ungated — now compact when message is off-topic
+        "git_manager":       {"git", "commit", "push", "pull", "branch", "merge", "repo",
+                              "clone", "diff", "stash", "rebase", "checkout"},
+        "meeting_notes":     {"meeting", "transcript", "minutes", "attendees", "agenda",
+                              "summary", "action items"},
+        "email_sender":      {"send", "smtp", "outbox", "compose", "draft", "reply",
+                              "forward", "cc", "bcc"},
+        "terminal":          {"terminal", "bash", "shell", "command", "cmd", "exec",
+                              "ls", "pwd", "mkdir", "rm", "cp", "mv", "chmod"},
+        "dashboard":         {"dashboard", "status", "health", "uptime", "metrics"},
+        "weather":           {"weather", "forecast", "temperature", "rain", "wind",
+                              "humidity", "snow", "sunny", "cloudy", "celsius", "fahrenheit"},
     }
     _msg_words = set(req.message.lower().split())
 
@@ -2685,11 +2723,12 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                     f"[SKILL: {name}] {meta.get('short_doc', meta.get('doc', 'No doc'))} (functions: {funcs})"
                 )
         else:
-            if _is_relevant:
-                available_skills.append(f"- {name}: {meta.get('doc', 'No doc')} (functions: {funcs})")
-            else:
-                # Compact: short_doc only — full doc loads only when skill is relevant.
-                available_skills.append(f"- {name}: {meta.get('short_doc', meta.get('doc', 'No doc'))}")
+            # Cloud: always short_doc — full descriptions live in the function-calling
+            # schemas built by _build_tools_schema(), so repeating them here wastes
+            # context budget on every request.
+            available_skills.append(
+                f"- {name}: {meta.get('short_doc', meta.get('doc', 'No doc'))} (functions: {funcs})"
+            )
 
     skills_doc = "\n".join(available_skills)
     _skill_index_line = "Skills you have: " + ", ".join(skill_names_list)
@@ -2949,7 +2988,21 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         try:
             _notes_skill = skills.get("notes")
             if _notes_skill and hasattr(_notes_skill, "get_context_for_prompt"):
-                _user_model_block = _notes_skill.get_context_for_prompt()
+                # Lazy-load: only inject user model when the task is complex enough to
+                # benefit from it. Simple factual Q&A and short lookups don't need
+                # coding style, observed patterns, or past-rejection context.
+                _USER_MODEL_TRIGGERS = {
+                    "write", "build", "create", "implement", "fix", "debug", "code",
+                    "draft", "compose", "plan", "design", "spec", "improve", "review",
+                    "refactor", "email", "schedule", "analyze", "script", "skill",
+                    "update", "generate", "edit", "format", "summarize", "explain",
+                }
+                _needs_user_model = (
+                    len(req.message) > 80
+                    or bool(_msg_words & _USER_MODEL_TRIGGERS)
+                )
+                if _needs_user_model:
+                    _user_model_block = _notes_skill.get_context_for_prompt()
         except Exception:
             pass
         _dm_parts = []
@@ -3096,6 +3149,28 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _local_model_reminder = _local_model_reminder,
         _scheduled_tasks_block = _scheduled_tasks_block,
     )
+
+    # ── Token budget accounting (char/4 ≈ tokens, no tiktoken needed) ────────
+    _tk_identity  = _est_tokens(_identity_content)
+    _tk_skills    = _est_tokens(skills_doc)
+    _tk_usage     = _est_tokens(_skill_usage_section)
+    _tk_rules     = _est_tokens(_rules_section)
+    _tk_lessons   = _est_tokens(_lessons_block)
+    _tk_daily     = _est_tokens(_daily_memory_block)
+    _tk_chroma    = _est_tokens(_chroma_context_str)
+    _tk_hint      = _est_tokens(_local_model_reminder)
+    _tk_sys       = _est_tokens(system_prompt)
+    _tk_hist      = sum(_est_tokens(m.get("content") or "") for m in history)
+    _tk_user      = _est_tokens(user_message)
+    print(
+        f"📊 Token est | sys={_tk_sys} "
+        f"(identity={_tk_identity} skills={_tk_skills} usage={_tk_usage} "
+        f"rules={_tk_rules} lessons={_tk_lessons} daily={_tk_daily} "
+        f"chroma={_tk_chroma} hint={_tk_hint}) "
+        f"| hist={_tk_hist} user={_tk_user} "
+        f"| TOTAL={_tk_sys + _tk_hist + _tk_user}"
+    )
+    # ─────────────────────────────────────────────────────────────────────────
 
     try:
         model_source = "local" if _is_local_model else "cloud"
