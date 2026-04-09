@@ -237,7 +237,7 @@ def _dispatch(prompt: str, task_name: str) -> str:
     )
     try:
         resp = requests.post(
-            "http://localhost:8001/chat",
+            "http://127.0.0.1:8001/chat",
             json={"message": execution_prompt, "session_id": f"sched_{task_name}"},
             headers=headers,
             timeout=1800,
