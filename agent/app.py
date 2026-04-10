@@ -2482,10 +2482,10 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
         CHROMA_SKIP_IF_TURNS = 1        # only inject on the very first user turn
         CHROMA_MAX_CHARS = 150          # hard cap on injected text length
     else:
-        CHROMA_MIN_RELEVANCE = 0.55     # hard floor: dist must be <= 0.45
-        CHROMA_MIN_SCORE = 0.60         # combined score floor (raised from 0.48)
-        CHROMA_SKIP_IF_TURNS = 2        # skip ChromaDB if session has >= this many turns
-        CHROMA_MAX_CHARS = None         # no cap for cloud
+        CHROMA_MIN_RELEVANCE = 0.60     # hard floor: dist must be <= 0.40
+        CHROMA_MIN_SCORE = 0.65         # combined score floor
+        CHROMA_SKIP_IF_TURNS = 1        # only inject on the very first user turn
+        CHROMA_MAX_CHARS = 600          # cap injected text to keep prompt lean
     chroma_context = ""
     active_turns = len([m for m in history if m.get("role") == "user"])
     if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
@@ -2857,7 +2857,10 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _facts_raw = _fcache.read_text("/app/memory/user_facts.json")
         if _facts_raw:
             _facts = json.loads(_facts_raw)
-            _fact_lines = [f"  {k}: {v}" for k, v in _facts.items() if not k.startswith("_")]
+            _fact_lines = [
+                f"  {k}: {v['value'] if isinstance(v, dict) else v}"
+                for k, v in _facts.items() if not k.startswith("_")
+            ]
             if _fact_lines:
                 _updated = _facts.get("_updated", "")[:10]
                 _user_facts_card = f"User Facts (last updated {_updated}):\n" + "\n".join(_fact_lines)
@@ -2973,7 +2976,14 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
             _label = "TODAY" if _je["date"] == _today_str else _je["date"]
             _journal_lines.append(f"[{_label}] {_je.get('summary', '')}")
             if _je.get("learned"):
-                _journal_lines.append(f"  Learned: {_je['learned']}")
+                _learned_lines = [l for l in _je["learned"].splitlines() if l.strip()]
+                _learned_cap   = 3
+                _learned_shown = _learned_lines[:_learned_cap]
+                _learned_rest  = len(_learned_lines) - _learned_cap
+                _learned_str   = " | ".join(_learned_shown)
+                if _learned_rest > 0:
+                    _learned_str += f" (+{_learned_rest} more)"
+                _journal_lines.append(f"  Learned: {_learned_str}")
             if _je.get("user_insights"):
                 _journal_lines.append(f"  User: {_je['user_insights']}")
             if _je.get("next_steps"):
@@ -2993,9 +3003,8 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
                 # coding style, observed patterns, or past-rejection context.
                 _USER_MODEL_TRIGGERS = {
                     "write", "build", "create", "implement", "fix", "debug", "code",
-                    "draft", "compose", "plan", "design", "spec", "improve", "review",
-                    "refactor", "email", "schedule", "analyze", "script", "skill",
-                    "update", "generate", "edit", "format", "summarize", "explain",
+                    "draft", "compose", "plan", "design", "spec", "improve",
+                    "refactor", "email", "schedule", "script", "skill",
                 }
                 _needs_user_model = (
                     len(req.message) > 80
@@ -3111,9 +3120,9 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
     # Load scheduled tasks for system prompt injection
     _scheduled_tasks_block = ""
     try:
-        _sched_file = Path("/app/memory/scheduled_tasks.json")
-        if _sched_file.exists():
-            _sched_data = json.loads(_sched_file.read_text(encoding="utf-8"))
+        _sched_raw = _fcache.read_text("/app/memory/scheduled_tasks.json")
+        if _sched_raw:
+            _sched_data = json.loads(_sched_raw)
             if _sched_data:
                 _sched_lines = [f"Active scheduled tasks ({len(_sched_data)}):"]
                 for _sn, _st in _sched_data.items():
