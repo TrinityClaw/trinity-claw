@@ -34,8 +34,10 @@ DOC = (
     "get_activity_log(hours?)→show what the agent did in the last N hours, both scheduled and manual (default 24h); "
     "append(title, content)→add content to an existing note without overwriting it (creates note if it does not exist yet); "
     "end_day(summary, next_steps?)→wrap the day: writes today's journal entry with auto-pulled activity log and returns a full day overview; "
-    "set_user_fact(key, value)→store a permanent fact about the user (e.g. language, name, projects); always call when learning stable user info; "
-    "get_user_facts_card()→return compact user fact card for inspection; "
+    "set_user_fact(key, value, source?, episode_id?)→store a permanent fact about the user (e.g. language, name, projects); archives previous value automatically; always call when learning stable user info; "
+    "get_user_facts_card()→return compact user fact card with source and valid_from metadata; "
+    "get_fact_history(key)→return full timeline of a user fact — current value plus all archived previous values with validity windows; "
+    "get_preference_history(key)→return full timeline of a preference — current plus archived previous values; "
     "compress_journal(days_old=15)→compress journal entries older than N days: archives originals to daily_journal_archive.jsonl and replaces them with summary-only stubs to reduce token load; called automatically by end_day()."
 )
 
@@ -47,6 +49,8 @@ JOURNAL_FILE           = Path("/app/memory/daily_journal.jsonl")
 JOURNAL_ARCHIVE_FILE   = Path("/app/memory/daily_journal_archive.jsonl")
 USER_MODEL_FILE        = Path("/app/memory/user_model.json")
 USER_FACTS_FILE        = Path("/app/memory/user_facts.json")
+USER_FACTS_HISTORY_FILE = Path("/app/memory/user_facts_history.jsonl")
+USER_PREFS_HISTORY_FILE = Path("/app/memory/user_prefs_history.jsonl")
 
 def _load_notes():
     """Load notes from file"""
@@ -390,15 +394,36 @@ def _save_user_model(model: dict) -> None:
     USER_MODEL_FILE.write_text(json.dumps(model, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def set_preference(key: str, value, source: str = "user", confidence: float = 1.0) -> str:
-    """Set a named preference. source: 'user'|'inferred'|'system'. confidence: 0.0–1.0."""
+def set_preference(key: str, value, source: str = "user", confidence: float = 1.0, episode_id: str = "") -> str:
+    """Set a named preference. source: 'user'|'inferred'|'system'. confidence: 0.0–1.0.
+    Automatically archives the previous value with a valid_until timestamp before overwriting."""
     try:
         model = _load_user_model()
+
+        # Archive old value before overwriting
+        old = model.get("preferences", {}).get(key)
+        if old is not None:
+            archived = {
+                "key":        key,
+                "value":      old.get("value"),
+                "source":     old.get("source", "unknown"),
+                "confidence": old.get("confidence", 1.0),
+                "valid_from": old.get("valid_from") or old.get("updated_at", "")[:10],
+                "valid_until": date.today().isoformat(),
+                "episode_id": old.get("episode_id"),
+                "archived_at": datetime.now().isoformat(),
+            }
+            USER_PREFS_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with USER_PREFS_HISTORY_FILE.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(archived) + "\n")
+
         model["preferences"][key] = {
-            "value": value,
+            "value":      value,
             "confidence": round(float(confidence), 2),
-            "source": source,
+            "source":     source,
             "updated_at": datetime.now().isoformat(),
+            "valid_from": date.today().isoformat(),
+            "episode_id": episode_id or None,
         }
         _save_user_model(model)
         icon = {"user": "👤", "inferred": "🤖", "system": "⚙️"}.get(source, "•")
@@ -414,6 +439,51 @@ def get_preference(key: str, default=None):
         return pref["value"] if pref else default
     except Exception:
         return default
+
+
+def get_preference_history(key: str) -> str:
+    """Return the full timeline of a preference — current value plus all archived previous values."""
+    try:
+        lines = [f"📜 Preference history: '{key}'"]
+
+        # Current value
+        model = _load_user_model()
+        current = model.get("preferences", {}).get(key)
+        if current:
+            vf   = current.get("valid_from") or current.get("updated_at", "?")[:10]
+            src  = current.get("source", "?")
+            conf = current.get("confidence", 1.0)
+            ep   = current.get("episode_id") or ""
+            ep_str = f" ep={ep}" if ep else ""
+            lines.append(f"  [current]  {current['value']!r}  conf={conf:.0%}  since {vf}  ({src}{ep_str})")
+
+        # Archived values
+        if USER_PREFS_HISTORY_FILE.exists():
+            history = []
+            for line in USER_PREFS_HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                    if e.get("key") == key:
+                        history.append(e)
+                except Exception:
+                    continue
+            for e in sorted(history, key=lambda x: x.get("valid_from") or "", reverse=True):
+                vf   = e.get("valid_from") or "?"
+                vu   = e.get("valid_until") or "?"
+                src  = e.get("source") or "?"
+                conf = e.get("confidence", 1.0)
+                ep   = e.get("episode_id") or ""
+                ep_str = f" ep={ep}" if ep else ""
+                lines.append(f"  [{vf} → {vu}]  {e['value']!r}  conf={conf:.0%}  ({src}{ep_str})")
+
+        if len(lines) == 1:
+            return f"No preference found for key '{key}'"
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ get_preference_history error: {e}"
 
 
 def set_context(key: str, value: str) -> str:
@@ -711,9 +781,10 @@ def end_day(summary: str, next_steps: str = "") -> str:
 # Separate from user_model.json (which is complex and underused).
 # Always injected into every system prompt — tiny, always relevant.
 
-def set_user_fact(key: str, value: str) -> str:
+def set_user_fact(key: str, value: str, source: str = "user", episode_id: str = "") -> str:
     """Store a permanent fact about the user. key examples: language, name, projects, timezone.
-    Call this whenever you learn something stable about the user that should persist across sessions."""
+    Call this whenever you learn something stable about the user that should persist across sessions.
+    Automatically archives the previous value with a valid_until timestamp before overwriting."""
     try:
         facts: dict = {}
         if USER_FACTS_FILE.exists():
@@ -721,7 +792,41 @@ def set_user_fact(key: str, value: str) -> str:
                 facts = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
             except Exception:
                 facts = {}
-        facts[key.strip().lower()] = value.strip()
+
+        k = key.strip().lower()
+
+        # Archive old value before overwriting
+        old = facts.get(k)
+        if old is not None and not k.startswith("_"):
+            if isinstance(old, dict):
+                old_val  = old.get("value", "")
+                old_src  = old.get("source", "unknown")
+                old_vf   = old.get("valid_from")
+                old_ep   = old.get("episode_id")
+            else:
+                old_val  = old
+                old_src  = "unknown"
+                old_vf   = None
+                old_ep   = None
+            archived = {
+                "key":        k,
+                "value":      old_val,
+                "source":     old_src,
+                "valid_from": old_vf,
+                "valid_until": date.today().isoformat(),
+                "episode_id": old_ep,
+                "archived_at": datetime.now().isoformat(),
+            }
+            USER_FACTS_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with USER_FACTS_HISTORY_FILE.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(archived) + "\n")
+
+        facts[k] = {
+            "value":      value.strip(),
+            "source":     source,
+            "valid_from": date.today().isoformat(),
+            "episode_id": episode_id or None,
+        }
         facts["_updated"] = datetime.now().isoformat()
         USER_FACTS_FILE.parent.mkdir(parents=True, exist_ok=True)
         USER_FACTS_FILE.write_text(json.dumps(facts, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -731,18 +836,78 @@ def set_user_fact(key: str, value: str) -> str:
 
 
 def get_user_facts_card() -> str:
-    """Return all stored user facts as a readable card. Shows what Trinity knows about the user."""
+    """Return all stored user facts as a readable card with source and valid_from metadata."""
     try:
         if not USER_FACTS_FILE.exists():
             return "No user facts saved yet."
         facts = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
-        lines = [f"  {k}: {v}" for k, v in facts.items() if not k.startswith("_")]
+        lines = []
+        for k, v in facts.items():
+            if k.startswith("_"):
+                continue
+            if isinstance(v, dict):
+                display = v.get("value", "")
+                src     = v.get("source", "")
+                vf      = v.get("valid_from", "")
+                meta    = f"  [{src}, since {vf}]" if (src or vf) else ""
+                lines.append(f"  {k}: {display}{meta}")
+            else:
+                lines.append(f"  {k}: {v}")
         if not lines:
             return "No user facts saved yet."
         updated = facts.get("_updated", "")[:10]
         return f"User Facts (last updated {updated}):\n" + "\n".join(lines)
     except Exception as e:
         return f"❌ get_user_facts_card error: {e}"
+
+
+def get_fact_history(key: str) -> str:
+    """Return the full timeline of a user fact — current value plus all archived previous values
+    with their validity windows and provenance (source, episode_id)."""
+    try:
+        k = key.strip().lower()
+        lines = [f"📜 Fact history: '{k}'"]
+
+        # Current value
+        if USER_FACTS_FILE.exists():
+            facts = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
+            current = facts.get(k)
+            if current is not None:
+                if isinstance(current, dict):
+                    vf     = current.get("valid_from", "?")
+                    src    = current.get("source", "?")
+                    ep     = current.get("episode_id") or ""
+                    ep_str = f" ep={ep}" if ep else ""
+                    lines.append(f"  [current]  {current['value']!r}  since {vf}  ({src}{ep_str})")
+                else:
+                    lines.append(f"  [current]  {current!r}  (no metadata)")
+
+        # Archived values
+        if USER_FACTS_HISTORY_FILE.exists():
+            history = []
+            for line in USER_FACTS_HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                    if e.get("key") == k:
+                        history.append(e)
+                except Exception:
+                    continue
+            for e in sorted(history, key=lambda x: x.get("valid_from") or "", reverse=True):
+                vf     = e.get("valid_from") or "?"
+                vu     = e.get("valid_until") or "?"
+                src    = e.get("source") or "?"
+                ep     = e.get("episode_id") or ""
+                ep_str = f" ep={ep}" if ep else ""
+                lines.append(f"  [{vf} → {vu}]  {e['value']!r}  ({src}{ep_str})")
+
+        if len(lines) == 1:
+            return f"No fact found for key '{k}'"
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ get_fact_history error: {e}"
 
 
 def get_activity_log(hours: int = 24) -> str:
