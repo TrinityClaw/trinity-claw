@@ -287,16 +287,24 @@ def park_idea(idea: str, source: str = "") -> str:
     if not idea:
         return "❌ idea text cannot be empty."
 
+    import hashlib as _hashlib
     import uuid as _uuid
+    idea_hash = _hashlib.md5(idea.encode()).hexdigest()[:12]
+
+    ideas = _load_ideas()
+    for existing in ideas:
+        if existing.get("status") == "open" and existing.get("hash") == idea_hash:
+            return f"💡 Duplicate skipped [{existing['id']}]: {idea[:80]}"
+
     idea_id = datetime.now().strftime("%Y%m%d") + "_" + _uuid.uuid4().hex[:6]
     entry = {
         "id":        idea_id,
+        "hash":      idea_hash,
         "timestamp": datetime.now().isoformat(),
         "idea":      idea,
         "source":    str(source).strip() or "(unspecified)",
         "status":    "open",
     }
-    ideas = _load_ideas()
     ideas.append(entry)
     _save_ideas(ideas)
     return f"💡 Idea parked [{idea_id}]: {idea[:80]}"
@@ -594,17 +602,27 @@ def _refine_query(
             refined = _call_llm_simple(prompt, max_tokens=64)
             # Accept only plausible short queries — reject walls of text or empty
             if refined and 2 <= len(refined.split()) <= 20:
-                return refined.strip().strip('"').strip("'")
+                refined = refined.strip().strip('"').strip("'")
+                # Topical continuity check: at least one non-stopword term from
+                # the base query must survive in the refined query, otherwise the
+                # LLM drifted off-topic and we fall through to the keyword fallback.
+                base_terms = {
+                    t.lower() for t in re.findall(r'\w+', base_query)
+                    if t.lower() not in _RESEARCH_STOP and len(t) > 3
+                }
+                refined_terms = {
+                    t.lower() for t in re.findall(r'\w+', refined)
+                    if t.lower() not in _RESEARCH_STOP and len(t) > 3
+                }
+                if base_terms & refined_terms:
+                    return refined
 
     # Fallback: mechanical keyword append (original behaviour)
     if missing:
         return f"{base_query} {' '.join(missing[:3])}"
-    fallbacks = [
-        "data statistics examples",
-        "analysis findings research",
-        "current trends numbers",
-    ]
-    return f"{base_query} {fallbacks[min(iteration - 1, len(fallbacks) - 1)]}"
+    # No missing terms and no useful LLM refinement — return base query unchanged
+    # rather than appending generic noise like "data statistics examples".
+    return base_query
 
 
 # ── General-purpose research ───────────────────────────────────────────────────
@@ -943,7 +961,16 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
         return f"NO_CHANGE: no '{issue_type}' in {skill_name} (score={before_score})"
 
     # 3. Apply patch
-    si.fix(skill_name, issue_type, "all")
+    try:
+        si.fix(skill_name, issue_type, "all")
+    except Exception as fix_exc:
+        skill_path.write_text(original_code, encoding="utf-8")
+        _log({
+            "timestamp": timestamp, "skill": skill_name, "issue_type": issue_type,
+            "outcome": "REVERTED", "before_score": before_score, "after_score": None,
+            "reason": f"si.fix() raised: {fix_exc}",
+        })
+        return f"REVERTED: si.fix() raised {type(fix_exc).__name__} — restored snapshot"
 
     # 4. Post-patch audit
     after = si.analyze_skill_code(skill_name)
@@ -2311,7 +2338,7 @@ def loop_roi(runs: int = 10) -> str:
     lines = [
         f"📊 Loop ROI — last {len(recent)} run_all() run(s)",
         "=" * 58,
-        f"  {'Loop':<22} {'Avg ROI':>8}  {'Count':>9}  {'Total':>7}  {'Avg Time':>9}",
+        f"  {'Loop':<22} {'Avg ROI':>8}  {'Improved':>9}  {'Total':>7}  {'Avg Time':>9}",
         f"  {'-'*22} {'-'*8}  {'-'*9}  {'-'*7}  {'-'*9}",
     ]
 
@@ -2320,13 +2347,11 @@ def loop_roi(runs: int = 10) -> str:
         avg_time = s["elapsed"] / max(1, s["runs"])
         roi_str  = f"{avg_roi:.0%}" if s["total"] > 0 else "—"
         flag     = " ⚠️" if s["total"] > 0 and avg_roi == 0.0 else ""
-        # discover_patterns uses proposed/qualifying counts — annotate so the
-        # column values are not mistaken for experiment outcomes.
+        # discover_patterns tracks proposals/qualifying, not experiments — mark
+        # with (*) so the numbers aren't compared directly to experiment loops.
         if name == "discover_patterns":
-            count_label = f"{s['improved']} proposed"
-            total_label = f"{s['total']} qualifying"
             lines.append(
-                f"  {name:<22} {roi_str:>8}  {count_label:>9}  {total_label:>7}  {avg_time:>7.1f}s{flag}"
+                f"  {name+'(*)' :<22} {roi_str:>8}  {s['improved']:>9}  {s['total']:>7}  {avg_time:>7.1f}s{flag}"
             )
         else:
             lines.append(
@@ -2338,7 +2363,8 @@ def loop_roi(runs: int = 10) -> str:
         "⚠️  = zero improvements across all sampled runs",
         "    → consider running: autoimprove.run_loop('<name>') to spot-check",
         "    → or skip that loop in a custom run_all call",
-        "  discover_patterns: Count = patterns proposed; Total = patterns qualifying",
+        "(*) discover_patterns: Improved = patterns proposed; Total = patterns qualifying threshold",
+        "    ROI is proposals/qualifying — not comparable to experiment-based loop ROI above.",
         f"\nData from {len(recent)} of {len(run_summaries)} total recorded run_all() runs.",
     ]
     return "\n".join(lines)
