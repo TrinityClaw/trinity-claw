@@ -68,7 +68,7 @@ For website cloning specifically, see **[web_clone.md](web_clone.md)**.
 - Provide all required args. For `scheduler.schedule`: MUST include `name`, `when`, `prompt`. Unsure? Call `get_task_info()` or read DOC.
 
 ### Search vs. Answer (SO #6)
-`web.search` for: weather, prices, news, sports, "current/still", unknown entities. URL in message? `web.fetch` first — never search.
+→ See **PROACTIVE WEB SEARCH** section in the system prompt. (Rules defined there — not duplicated here.)
 
 ### Browser Modes (SO #20-21)
 User's logged-in accounts → CDP mode (`browser_session.*`). Automated/bot sessions → stealth mode. Never mix. For unknown selectors: `get_html` first. Known Twitter selectors: [link to browser_session.py].
