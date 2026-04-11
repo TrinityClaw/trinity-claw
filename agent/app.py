@@ -1755,7 +1755,12 @@ def execute_skill_tags(response_text: str) -> tuple:
                     except Exception as reload_err:
                         result_str += f"\n[⚠️ Auto-reload failed: {reload_err}. Call /skills/reload manually.]"
 
-                output = f"\n[✅ {skill_name}.{func_name} Result:\n{result_str}]\n"
+                # Inject the skill's full DOC so the model has complete function
+                # details in context right when it needs them (on-demand), without
+                # paying the token cost on every request upfront.
+                _full_doc = skill_metadata.get(skill_name, {}).get("doc", "")
+                _doc_header = f"[📖 {skill_name}: {_full_doc}]\n" if _full_doc else ""
+                output = f"\n[✅ {skill_name}.{func_name} Result:\n{_doc_header}{result_str}]\n"
                 execution_log.append({
                     "skill": skill_name,
                     "function": func_name,
@@ -2693,42 +2698,20 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     skill_names_list = []
     for name, meta in skill_metadata.items():
         funcs_meta = meta.get("functions", [])
-        funcs = ", ".join([f["name"] for f in funcs_meta])
         skill_names_list.append(name)
-        # For heavy skills, check if the message is relevant before going verbose.
-        # Applied to both local and cloud models.
-        _is_heavy = name in _HEAVY_SKILL_KEYWORDS
-        _is_relevant = (
-            not _is_heavy
-            or bool(_msg_words & _HEAVY_SKILL_KEYWORDS[name])
+        # Universal compact format for all models (local and cloud):
+        # short_doc keeps upfront token cost low; arg names let any model form a
+        # valid call on the first try without guessing. Full docs are injected
+        # on-demand inside the [✅ result] block when the skill is actually invoked
+        # (execute_skill_tags path). Native tool-calling models (Gemma4, Claude,
+        # GPT-4o) also receive full per-function schemas via _build_tools_schema().
+        func_sigs = ", ".join(
+            f"{f['name']}({', '.join(f.get('args', []))})"
+            for f in funcs_meta
         )
-        if _local_model:
-            if _is_relevant:
-                # Verbose format: show the exact XML call for each function so local models
-                # don't have to guess the syntax from the examples block alone.
-                func_lines = []
-                for f in funcs_meta:
-                    args = f.get("args", [])
-                    args_ex = ",".join(args) if args else ""
-                    func_lines.append(
-                        f"  • {f['name']}({', '.join(args)})"
-                        f" → <skill:{name}.{f['name']}>{args_ex}</skill:{name}.{f['name']}>"
-                    )
-                available_skills.append(
-                    f"[SKILL: {name}] {meta.get('doc', 'No doc')}\n" + "\n".join(func_lines)
-                )
-            else:
-                # Compact: short_doc only — full doc loads only when skill is relevant.
-                available_skills.append(
-                    f"[SKILL: {name}] {meta.get('short_doc', meta.get('doc', 'No doc'))} (functions: {funcs})"
-                )
-        else:
-            # Cloud: always short_doc — full descriptions live in the function-calling
-            # schemas built by _build_tools_schema(), so repeating them here wastes
-            # context budget on every request.
-            available_skills.append(
-                f"- {name}: {meta.get('short_doc', meta.get('doc', 'No doc'))} (functions: {funcs})"
-            )
+        available_skills.append(
+            f"[SKILL: {name}] {meta.get('short_doc', meta.get('doc', 'No doc'))} (functions: {func_sigs})"
+        )
 
     skills_doc = "\n".join(available_skills)
     _skill_index_line = "Skills you have: " + ", ".join(skill_names_list)
