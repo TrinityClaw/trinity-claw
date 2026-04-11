@@ -798,6 +798,51 @@
             word-break: break-word;
         }
 
+        /* ── Token badge ── */
+        .token-badge {
+            margin-top: 8px;
+            padding-top: 6px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+        }
+        .token-toggle {
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: var(--text-dim, #555);
+            font-size: 11px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-family: inherit;
+        }
+        .token-toggle:hover { color: var(--text-muted); }
+        .token-arrow { font-size: 9px; }
+        .token-entries {
+            margin-top: 6px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .token-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            padding: 2px 6px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 4px;
+            color: var(--text-muted);
+        }
+        .token-row.token-total {
+            font-weight: 600;
+            color: var(--text-dim, #888);
+            border-top: 1px solid rgba(255,255,255,0.08);
+            margin-top: 2px;
+            padding-top: 4px;
+        }
+        .token-label { flex: 1; }
+        .token-val { font-variant-numeric: tabular-nums; }
+
         /* ── Welcome screen ── */
         .welcome-screen {
             display: flex;
@@ -1475,6 +1520,60 @@ docker compose up --build -d</div>
             return wrap;
         }
 
+        function renderTokenBadge(t) {
+            if (!t || !t.total) return null;
+            const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+            const wrap = document.createElement('div');
+            wrap.className = 'token-badge';
+
+            const toggle = document.createElement('button');
+            toggle.className = 'token-toggle';
+            const arrow = document.createElement('span');
+            arrow.className = 'token-arrow';
+            arrow.textContent = '▶';
+            toggle.appendChild(arrow);
+            toggle.appendChild(document.createTextNode(` ~${fmt(t.total)} tokens`));
+
+            const entries = document.createElement('div');
+            entries.className = 'token-entries';
+            entries.style.display = 'none';
+
+            const rows = [
+                ['system', t.system],
+                ['  identity', t.breakdown?.identity],
+                ['  skills', t.breakdown?.skills],
+                ['  usage', t.breakdown?.usage],
+                ['  rules', t.breakdown?.rules],
+                ['  lessons', t.breakdown?.lessons],
+                ['  daily mem', t.breakdown?.daily],
+                ['  chroma', t.breakdown?.chroma],
+                ['  hint', t.breakdown?.hint],
+                ['history', t.history],
+                ['user msg', t.user],
+            ];
+            rows.forEach(([label, val]) => {
+                if (val == null || val === 0) return;
+                const row = document.createElement('div');
+                row.className = 'token-row';
+                row.innerHTML = `<span class="token-label">${label}</span><span class="token-val">${fmt(val)}</span>`;
+                entries.appendChild(row);
+            });
+            const totalRow = document.createElement('div');
+            totalRow.className = 'token-row token-total';
+            totalRow.innerHTML = `<span class="token-label">total</span><span class="token-val">${fmt(t.total)}</span>`;
+            entries.appendChild(totalRow);
+
+            toggle.addEventListener('click', () => {
+                const open = entries.style.display !== 'none';
+                entries.style.display = open ? 'none' : 'flex';
+                arrow.textContent = open ? '▶' : '▼';
+            });
+
+            wrap.appendChild(toggle);
+            wrap.appendChild(entries);
+            return wrap;
+        }
+
         function _showWelcome() {
             chatBox.innerHTML = `<div class="welcome-screen" id="welcomeScreen">
                 <div class="welcome-title">How can I help <em>today</em>?</div>
@@ -1500,7 +1599,7 @@ docker compose up --build -d</div>
             sendMessage();
         }
 
-        function addMessage(text, sender, image = null, executionLog = null, docName = null) {
+        function addMessage(text, sender, image = null, executionLog = null, docName = null, tokenEst = null) {
             const msgDiv = document.createElement('div');
             msgDiv.className = `message ${sender}-msg`;
             const avatar = document.createElement('div');
@@ -1534,6 +1633,10 @@ docker compose up --build -d</div>
             if (sender === 'agent' && executionLog && executionLog.length > 0) {
                 const logEl = renderExecutionLog(executionLog);
                 if (logEl) content.appendChild(logEl);
+            }
+            if (sender === 'agent' && tokenEst) {
+                const tkEl = renderTokenBadge(tokenEst);
+                if (tkEl) content.appendChild(tkEl);
             }
             msgDiv.appendChild(avatar);
             msgDiv.appendChild(content);
@@ -1601,6 +1704,7 @@ docker compose up --build -d</div>
                 const decoder = new TextDecoder();
                 let buffer = '';
                 let finalReply = null;
+                let finalTokenEst = null;
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -1621,8 +1725,9 @@ docker compose up --build -d</div>
                                 executionLog.push({ skill: evt.skill, function: evt.function, status: evt.status });
                             } else if (evt.type === 'reply') {
                                 finalReply = evt.reply;
+                                finalTokenEst = evt.token_est || null;
                                 toggleTyping(false);
-                                addMessage(finalReply || 'No response content', 'agent', null, executionLog.length ? executionLog : null);
+                                addMessage(finalReply || 'No response content', 'agent', null, executionLog.length ? executionLog : null, null, finalTokenEst);
                             } else if (evt.type === 'error') {
                                 toggleTyping(false);
                                 addMessage(`⚠️ ${evt.message || 'Unknown error'}`, 'agent');
