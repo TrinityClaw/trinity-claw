@@ -33,7 +33,7 @@ DOC = (
     "log_activity(action, result, source?)→log a completed manual task to the activity log (source defaults to 'manual'); "
     "get_activity_log(hours?)→show what the agent did in the last N hours, both scheduled and manual (default 24h); "
     "append(title, content)→add content to an existing note without overwriting it (creates note if it does not exist yet); "
-    "end_day(summary, next_steps?)→wrap the day: writes today's journal entry with auto-pulled activity log and returns a full day overview; "
+    "end_day(summary, next_steps?, user_insights?)→wrap the day: writes today's journal entry with auto-pulled activity log and returns a full day overview; user_insights is what you learned about the user today; "
     "set_user_fact(key, value, source?, episode_id?)→store a permanent fact about the user (e.g. language, name, projects); archives previous value automatically; always call when learning stable user info; "
     "get_user_facts_card()→return compact user fact card with source and valid_from metadata; "
     "get_fact_history(key)→return full timeline of a user fact — current value plus all archived previous values with validity windows; "
@@ -726,9 +726,10 @@ def append(title: str, content: str) -> str:
         return f"❌ Error appending to note: {e}"
 
 
-def end_day(summary: str, next_steps: str = "") -> str:
+def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
     """Wrap up the day: writes today's journal entry with a full activity summary.
-    Automatically pulls today's activity log so nothing important is missed."""
+    Automatically pulls today's activity log so nothing important is missed.
+    user_insights: what you learned about the user today (preferences, patterns, new info)."""
     try:
         today = date.today().isoformat()
 
@@ -755,6 +756,7 @@ def end_day(summary: str, next_steps: str = "") -> str:
         journal_result = write_daily_entry(
             summary=summary,
             learned=learned,
+            user_insights=user_insights,
             next_steps=next_steps,
         )
 
