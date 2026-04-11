@@ -4,7 +4,6 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-# Updated to match your filename
 NAME = "create_skill"
 SHORT_DOC = "Create and install new Python skills into /app/skills/dynamic/; reload all skills."
 DOC = (
@@ -17,6 +16,91 @@ DOC = (
 # Path mapping for Docker environment
 SKILLS_DIR = Path("/app/skills/dynamic").resolve()
 
+# Max chars for SHORT_DOC before it inflates the skills_doc line noticeably
+_SHORT_DOC_LIMIT = 120
+# Max chars for a function docstring before the tool schema entry becomes expensive
+_FUNC_DOC_LIMIT = 80
+
+
+def _audit_skill_tokens(skill_name: str, tree: ast.Module):
+    """
+    Audit a parsed skill AST for token hygiene.
+
+    Returns (errors, warnings, token_report) where:
+      errors   — list of blocking issues (skill must not be saved)
+      warnings — list of non-blocking issues shown in the success message
+      token_report — one-line cost summary shown in the success message
+    """
+    errors = []
+    warnings = []
+
+    # ── 1. SHORT_DOC required ─────────────────────────────────────────────────
+    short_doc_value = None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "SHORT_DOC" for t in node.targets)
+        ):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                short_doc_value = node.value.value
+            break
+
+    if short_doc_value is None:
+        errors.append(
+            "Missing SHORT_DOC variable.\n"
+            "Every skill MUST define SHORT_DOC at module level — it is injected into the\n"
+            "system prompt on every single request.\n"
+            "Rule: SHORT_DOC = one concise sentence, max 120 chars.\n"
+            "Example: SHORT_DOC = \"Send and read emails via SMTP/IMAP.\""
+        )
+    elif len(short_doc_value) > _SHORT_DOC_LIMIT:
+        warnings.append(
+            f"SHORT_DOC is {len(short_doc_value)} chars (limit {_SHORT_DOC_LIMIT}). "
+            "Trim it — it lands in every system prompt."
+        )
+
+    # ── 2. Function docstring length ──────────────────────────────────────────
+    func_nodes = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and not n.name.startswith("_")
+    ]
+    expensive_funcs = []
+    for fn in func_nodes:
+        doc = ast.get_docstring(fn) or ""
+        if len(doc) > _FUNC_DOC_LIMIT:
+            expensive_funcs.append((fn.name, len(doc)))
+
+    if expensive_funcs:
+        for fname, dlen in expensive_funcs:
+            warnings.append(
+                f"  {fname}() docstring is {dlen} chars (limit {_FUNC_DOC_LIMIT}). "
+                "It gets copied verbatim into the tools schema JSON on every request."
+            )
+
+    # ── 3. Token cost estimate ────────────────────────────────────────────────
+    # skills_doc line: "[SKILL: name] {short_doc} (functions: sig1, sig2)"
+    func_sigs = ", ".join(
+        f"{fn.name}({', '.join(a.arg for a in fn.args.args)})"
+        for fn in func_nodes
+    )
+    short_doc_str = short_doc_value or ""
+    skills_doc_line = f"[SKILL: {skill_name}] {short_doc_str} (functions: {func_sigs})"
+    tk_skills_doc = max(1, len(skills_doc_line) // 4)
+
+    # tools schema: per-function JSON overhead + name + description + ~20 tokens per param
+    tk_tools = 0
+    for fn in func_nodes:
+        doc = ast.get_docstring(fn) or ""
+        n_params = len([a for a in fn.args.args])
+        tk_tools += max(1, (80 + len(skill_name) + len(fn.name) + len(doc) + 20 * n_params) // 4)
+
+    tk_total = tk_skills_doc + tk_tools
+    token_report = (
+        f"Estimated token cost per request: ~{tk_total} tokens "
+        f"(skills_doc line ~{tk_skills_doc}, tools schema ~{tk_tools} across {len(func_nodes)} function(s))"
+    )
+
+    return errors, warnings, token_report
 
 
 def create_new_skill(skill_filename: str, code: str) -> str:
@@ -114,6 +198,13 @@ def create_new_skill(skill_filename: str, code: str) -> str:
             if pattern in code:
                 return f"❌ BLOCKED: '{label}' is not allowed in dynamic skills."
 
+        # 2c. Token hygiene audit — runs on the already-parsed tree from step 2b
+        _audit_tree = ast.parse(code)
+        _skill_stem = os.path.splitext(os.path.basename(skill_filename.split('\n')[0].strip()))[0]
+        _audit_errors, _audit_warnings, _token_report = _audit_skill_tokens(_skill_stem, _audit_tree)
+        if _audit_errors:
+            return "❌ TOKEN HYGIENE REJECTED:\n" + "\n\n".join(_audit_errors)
+
         # 3. Protect System Integrity — all core skills are read-only
         protected = {
             "__init__.py",
@@ -155,9 +246,9 @@ def create_new_skill(skill_filename: str, code: str) -> str:
         skill_name = filename[:-3]
         funcs = []
         try:
-            tree = ast.parse(code)
+            _final_tree = ast.parse(code)
             funcs = [
-                node.name for node in ast.walk(tree)
+                node.name for node in ast.walk(_final_tree)
                 if isinstance(node, ast.FunctionDef) and not node.name.startswith('_')
             ]
         except Exception:
@@ -171,11 +262,16 @@ def create_new_skill(skill_filename: str, code: str) -> str:
             f"<skill:{skill_name}.{funcs[0]}>args</skill:{skill_name}.{funcs[0]}>"
             if funcs else f"<skill:{skill_name}.FUNCTION_NAME></skill:{skill_name}.FUNCTION_NAME>"
         )
+        _warn_block = (
+            "\n⚠️ Token warnings:\n" + "\n".join(_audit_warnings)
+            if _audit_warnings else ""
+        )
         return (
             f"✅ SUCCESS: '{filename}' saved ({file_size} bytes). "
             f"Functions: [{func_list}]. "
             f"Example call: {call_hint}. "
-            f"Reload: {reload_result}"
+            f"Reload: {reload_result}\n"
+            f"📊 {_token_report}{_warn_block}"
         )
 
     except Exception as e:
