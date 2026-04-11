@@ -36,6 +36,20 @@ _running = False
 _thread = None
 
 
+_LOG_MAX_BYTES  = 5 * 1024 * 1024   # rotate when file exceeds 5 MB
+_LOG_KEEP_LINES = 8_000              # keep this many lines after rotation
+
+
+def _rotate_activity_log():
+    """Trim the activity log to the last _LOG_KEEP_LINES lines (best-effort)."""
+    try:
+        lines = _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines(keepends=True)
+        if len(lines) > _LOG_KEEP_LINES:
+            _ACTIVITY_LOG.write_text("".join(lines[-_LOG_KEEP_LINES:]), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _append_activity(source: str, action: str, result: str):
     """Append one line to the shared activity log (best-effort, never raises)."""
     try:
@@ -49,6 +63,8 @@ def _append_activity(source: str, action: str, result: str):
         })
         with _ACTIVITY_LOG.open("a", encoding="utf-8") as f:
             f.write(entry + "\n")
+        if _ACTIVITY_LOG.stat().st_size > _LOG_MAX_BYTES:
+            _rotate_activity_log()
     except Exception:
         pass
 
@@ -223,6 +239,11 @@ def _eta(next_run: datetime) -> str:
 
 # ── Agent Dispatch ────────────────────────────────────────────────────────────
 
+_AGENT_URL      = os.getenv("TRINITY_AGENT_URL", "http://127.0.0.1:8001/chat")
+_DISPATCH_RETRIES = 2   # retry on connection errors only (not timeouts/HTTP errors)
+_DISPATCH_RETRY_DELAY = 5  # seconds between retries
+
+
 def _dispatch(prompt: str, task_name: str) -> str:
     """POST the stored prompt to the agent's /chat endpoint."""
     api_key = os.getenv("TRINITY_API_KEY", "")
@@ -235,19 +256,27 @@ def _dispatch(prompt: str, task_name: str) -> str:
         "Output skill tags immediately and execute to completion.\n\n"
         + prompt
     )
-    try:
-        resp = requests.post(
-            "http://127.0.0.1:8001/chat",
-            json={"message": execution_prompt, "session_id": f"sched_{task_name}"},
-            headers=headers,
-            timeout=1800,
-        )
-        if resp.ok:
-            data = resp.json()
-            return data.get("response", str(data))[:300]
-        return f"HTTP {resp.status_code}: {resp.text[:200]}"
-    except Exception as e:
-        return f"dispatch error: {e}"
+    last_err = ""
+    for attempt in range(1 + _DISPATCH_RETRIES):
+        try:
+            resp = requests.post(
+                _AGENT_URL,
+                json={"message": execution_prompt, "session_id": f"sched_{task_name}"},
+                headers=headers,
+                timeout=1800,
+            )
+            if resp.ok:
+                data = resp.json()
+                return data.get("response", str(data))[:300]
+            # HTTP errors are authoritative — don't retry
+            return f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except requests.ConnectionError as e:
+            last_err = str(e)
+            if attempt < _DISPATCH_RETRIES:
+                time.sleep(_DISPATCH_RETRY_DELAY)
+        except Exception as e:
+            return f"dispatch error: {e}"
+    return f"❌ dispatch failed after {1 + _DISPATCH_RETRIES} attempts: {last_err}"
 
 
 # ── Background Loop ───────────────────────────────────────────────────────────
@@ -258,33 +287,42 @@ def _run():
     while _running:
         try:
             now = datetime.now()
+
+            # Phase 1: identify tasks to fire (lock held briefly, no I/O)
             with _lock:
                 tasks = _load()
-                changed = False
-                to_delete = []
-
+                to_fire = []
                 for name, t in tasks.items():
-                    next_run = datetime.fromisoformat(t['next_run'])
-                    if now >= next_run:
-                        print(f"[scheduler] firing: {name}")
-                        result = _dispatch(t['prompt'], name)
-                        print(f"[scheduler] {name} → {result[:80]}")
+                    if now >= datetime.fromisoformat(t['next_run']):
+                        to_fire.append((name, t['prompt'], t['type'],
+                                        t.get('interval_seconds')))
+
+            # Phase 2: dispatch outside the lock (can take up to 1800 s each)
+            results = []
+            for name, prompt, kind, interval_secs in to_fire:
+                print(f"[scheduler] firing: {name}")
+                result = _dispatch(prompt, name)
+                print(f"[scheduler] {name} → {result[:80]}")
+                results.append((name, prompt, kind, interval_secs, result))
+
+            # Phase 3: persist results (lock held briefly)
+            if results:
+                with _lock:
+                    tasks = _load()
+                    for name, prompt, kind, interval_secs, result in results:
+                        if name not in tasks:
+                            continue  # task was removed while we were dispatching
+                        t = tasks[name]
                         t['last_run']    = now.isoformat()
                         t['last_result'] = result[:200]
                         t['run_count']   = t.get('run_count', 0) + 1
-                        _append_activity(f"scheduler:{name}", t['prompt'][:80], result)
-                        changed = True
-                        if t['type'] == 'once':
-                            to_delete.append(name)
+                        _append_activity(f"scheduler:{name}", prompt[:80], result)
+                        if kind == 'once':
+                            del tasks[name]
                         else:
                             t['next_run'] = (
-                                now + timedelta(seconds=t['interval_seconds'])
+                                now + timedelta(seconds=interval_secs)
                             ).isoformat()
-
-                for name in to_delete:
-                    del tasks[name]
-
-                if changed:
                     _save(tasks)
         except Exception as e:
             print(f"[scheduler] loop error: {e}")
@@ -339,6 +377,14 @@ def schedule(name: str, when: str, prompt: str) -> str:
     }
     with _lock:
         tasks = _load()
+        if name in tasks:
+            existing = tasks[name]
+            next_str = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
+            return (
+                f"⚠️  Task '{name}' already exists (next run: {next_str}, "
+                f"type: {existing['type']}). "
+                f"Use remove('{name}') first, or choose a different name."
+            )
         tasks[name] = task
         _save(tasks)
     _ensure_running()
@@ -373,6 +419,14 @@ def schedule_recurring(name: str, every: str, prompt: str) -> str:
     }
     with _lock:
         tasks = _load()
+        if name in tasks:
+            existing = tasks[name]
+            next_str = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
+            return (
+                f"⚠️  Task '{name}' already exists (next run: {next_str}, "
+                f"type: {existing['type']}). "
+                f"Use remove('{name}') first, or choose a different name."
+            )
         tasks[name] = task
         _save(tasks)
     _ensure_running()
