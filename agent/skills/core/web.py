@@ -621,7 +621,7 @@ def _search_tavily(query: str, n: int) -> str:
             content = r.get("content", "")
             results.append(f"\n{i}. {title}")
             if content:
-                results.append(f"   {content[:600]}...")
+                results.append(f"   {content[:1500]}" + ("..." if len(content) > 1500 else ""))
             if url:
                 results.append(f"   🔗 {url}")
 
