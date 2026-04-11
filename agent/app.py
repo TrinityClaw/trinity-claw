@@ -3179,6 +3179,22 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         f"| hist={_tk_hist} user={_tk_user} "
         f"| TOTAL={_tk_sys + _tk_hist + _tk_user}"
     )
+    _token_est = {
+        "total": _tk_sys + _tk_hist + _tk_user,
+        "system": _tk_sys,
+        "history": _tk_hist,
+        "user": _tk_user,
+        "breakdown": {
+            "identity": _tk_identity,
+            "skills": _tk_skills,
+            "usage": _tk_usage,
+            "rules": _tk_rules,
+            "lessons": _tk_lessons,
+            "daily": _tk_daily,
+            "chroma": _tk_chroma,
+            "hint": _tk_hint,
+        },
+    }
     # ─────────────────────────────────────────────────────────────────────────
 
     try:
@@ -3796,11 +3812,12 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
 
         threading.Thread(target=_maybe_suggest_skill, daemon=True, name="skill-detect").start()
 
-        _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": len(all_execution_logs)})
+        _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": len(all_execution_logs), "token_est": _token_est})
         return {
             "reply": ai_reply,
             "execution_log": all_execution_logs,
             "skills_called": len(all_execution_logs),
+            "token_est": _token_est,
         }
 
     except requests.exceptions.Timeout:
