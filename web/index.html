@@ -477,6 +477,60 @@
             min-width: 0;
         }
 
+        /* Agent messages use marked.parse() HTML — reset pre-wrap and normalize elements */
+        .agent-msg .content {
+            white-space: normal;
+        }
+        .agent-msg .content h1,
+        .agent-msg .content h2,
+        .agent-msg .content h3,
+        .agent-msg .content h4,
+        .agent-msg .content h5,
+        .agent-msg .content h6 {
+            font-size: 1em;
+            font-weight: 600;
+            margin: 0.4em 0 0.2em;
+            line-height: 1.4;
+        }
+        .agent-msg .content p {
+            margin: 0.3em 0;
+        }
+        .agent-msg .content a {
+            color: var(--accent);
+            text-decoration: none;
+            word-break: break-all;
+        }
+        .agent-msg .content a:hover {
+            text-decoration: underline;
+        }
+        .agent-msg .content ul,
+        .agent-msg .content ol {
+            margin: 0.3em 0;
+            padding-left: 1.4em;
+        }
+        .agent-msg .content li {
+            margin: 0.1em 0;
+        }
+        .agent-msg .content code {
+            font-family: 'Fira Mono', 'Consolas', monospace;
+            font-size: 0.88em;
+            background: var(--surface-3);
+            padding: 1px 5px;
+            border-radius: 4px;
+        }
+        .agent-msg .content pre {
+            background: var(--surface-3);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px 14px;
+            overflow-x: auto;
+            margin: 0.5em 0;
+        }
+        .agent-msg .content pre code {
+            background: none;
+            padding: 0;
+        }
+
         .user-msg .content {
             background: var(--user-bubble);
             border: 1px solid var(--border);
