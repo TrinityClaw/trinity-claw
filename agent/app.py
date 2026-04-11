@@ -1129,7 +1129,7 @@ def compact_jsonl():
         with open(MEMORY_FILE, "r") as f:
             lines = f.readlines()
 
-        if len(lines) <= JSONL_MAX_LINES:
+        if len(lines) <= JSONL_MAX_LINES and os.path.getsize(MEMORY_FILE) <= 10_000_000:
             return
 
         cutoff = len(lines) // 2
@@ -2814,8 +2814,8 @@ No arguments needed: <skill:dashboard.status></skill:dashboard.status>"""
         _read_skill_example = "  <skill:files.cat>/app/skills/core/skillname.py</skill:files.cat>"
 
         _pref_save_instruction = (
-            "immediately save it: <skill:notes.save>user_preferences,[updated full preferences list]</skill:notes.save>\n"
-            "Always overwrite the whole note — don't append partial updates."
+            "immediately call <skill:notes.set_preference>key,value,user</skill:notes.set_preference> for each specific preference detected. "
+            "Also keep the human-readable summary current: <skill:notes.save>user_preferences,[updated full preferences list]</skill:notes.save>"
         )
     else:
         # Cloud mode: native function calling — no XML tags needed or wanted
@@ -2847,8 +2847,8 @@ CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call t
         _read_skill_example = "  Call files__cat with path='/app/skills/core/skillname.py'"
 
         _pref_save_instruction = (
-            "immediately call notes__save with key='user_preferences' and the updated full preferences list.\n"
-            "Always overwrite the whole note — don't append partial updates."
+            "immediately call notes__set_preference for each specific preference detected (key=preference_name, value=preference_value, source='user'). "
+            "Also keep the human-readable summary current by calling notes__save with title='user_preferences' and the updated full preferences list."
         )
 
     # Load user facts card (always injected, works for every model — no branching)
