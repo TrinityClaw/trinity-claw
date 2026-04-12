@@ -2705,10 +2705,15 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
         # on-demand inside the [✅ result] block when the skill is actually invoked
         # (execute_skill_tags path). Native tool-calling models (Gemma4, Claude,
         # GPT-4o) also receive full per-function schemas via _build_tools_schema().
-        func_sigs = ", ".join(
-            f"{f['name']}({', '.join(f.get('args', []))})"
-            for f in funcs_meta
-        )
+        # skills_doc is a discovery index only — args are already in the tools schema
+        # sent to the model on every request. Cap at 8 names to keep heavy skills
+        # (browser_session, web, notes) from bloating the system prompt.
+        _MAX_FUNCS_IN_DOC = 8
+        func_names = [f["name"] for f in funcs_meta]
+        if len(func_names) > _MAX_FUNCS_IN_DOC:
+            func_sigs = ", ".join(func_names[:_MAX_FUNCS_IN_DOC]) + f" +{len(func_names) - _MAX_FUNCS_IN_DOC} more"
+        else:
+            func_sigs = ", ".join(func_names)
         available_skills.append(
             f"[SKILL: {name}] {meta.get('short_doc', meta.get('doc', 'No doc'))} (functions: {func_sigs})"
         )
@@ -2768,31 +2773,23 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
 ## HOW TO USE SKILLS
 
 Format: <skill:name.function>args</skill:name.function>
-
-Examples:
-- List files: <skill:sys.ls>/app/memory</skill:sys.ls>
-- Save note: <skill:notes.save>mynote,Hello World</skill:notes.save>
-- Read note: <skill:notes.load>mynote</skill:notes.load>
-- Fetch URL: <skill:web.fetch>https://example.com</skill:web.fetch>
-
-Multiple arguments: separate with commas
-No arguments needed: <skill:dashboard.status></skill:dashboard.status>"""
+Args: comma-separated. No args: <skill:dashboard.status></skill:dashboard.status>
+"""
 
         _search_example = "<skill:web.search>current weather New York NY</skill:web.search>"
 
         _rules_section = """\
-## RULES (FOLLOW EXACTLY — VIOLATIONS CAUSE HALLUCINATION)
+## RULES
 
-1. ONLY emit the skill tag to perform an action. NEVER describe the result before the tag runs.
-2. NEVER write [✅ ...] or [❌ ...] blocks yourself. These are ONLY produced by the execution engine after a real skill tag runs. If you write them yourself they are LIES — the skill did not run and no action happened.
-3. NEVER claim in prose that you created, saved, or ran something unless you have ALREADY seen a [✅ skill.function Result: ...] block produced by the system IN THIS RESPONSE — not one you wrote yourself.
-4. NEVER describe the contents or functions of a skill you just created — wait for the ✅ result first, then describe only what the ✅ confirms.
-5. If you see [❌ Error], [⚠️ Skill not found], or any error block, YOU MUST acknowledge the failure to the user. Do NOT continue as if it worked.
-6. The ONLY skills that exist are those listed in "YOUR TOOLS" above. If a skill is not listed there, it does NOT exist — tell the user it doesn't exist yet instead of pretending it does. EXCEPTION: web.search always exists and can answer real-time questions.
-7. After creating a skill: it is saved to /app/skills/dynamic/ and immediately usable.
-8. For multi-step tasks, write a brief numbered plan before your first skill call. EXCEPTION: single-step natural language commands ("write a note:", "search for", "show notes", etc.) need NO plan — emit the skill tag immediately in the same response.
-9. VERBATIM OUTPUT RULE: When a skill result contains a URL, authorization code, token, or any exact string the user must copy — reproduce it word-for-word in your reply.
-10. BROWSER SCREENSHOTS: Call web.browser_screenshot AT MOST TWICE per task (once with full_page=True captures the entire page — no scrolling and re-shooting). Report the saved_to path from the result."""
+1. Emit skill tag to act. Never describe results before the tag runs.
+2. Never write [✅] or [❌] blocks yourself — only the execution engine produces these.
+3. Never claim you created/saved/ran something without seeing a real [✅ Result:] block first.
+4. On [❌ Error]: acknowledge failure. Never continue as if it worked.
+5. Only skills in "YOUR TOOLS" exist. If not listed → say so. EXCEPTION: web.search always exists.
+6. New skills saved to /app/skills/dynamic/ are immediately usable.
+7. Multi-step tasks: brief plan first, then first skill. Single-step commands → emit skill tag immediately.
+8. VERBATIM OUTPUT: When a result contains a URL, token, or exact string to copy — reproduce word-for-word.
+9. SCREENSHOTS: Call web.browser_screenshot AT MOST 2× per task (full_page=True captures everything). Report saved_to path."""
 
         _read_skill_example = "  <skill:files.cat>/app/skills/core/skillname.py</skill:files.cat>"
 
@@ -2805,27 +2802,24 @@ No arguments needed: <skill:dashboard.status></skill:dashboard.status>"""
         _skill_usage_section = """\
 ## HOW TO USE SKILLS
 
-You have tools registered. Call them directly using the function-calling interface — no special syntax.
-Tool names follow the pattern: skill_name__function_name (double underscore separator).
-Example: to search the web call web__search, to upload to Drive call google_drive__upload_to_folder.
+Call tools directly via function-calling interface. Tool names: skill_name__function_name.
+Example: web__search, google_drive__upload_to_folder.
 
-NEVER write fake result blocks like [✅ ...] or [❌ ...] yourself — those only appear when a real tool runs.
-NEVER claim you completed an action until the tool result confirms it.
-
-CRITICAL — DO NOT PLAN WITHOUT ACTING: When a task requires tool calls, call the tool IN THE SAME RESPONSE. Never write "I will navigate to X" or "Let me click Y" and stop — that produces text with no action and the task never executes. If you need to do something, CALL THE TOOL NOW. Text describing future actions is not a substitute for calling the tool."""
+NEVER write fake [✅] or [❌] blocks — only real tool runs produce these.
+CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop — that produces no action."""
 
         _search_example = "Call the web__search tool with query='current weather New York NY'"
 
         _rules_section = """\
 ## RULES
 
-1. Use tools to act — never describe an action as done before the tool result arrives.
-2. If a tool returns an error, tell the user what failed and why. Do NOT continue as if it worked.
-3. The only skills that exist are those in YOUR TOOLS above. If something isn't listed, say so.
-4. After creating a skill (create_skill__create_new_skill), tell the user it's in /app/skills/dynamic/ to inspect.
-5. For multi-step tasks, state your plan briefly before calling the first tool.
-6. VERBATIM OUTPUT RULE: When a tool result contains a URL, authorization code, token, or any exact string the user must copy — reproduce it word-for-word in your reply.
-7. BROWSER SCREENSHOTS: Call web__browser_screenshot AT MOST TWICE per task (once with full_page=True captures the entire page — no scrolling and re-shooting). Report the saved_to path from the result."""
+1. Call tools to act — never describe action as done before tool result arrives.
+2. On tool error: tell user what failed. Never continue as if it worked.
+3. Only skills in "YOUR TOOLS" exist. If not listed → say so.
+4. New skills (create_skill__create_new_skill) saved to /app/skills/dynamic/.
+5. Multi-step tasks: brief plan, then call first tool.
+6. VERBATIM OUTPUT: When a result contains URL, token, or exact string to copy — reproduce word-for-word.
+7. SCREENSHOTS: Call web__browser_screenshot AT MOST 2× (full_page=True captures everything). Report saved_to."""
 
         _read_skill_example = "  Call files__cat with path='/app/skills/core/skillname.py'"
 
