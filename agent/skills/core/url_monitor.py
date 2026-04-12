@@ -15,24 +15,19 @@ from urllib.parse import urlparse, urljoin
 import xml.etree.ElementTree as ET
 from pathlib import Path
 NAME = "url_monitor"
-SHORT_DOC = "Monitor URLs for uptime and content changes; also tracks Twitter automation state."
+SHORT_DOC = "Monitor URLs for uptime and content changes."
 DOC = (
     "Monitor URLs for changes and health status. "
     "Functions: add_url(url, friendly_name?, frequency_minutes?, tags?, alert_on_changes?) — tags can be list or plain string; "
     "list_urls()→formatted status of all monitored URLs (preferred over get_status_summary/get_url_history/get_recent_changes); "
     "remove_url(url), check_url_now(url), check_all_urls(). "
-    "Also provides Twitter state helpers for scheduler-driven automation: "
-    "tw_is_seen(key)→bool — check if a tweet_id or username was already processed; "
-    "tw_mark_seen(key, value?)→str — mark as processed (prevents double-likes/follows); "
-    "tw_last_tweet_time()→str — ISO timestamp of last posted tweet, empty if never; "
-    "tw_log_tweet()→str — record that a tweet was just posted (call right after browser_session.tweet()). "
-    "Use these in scheduler prompts to build stateful Twitter automation without extra skills."
+    "Twitter state helpers (tw_is_seen, tw_mark_seen, tw_last_tweet_time, tw_log_tweet) "
+    "have moved to browser_session."
 )
 __all__ = [
     "NAME", "DOC",
     "add_url", "remove_url", "check_url_now", "check_all_urls",
     "list_urls", "get_status_summary", "get_url_history", "get_recent_changes",
-    "tw_is_seen", "tw_mark_seen", "tw_last_tweet_time", "tw_log_tweet",
 ]
 
 @dataclass
@@ -522,81 +517,3 @@ def check_url_now(url: str) -> Dict:
 
     return asyncio.run(_check())
 
-
-# ── Twitter State Helpers ─────────────────────────────────────────────────────
-# Lightweight key/value store for scheduler-driven Twitter automation.
-# Prevents double-liking and double-following across sessions.
-# Used by scheduler prompts together with browser_session Twitter functions.
-
-_TW_DB = url_monitor_instance.db_path
-
-
-def tw_is_seen(key: str) -> bool:
-    """Check if a tweet_id or username has already been processed.
-
-    key examples:
-      "1234567890"          — a tweet ID (to avoid double-liking)
-      "follow:elonmusk"     — a username (to avoid double-following)
-
-    Returns True if already seen, False if new.
-    """
-    conn = sqlite3.connect(_TW_DB)
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM twitter_state WHERE key = ?", (key,))
-    found = c.fetchone() is not None
-    conn.close()
-    return found
-
-
-def tw_mark_seen(key: str, value: str = "done") -> str:
-    """Mark a tweet_id or username as processed so it won't be acted on again.
-
-    key   — same key you checked with tw_is_seen()
-    value — optional label describing what was done (e.g. "liked", "followed")
-
-    Returns ✅ confirmation.
-    """
-    conn = sqlite3.connect(_TW_DB)
-    c = conn.cursor()
-    c.execute(
-        "INSERT OR REPLACE INTO twitter_state (key, value, logged_at) VALUES (?, ?, ?)",
-        (key, value, datetime.now().isoformat()),
-    )
-    conn.commit()
-    conn.close()
-    return f"✅ Marked seen: {key} ({value})"
-
-
-def tw_last_tweet_time() -> str:
-    """Return the ISO timestamp of the last tweet posted by the agent.
-
-    Returns empty string if no tweet has been logged yet.
-    Use this to decide whether it's time to post again:
-      last = tw_last_tweet_time()
-      if not last or (datetime.now() - datetime.fromisoformat(last)).total_seconds() >= 8*3600:
-          # post a tweet
-    """
-    conn = sqlite3.connect(_TW_DB)
-    c = conn.cursor()
-    c.execute("SELECT value FROM twitter_state WHERE key = 'last_tweet_time'")
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else ""
-
-
-def tw_log_tweet() -> str:
-    """Record that a tweet was just posted. Call immediately after browser_session.tweet().
-
-    Saves the current timestamp so tw_last_tweet_time() can enforce tweet frequency.
-    Returns ✅ confirmation with the logged timestamp.
-    """
-    now = datetime.now().isoformat()
-    conn = sqlite3.connect(_TW_DB)
-    c = conn.cursor()
-    c.execute(
-        "INSERT OR REPLACE INTO twitter_state (key, value, logged_at) VALUES (?, ?, ?)",
-        ("last_tweet_time", now, now),
-    )
-    conn.commit()
-    conn.close()
-    return f"✅ Tweet time logged: {now}"

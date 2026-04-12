@@ -1,6 +1,7 @@
 import os
 import logging
 import random
+import sqlite3
 import time
 from pathlib import Path
 from datetime import datetime
@@ -91,7 +92,14 @@ DOC = (
     "stealth_start('mysite') → stealth_goto(url, 'mysite') → stealth_snapshot('mysite') "
     "→ stealth_click_ref('@e3', 'mysite') / stealth_fill_ref('@e7', text, 'mysite') "
     "→ stealth_close('mysite'). "
-    "Multiple sessions run in parallel — use different session_name values."
+    "Multiple sessions run in parallel — use different session_name values. "
+
+    "=== TWITTER STATE HELPERS (stateful automation across sessions) === "
+    "tw_is_seen(key)→bool — check if a tweet_id or username was already processed (prevents double-likes/follows); "
+    "tw_mark_seen(key, value?)→str — mark as processed; "
+    "tw_last_tweet_time()→str — ISO timestamp of last posted tweet, empty if never; "
+    "tw_log_tweet()→str — record that a tweet was just posted (call right after tweet()). "
+    "Use these in scheduler prompts to build stateful Twitter automation without extra skills."
 )
 
 SKILL_TIMEOUT = 60  # browser operations can take up to 60s
@@ -2651,3 +2659,82 @@ def stealth_close(session_name: str = "default") -> str:
         return f"✅ Stealth session '{session_name}' closed and cookies saved."
     except Exception as e:
         return f"❌ stealth_close failed: {e}"
+
+
+# ── Twitter State Helpers ─────────────────────────────────────────────────────
+# Lightweight key/value store for scheduler-driven Twitter automation.
+# Prevents double-liking and double-following across sessions.
+# Stored in the url_monitor SQLite DB (shared, persists across restarts).
+
+_TW_DB = "/app/memory/url_monitor.db"
+
+
+def tw_is_seen(key: str) -> bool:
+    """Check if a tweet_id or username has already been processed.
+
+    key examples:
+      "1234567890"          — a tweet ID (to avoid double-liking)
+      "follow:elonmusk"     — a username (to avoid double-following)
+
+    Returns True if already seen, False if new.
+    """
+    conn = sqlite3.connect(_TW_DB)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM twitter_state WHERE key = ?", (key,))
+    found = c.fetchone() is not None
+    conn.close()
+    return found
+
+
+def tw_mark_seen(key: str, value: str = "done") -> str:
+    """Mark a tweet_id or username as processed so it won't be acted on again.
+
+    key   — same key you checked with tw_is_seen()
+    value — optional label describing what was done (e.g. "liked", "followed")
+
+    Returns ✅ confirmation.
+    """
+    conn = sqlite3.connect(_TW_DB)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO twitter_state (key, value, logged_at) VALUES (?, ?, ?)",
+        (key, value, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return f"✅ Marked seen: {key} ({value})"
+
+
+def tw_last_tweet_time() -> str:
+    """Return the ISO timestamp of the last tweet posted by the agent.
+
+    Returns empty string if no tweet has been logged yet.
+    Use this to decide whether it's time to post again:
+      last = tw_last_tweet_time()
+      if not last or (datetime.now() - datetime.fromisoformat(last)).total_seconds() >= 8*3600:
+          # post a tweet
+    """
+    conn = sqlite3.connect(_TW_DB)
+    c = conn.cursor()
+    c.execute("SELECT value FROM twitter_state WHERE key = 'last_tweet_time'")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else ""
+
+
+def tw_log_tweet() -> str:
+    """Record that a tweet was just posted. Call immediately after tweet().
+
+    Saves the current timestamp so tw_last_tweet_time() can enforce tweet frequency.
+    Returns ✅ confirmation with the logged timestamp.
+    """
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(_TW_DB)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO twitter_state (key, value, logged_at) VALUES (?, ?, ?)",
+        ("last_tweet_time", now, now),
+    )
+    conn.commit()
+    conn.close()
+    return f"✅ Tweet time logged: {now}"
