@@ -939,7 +939,7 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
 
     try:
         si = _import_skill("self_improvement")
-        ce = _import_skill("code_executor")
+        ce = _import_skill("terminal")
     except ImportError as e:
         raise ImportError(f"dependency missing — {e}") from e
 
@@ -1280,7 +1280,7 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
 
     try:
         si = _import_skill("self_improvement")
-        ce = _import_skill("code_executor")
+        ce = _import_skill("terminal")
     except ImportError as e:
         return f"❌ dependency missing — {e}"
 
