@@ -1,4 +1,6 @@
 import os
+import re
+import sys
 import json
 import logging
 import time
@@ -7,15 +9,70 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 NAME = "youtube"
-SHORT_DOC = "Search YouTube videos/channels, get video details and transcripts via YouTube Data API."
+SHORT_DOC = "Search YouTube videos/channels via Data API; auto-falls back to browser session when OAuth expires."
 DOC = (
-    "YouTube Data API: search, analyze videos and channels. "
-    "Setup: gcal_credentials.json + authorize() or activate(api_key). "
-    "Functions: authorize(code?), activate(api_key), status(), "
+    "YouTube Data API with browser-session fallback. "
+    "API setup: gcal_credentials.json + authorize() or activate(api_key). "
+    "Browser fallback (when OAuth disconnects every 7 days): browser_login(email, password) once — "
+    "cookies persist and all functions auto-use the browser when the API is unavailable. "
+    "Functions: authorize(code?), activate(api_key), browser_login(email, password), status(), "
     "search_videos(query, max_results='5'), search_channels(query, max_results='5'), "
     "get_video(url_or_id), get_channel_videos(url_or_id, max_results='10'), "
     "get_transcript(url_or_id)."
 )
+
+# ---------------------------------------------------------------------------
+# Browser-session fallback helpers
+# ---------------------------------------------------------------------------
+
+_BROWSER_SESSION = "youtube"
+
+
+def _bs():
+    """Return the already-loaded browser_session module (same process, sys.modules)."""
+    mod = sys.modules.get("skills.browser_session")
+    if mod is None:
+        for m in sys.modules.values():
+            if hasattr(m, "_stealth_sessions") and hasattr(m, "stealth_start"):
+                return m
+    return mod  # may be None if browser_session skill is not loaded
+
+
+def _browser_page():
+    """Return the raw Playwright Page from the active youtube stealth session."""
+    bs = _bs()
+    if bs is None:
+        return None
+    sessions = getattr(bs, "_stealth_sessions", {})
+    sess = sessions.get(_BROWSER_SESSION)
+    return sess["page"] if sess else None
+
+
+def _ensure_browser_session() -> bool:
+    """Start the youtube stealth session if cookies exist. Returns True if ready."""
+    bs = _bs()
+    if bs is None:
+        return False
+    cookie_file = (
+        Path(os.getenv("MEMORY_DIR", "/app/memory"))
+        / "stealth_sessions" / _BROWSER_SESSION / "cookies.json"
+    )
+    if not cookie_file.exists():
+        return False
+    sessions = getattr(bs, "_stealth_sessions", {})
+    if _BROWSER_SESSION not in sessions:
+        result = bs.stealth_start(_BROWSER_SESSION)
+        logger.debug("youtube browser_session start: %s", result)
+    return _BROWSER_SESSION in getattr(bs, "_stealth_sessions", {})
+
+
+def _yt_initial_data(page) -> dict:
+    """Extract ytInitialData JSON from a YouTube page via JavaScript."""
+    try:
+        data = page.evaluate("() => window.ytInitialData")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 # Robust Path Resolution (mirroring Senior Developer patterns)
 _MEMORY_DIR = Path(os.getenv("MEMORY_DIR", "/app/memory"))
@@ -91,6 +148,129 @@ def activate(api_key: str) -> str:
     except Exception as e:
         return f"❌ Activation failed: {e}"
 
+
+def browser_login(email: str, password: str) -> str:
+    """Login to YouTube via stealth browser and save cookies as a long-lived fallback.
+
+    Use this once when OAuth disconnects (typically every 7 days).
+    Cookies are encrypted and saved to memory/stealth_sessions/youtube/cookies.json.
+    All youtube.* functions will automatically use the browser session whenever
+    the API key / OAuth token is missing or expired.
+
+    Args:
+        email:    Google account email.
+        password: Google account password.
+
+    Returns:
+        str: Success message or instructions if 2FA is required.
+    """
+    bs = _bs()
+    if bs is None:
+        return "❌ browser_session skill not loaded. Make sure browser_session.py is in skills/core/."
+
+    sessions = getattr(bs, "_stealth_sessions", {})
+    if _BROWSER_SESSION not in sessions:
+        bs.stealth_start(_BROWSER_SESSION)
+
+    try:
+        page = _browser_page()
+        if page is None:
+            return "❌ Could not start stealth browser session."
+
+        bs.stealth_goto(
+            "https://accounts.google.com/signin/v2/identifier?service=youtube",
+            _BROWSER_SESSION,
+        )
+        time.sleep(2)
+
+        # Email step
+        try:
+            page.locator('input[type="email"]').wait_for(timeout=8000)
+            page.locator('input[type="email"]').fill(email)
+            time.sleep(0.5)
+            page.keyboard.press("Enter")
+            time.sleep(2)
+        except Exception as e:
+            return (
+                f"❌ Could not find email field: {e}\n"
+                f"Inspect page: browser_session.stealth_snapshot('{_BROWSER_SESSION}')"
+            )
+
+        # Password step
+        try:
+            page.locator('input[type="password"]').wait_for(timeout=8000)
+            page.locator('input[type="password"]').fill(password)
+            time.sleep(0.5)
+            page.keyboard.press("Enter")
+            time.sleep(3)
+        except Exception as e:
+            return (
+                f"❌ Could not find password field: {e}\n"
+                f"Check for CAPTCHA: browser_session.stealth_screenshot('{_BROWSER_SESSION}')"
+            )
+
+        current_url = page.url
+        if "challenge" in current_url or "signin/v2/challenge" in current_url:
+            bs.stealth_save(_BROWSER_SESSION)
+            return (
+                "⚠️ 2FA/challenge detected. Complete it manually:\n"
+                f"1. browser_session.stealth_screenshot('{_BROWSER_SESSION}') — see the page\n"
+                f"2. Use stealth_snapshot/stealth_click_ref/stealth_fill_ref to interact\n"
+                "3. Call youtube.browser_login_verify() after completing 2FA"
+            )
+
+        bs.stealth_goto("https://www.youtube.com", _BROWSER_SESSION)
+        time.sleep(2)
+        text = page.inner_text("body")
+        if "Sign in" in text[:500]:
+            return (
+                "⚠️ Login may not have completed.\n"
+                f"Screenshot: browser_session.stealth_screenshot('{_BROWSER_SESSION}')\n"
+                "Call youtube.browser_login_verify() after resolving any prompts."
+            )
+
+        bs.stealth_save(_BROWSER_SESSION)
+        memory_dir = Path(os.getenv("MEMORY_DIR", "/app/memory"))
+        return (
+            f"✅ YouTube browser login successful.\n"
+            f"Cookies saved: {memory_dir}/stealth_sessions/{_BROWSER_SESSION}/cookies.json\n"
+            "All youtube.* functions will now use this session as fallback when OAuth expires."
+        )
+
+    except Exception as e:
+        return f"❌ browser_login failed: {e}"
+
+
+def browser_login_verify() -> str:
+    """Verify and save the browser session after manually completing a 2FA challenge.
+
+    Returns:
+        str: Confirmation of login state.
+    """
+    bs = _bs()
+    if bs is None:
+        return "❌ browser_session skill not loaded."
+    try:
+        if not _ensure_browser_session():
+            bs.stealth_start(_BROWSER_SESSION)
+        bs.stealth_goto("https://www.youtube.com", _BROWSER_SESSION)
+        time.sleep(2)
+        page = _browser_page()
+        if page is None:
+            return "❌ No active browser session."
+        text = page.inner_text("body")
+        signed_in = "Sign in" not in text[:300] or page.locator("#avatar-btn").count() > 0
+        if signed_in:
+            bs.stealth_save(_BROWSER_SESSION)
+            memory_dir = Path(os.getenv("MEMORY_DIR", "/app/memory"))
+            return (
+                f"✅ Verified: logged into YouTube via browser.\n"
+                f"Session saved: {memory_dir}/stealth_sessions/{_BROWSER_SESSION}/cookies.json"
+            )
+        return "❌ Not logged in yet. Call browser_login(email, password) to authenticate."
+    except Exception as e:
+        return f"❌ browser_login_verify failed: {e}"
+
 def authorize(code: str = "") -> str:
     """Standard Google OAuth 2.0 flow (Step 1: Link, Step 2: Code)."""
     import requests as _req
@@ -158,16 +338,246 @@ def authorize(code: str = "") -> str:
         return f"❌ Setup failed: {e}"
 
 def status() -> str:
-    """Check auth health and paths."""
+    """Check auth health: API key, OAuth token, and browser session fallback."""
     ok, _ = _check_deps()
     token_exists = _TOKEN_FILE.exists()
-    
-    state = "Ready (API Key)" if _api_key else ("Ready (OAuth)" if token_exists else "Not Setup")
+
+    api_state = "Ready (API Key)" if _api_key else ("Ready (OAuth)" if token_exists else "Not Setup")
+
+    memory_dir = Path(os.getenv("MEMORY_DIR", "/app/memory"))
+    browser_cookie_file = memory_dir / "stealth_sessions" / _BROWSER_SESSION / "cookies.json"
+    browser_state = "Saved (fallback ready)" if browser_cookie_file.exists() else "Not set up (call browser_login)"
+
     return (
-        f"📺 YouTube Status: {state}\n"
-        f"   - Credentials: {_CREDENTIALS_FILE}\n"
-        f"   - Token File:  {_TOKEN_FILE}"
+        f"📺 YouTube Status\n"
+        f"   API / OAuth:    {api_state}\n"
+        f"   Credentials:    {_CREDENTIALS_FILE}\n"
+        f"   Token File:     {_TOKEN_FILE}\n"
+        f"   Browser Fallback: {browser_state}\n"
+        f"   Browser Cookies:  {browser_cookie_file}"
     )
+
+# ---------------------------------------------------------------------------
+# Browser-based fallback implementations (used when API auth is unavailable)
+# ---------------------------------------------------------------------------
+
+def _browser_search_videos(query: str, n: int) -> str:
+    """Search YouTube via stealth browser, parsing embedded ytInitialData JSON."""
+    if not _ensure_browser_session():
+        return ""  # No browser session available
+    bs = _bs()
+    url = "https://www.youtube.com/results?search_query=" + query.replace(" ", "+")
+    bs.stealth_goto(url, _BROWSER_SESSION)
+    time.sleep(2)
+    page = _browser_page()
+    if page is None:
+        return ""
+    data = _yt_initial_data(page)
+    try:
+        contents = (
+            data.get("contents", {})
+            .get("twoColumnSearchResultsRenderer", {})
+            .get("primaryContents", {})
+            .get("sectionListRenderer", {})
+            .get("contents", [{}])[0]
+            .get("itemSectionRenderer", {})
+            .get("contents", [])
+        )
+    except (KeyError, IndexError, TypeError):
+        contents = []
+    results = [f"YouTube Video Search (browser) for '{query}':\n"]
+    count = 0
+    for item in contents:
+        if count >= n:
+            break
+        vr = item.get("videoRenderer")
+        if not vr:
+            continue
+        title = "".join(r.get("text", "") for r in vr.get("title", {}).get("runs", []))
+        video_id = vr.get("videoId", "")
+        channel = "".join(r.get("text", "") for r in vr.get("shortBylineText", {}).get("runs", []))
+        views = vr.get("viewCountText", {}).get("simpleText", "") or "".join(
+            r.get("text", "") for r in vr.get("viewCountText", {}).get("runs", [])
+        )
+        published = vr.get("publishedTimeText", {}).get("simpleText", "")
+        if title and video_id:
+            results.append(
+                f"- {title}\n"
+                f"  Channel: {channel} | {published}\n"
+                f"  Views: {views}\n"
+                f"  URL: https://www.youtube.com/watch?v={video_id}\n"
+            )
+            count += 1
+    if count == 0:
+        return ""
+    return "\n".join(results)
+
+
+def _browser_search_channels(query: str, n: int) -> str:
+    """Search YouTube channels via stealth browser."""
+    if not _ensure_browser_session():
+        return ""
+    bs = _bs()
+    # sp=EgIQAg%3D%3D is the YouTube channels filter
+    url = "https://www.youtube.com/results?search_query=" + query.replace(" ", "+") + "&sp=EgIQAg%3D%3D"
+    bs.stealth_goto(url, _BROWSER_SESSION)
+    time.sleep(2)
+    page = _browser_page()
+    if page is None:
+        return ""
+    data = _yt_initial_data(page)
+    try:
+        contents = (
+            data.get("contents", {})
+            .get("twoColumnSearchResultsRenderer", {})
+            .get("primaryContents", {})
+            .get("sectionListRenderer", {})
+            .get("contents", [{}])[0]
+            .get("itemSectionRenderer", {})
+            .get("contents", [])
+        )
+    except (KeyError, IndexError, TypeError):
+        contents = []
+    results = [f"YouTube Channel Search (browser) for '{query}':\n"]
+    count = 0
+    for item in contents:
+        if count >= n:
+            break
+        cr = item.get("channelRenderer")
+        if not cr:
+            continue
+        title = "".join(r.get("text", "") for r in cr.get("title", {}).get("runs", []))
+        channel_id = cr.get("channelId", "")
+        subs = cr.get("videoCountText", {}).get("simpleText", "") or cr.get("subscriberCountText", {}).get("simpleText", "")
+        desc = "".join(r.get("text", "") for r in cr.get("descriptionSnippet", {}).get("runs", []))[:100]
+        if title and channel_id:
+            results.append(
+                f"- {title}\n"
+                f"  Subscribers: {subs}\n"
+                f"  Description: {desc}\n"
+                f"  URL: https://www.youtube.com/channel/{channel_id}\n"
+            )
+            count += 1
+    if count == 0:
+        return ""
+    return "\n".join(results)
+
+
+def _browser_get_video(video_id: str) -> str:
+    """Get video info by navigating to the watch page and parsing ytInitialData."""
+    if not _ensure_browser_session():
+        return ""
+    bs = _bs()
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    bs.stealth_goto(watch_url, _BROWSER_SESSION)
+    time.sleep(3)
+    page = _browser_page()
+    if page is None:
+        return ""
+    data = _yt_initial_data(page)
+    try:
+        sections = (
+            data.get("contents", {})
+            .get("twoColumnWatchNextResults", {})
+            .get("results", {})
+            .get("results", {})
+            .get("contents", [])
+        )
+    except (KeyError, TypeError):
+        sections = []
+    title = channel = views = published = description = ""
+    for section in sections:
+        pri = section.get("videoPrimaryInfoRenderer", {})
+        if pri:
+            title = "".join(r.get("text", "") for r in pri.get("title", {}).get("runs", []))
+            views = pri.get("viewCount", {}).get("videoViewCountRenderer", {}).get("viewCount", {}).get("simpleText", "")
+            published = pri.get("dateText", {}).get("simpleText", "")
+        sec = section.get("videoSecondaryInfoRenderer", {})
+        if sec:
+            channel = "".join(
+                r.get("text", "")
+                for r in sec.get("owner", {}).get("videoOwnerRenderer", {}).get("title", {}).get("runs", [])
+            )
+            description = str(
+                sec.get("attributedDescription", {}).get("content", "")
+                or "".join(r.get("text", "") for r in sec.get("description", {}).get("runs", []))
+            )[:200]
+    if not title:
+        title = page.title().replace(" - YouTube", "").strip()
+    if not title:
+        return ""
+    return (
+        f"📹 Video (browser): {title}\n"
+        f"   Channel:     {channel}\n"
+        f"   Published:   {published}\n"
+        f"   Views:       {views}\n"
+        f"   Description: {description}{'...' if len(description) >= 200 else ''}\n"
+        f"   URL:         {watch_url}"
+    )
+
+
+def _browser_get_channel_videos(channel_url: str, n: int) -> str:
+    """List recent channel videos by navigating to the /videos page."""
+    if not _ensure_browser_session():
+        return ""
+    bs = _bs()
+    url = channel_url.rstrip("/")
+    if not url.endswith("/videos"):
+        url += "/videos"
+    if not url.startswith("http"):
+        url = "https://www.youtube.com/" + url.lstrip("/")
+    bs.stealth_goto(url, _BROWSER_SESSION)
+    time.sleep(3)
+    page = _browser_page()
+    if page is None:
+        return ""
+    data = _yt_initial_data(page)
+    channel_name = (
+        data.get("header", {}).get("c4TabbedHeaderRenderer", {}).get("title", channel_url)
+    )
+    try:
+        tabs = data.get("contents", {}).get("twoColumnBrowseResultsRenderer", {}).get("tabs", [])
+        tab_contents = []
+        for tab in tabs:
+            tc = tab.get("tabRenderer", {}).get("content", {})
+            if tc:
+                tab_contents = (
+                    tc.get("richGridRenderer", {}).get("contents", [])
+                    or tc.get("sectionListRenderer", {}).get("contents", [{}])[0]
+                    .get("itemSectionRenderer", {}).get("contents", [{}])[0]
+                    .get("gridRenderer", {}).get("items", [])
+                )
+                if tab_contents:
+                    break
+    except (KeyError, IndexError, TypeError):
+        tab_contents = []
+    lines = [f"📺 Recent videos from '{channel_name}' (browser):\n"]
+    count = 0
+    for item in tab_contents:
+        if count >= n:
+            break
+        vr = (
+            item.get("richItemRenderer", {}).get("content", {}).get("videoRenderer", {})
+            or item.get("gridVideoRenderer", {})
+            or item.get("videoRenderer", {})
+        )
+        if not vr:
+            continue
+        title = "".join(r.get("text", "") for r in vr.get("title", {}).get("runs", []))
+        vid_id = vr.get("videoId", "")
+        views = vr.get("viewCountText", {}).get("simpleText", "")
+        published = vr.get("publishedTimeText", {}).get("simpleText", "")
+        if title and vid_id:
+            lines.append(
+                f"- {title}\n"
+                f"  {published} | Views: {views}\n"
+                f"  URL: https://www.youtube.com/watch?v={vid_id}\n"
+            )
+            count += 1
+    if count == 0:
+        return ""
+    return "\n".join(lines)
+
 
 def search_videos(query: str, max_results: str = "5") -> str:
     """Searches for videos matching the query and returns their titles, URLs, and exact view counts."""
@@ -223,8 +633,14 @@ def search_videos(query: str, max_results: str = "5") -> str:
         return "\n".join(results)
 
     except (PermissionError, FileNotFoundError) as e:
-        return f"❌ YouTube NOT setup. Call authorize() first. Error: {e}"
+        fallback = _browser_search_videos(query, max_res)
+        if fallback:
+            return fallback
+        return f"❌ YouTube NOT setup. Call authorize() or browser_login(email, password). Error: {e}"
     except Exception as e:
+        fallback = _browser_search_videos(query, max_res)
+        if fallback:
+            return fallback
         return f"❌ YouTube search failed: {e}"
 
 def search_channels(query: str, max_results: str = "5") -> str:
@@ -287,8 +703,14 @@ def search_channels(query: str, max_results: str = "5") -> str:
         return "\n".join(results)
 
     except (PermissionError, FileNotFoundError) as e:
-        return f"❌ YouTube NOT setup. Call authorize() first. Error: {e}"
+        fallback = _browser_search_channels(query, max_res)
+        if fallback:
+            return fallback
+        return f"❌ YouTube NOT setup. Call authorize() or browser_login(email, password). Error: {e}"
     except Exception as e:
+        fallback = _browser_search_channels(query, max_res)
+        if fallback:
+            return fallback
         return f"❌ YouTube search failed: {e}"
 
 def get_video(url_or_id: str) -> str:
@@ -359,8 +781,14 @@ def get_video(url_or_id: str) -> str:
         )
 
     except (PermissionError, FileNotFoundError) as e:
-        return f"❌ YouTube NOT setup. Call authorize() first. Error: {e}"
+        fallback = _browser_get_video(video_id)
+        if fallback:
+            return fallback
+        return f"❌ YouTube NOT setup. Call authorize() or browser_login(email, password). Error: {e}"
     except Exception as e:
+        fallback = _browser_get_video(video_id)
+        if fallback:
+            return fallback
         return f"❌ get_video failed: {e}"
 
 
@@ -454,8 +882,14 @@ def get_channel_videos(url_or_id: str, max_results: str = "10") -> str:
         return "\n".join(lines)
 
     except (PermissionError, FileNotFoundError) as e:
-        return f"❌ YouTube NOT setup. Call authorize() first. Error: {e}"
+        fallback = _browser_get_channel_videos(url_or_id, max_res)
+        if fallback:
+            return fallback
+        return f"❌ YouTube NOT setup. Call authorize() or browser_login(email, password). Error: {e}"
     except Exception as e:
+        fallback = _browser_get_channel_videos(url_or_id, max_res)
+        if fallback:
+            return fallback
         return f"❌ get_channel_videos failed: {e}"
 
 
@@ -516,7 +950,8 @@ def get_transcript(url_or_id: str) -> str:
 
 
 __all__ = [
-    "NAME", "DOC", "activate", "authorize", "status",
+    "NAME", "DOC", "SHORT_DOC",
+    "activate", "authorize", "browser_login", "browser_login_verify", "status",
     "search_videos", "search_channels",
     "get_video", "get_channel_videos", "get_transcript",
 ]
