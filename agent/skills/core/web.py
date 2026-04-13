@@ -14,10 +14,10 @@ from urllib.parse import urlparse, urljoin
 SKILL_TIMEOUT = 90  # seconds — browser ops need room beyond the default 30s
 
 NAME = "web"
-SHORT_DOC = "Web search, fetch URLs, download files, and find/download images; full browser automation via Playwright."
+SHORT_DOC = "Web search, fetch URLs, download files, find/download images, extract emails; full browser automation via Playwright."
 DOC = (
     "Web operations: fetch, search (multiple engines), scrape, download binary files, "
-    "find and download images, and full browser automation via Playwright (browser_* functions). "
+    "find and download images, extract emails, and full browser automation via Playwright (browser_* functions). "
     "Key functions: search(query) — auto-tries Tavily (if key set) → DuckDuckGo → Bing and "
     "returns the first good result. fetch(url), download(url, filename) — saves binary file to "
     "/app/memory/filename. "
@@ -25,6 +25,9 @@ DOC = (
     "Call it directly with just the subject name, e.g. find_and_download_image('Zeus') or "
     "find_and_download_image('sunset beach'). Do NOT search first — this function handles "
     "searching, finding a direct image URL, and downloading in one step. Returns the local path. "
+    "find_emails(urls) — ALWAYS use this for email extraction tasks. "
+    "Call it directly with a comma-separated list of URLs, e.g. find_emails('https://example.com, https://example.org'). "
+    "Do NOT scrape or fetch first — this function handles fetching and email extraction in one step. "
     "Rate limiting and URL validation built-in. "
     "parse_feed(url, limit) — fetch and parse an RSS/Atom feed, returns structured news items."
 )
@@ -230,7 +233,7 @@ def fetch(url: str, timeout: int = 30) -> str:
         
         response.raise_for_status()
         _record_success()
-        return response.text
+        return response.content.decode(response.apparent_encoding or "utf-8", errors="replace")
         
     except requests.exceptions.Timeout:
         return f"❌ Request timed out after {timeout}s"
@@ -309,7 +312,7 @@ def scrape(url: str, selector: str = "body") -> str:
         return content
     return extract_elements(content, selector)
 
-def extract_elements(html_content: str, selector: str) -> str:
+def extract_elements(html_content: str, selector: str = "body") -> str:
     """Return text content of elements matching a CSS selector in the given HTML."""
     if HAS_BS4:
         soup = BeautifulSoup(html_content, 'html.parser')
@@ -345,9 +348,16 @@ def scrape_links(url: str, absolute: bool = True) -> str:
             if href and not href.startswith(('javascript:', '#', 'mailto:', 'tel:')):
                 if absolute and not href.startswith('http'):
                     href = urljoin(url, href)
-                links.append(f"{text}: {href}" if text else href)
-        
-        return f"Found {len(links)} links:\n" + "\n".join(links[:50]) if links else "No links found"
+                links.append({'url': href, 'text': text})
+
+        if not links:
+            return "No links found on page"
+        results = [f"🔗 Found {len(links)} links:\n"]
+        for i, link in enumerate(links[:50], 1):
+            display_text = link['text'] or f"Link {i}"
+            results.append(f"{i}. {display_text}")
+            results.append(f"   {link['url']}")
+        return "\n".join(results)
     
     # BeautifulSoup version - BETTER
     soup = BeautifulSoup(content, 'html.parser')
@@ -1538,3 +1548,67 @@ def parse_feed(url: str, limit: int = 10) -> str:
         return f"❌ Could not parse feed — URL may not be a valid RSS/Atom feed: {url}"
     except Exception as e:
         return f"❌ Error fetching feed: {e}"
+
+# ============================================
+# EMAIL EXTRACTION (all-in-one)
+# ============================================
+
+_EMAIL_RE = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]{2,}')
+
+def find_emails(urls: str) -> str:
+    """Scrape one or more URLs (comma-separated) and extract all email addresses found.
+
+    This is a self-contained function: it fetches each page internally, so the LLM
+    only needs to pass the URLs. No separate fetch/scrape call required.
+
+    Args:
+        urls: Comma-separated list of URLs to scan (e.g. "https://example.com, https://example.org/contact")
+
+    Returns:
+        A summary of unique email addresses found across all URLs, grouped by source.
+    """
+    if not HAS_REQUESTS:
+        return "❌ requests library not installed"
+
+    url_list = [u.strip() for u in urls.split(",") if u.strip()]
+    if not url_list:
+        return "❌ No URLs provided. Pass a comma-separated list of URLs."
+
+    all_results: List[str] = []
+    unique_emails: Dict[str, set] = {}  # url -> set of emails
+    grand_total: set = set()
+
+    for url in url_list:
+        content = fetch(url)
+        if content.startswith("❌"):
+            all_results.append(f"❌ Failed to fetch {url}: {content}")
+            continue
+
+        # Extract emails from raw HTML/text
+        found = set(_EMAIL_RE.findall(content))
+
+        # Filter out common false positives (image paths, svg fragments, etc.)
+        found = {
+            e for e in found
+            if not e.lower().startswith(("png", "jpg", "svg", "gif", "css"))
+            and "." in e.split("@")[1]
+            and len(e.split("@")[1].split(".")) >= 2
+        }
+
+        if found:
+            unique_emails[url] = found
+            grand_total |= found
+            all_results.append(f"📧 {url}\n   Found {len(found)}: {', '.join(sorted(found))}")
+        else:
+            all_results.append(f"📭 {url} — No emails found")
+
+    if not all_results:
+        return "❌ Could not process any URLs"
+
+    summary_lines = [f"📬 Email scan complete — {len(grand_total)} unique email(s) across {len(url_list)} site(s):\n"]
+    summary_lines.extend(all_results)
+
+    if grand_total:
+        summary_lines.append(f"\n✅ All unique emails found: {', '.join(sorted(grand_total))}")
+
+    return "\n".join(summary_lines)
