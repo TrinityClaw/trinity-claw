@@ -51,15 +51,22 @@ PATTERNS_FILE = Path("/app/memory/error_patterns.json")
 # ============================================================================
 
 def _load_lessons() -> List[Dict]:
-    """Load learned lessons from persistent storage"""
+    """Load learned lessons from persistent storage, deduplicating by hash."""
     lessons = []
+    seen_hashes: set = set()
     if LESSONS_FILE.exists():
         try:
             with open(LESSONS_FILE, 'r', encoding='utf-8') as f:
                 for line in f:
                     if line.strip():
                         try:
-                            lessons.append(json.loads(line))
+                            lesson = json.loads(line)
+                            h = lesson.get("hash")
+                            if h:
+                                if h in seen_hashes:
+                                    continue
+                                seen_hashes.add(h)
+                            lessons.append(lesson)
                         except json.JSONDecodeError:
                             continue
         except (IOError, OSError):
@@ -77,9 +84,30 @@ def _save_lesson(lesson: Dict) -> bool:
         print(f"⚠️ Failed to save lesson: {e}")
         return False
 
+# Module-level cache so _load_error_patterns() avoids re-scanning lessons.jsonl
+# on every call. Invalidated when either backing file's mtime changes.
+_patterns_cache: Dict = {"data": None, "patterns_mtime": None, "lessons_mtime": None}
+
+
+def _patterns_cache_valid() -> bool:
+    """Return True if both backing files are unchanged since last load."""
+    if _patterns_cache["data"] is None:
+        return False
+    try:
+        pm = PATTERNS_FILE.stat().st_mtime if PATTERNS_FILE.exists() else None
+        lm = LESSONS_FILE.stat().st_mtime if LESSONS_FILE.exists() else None
+    except OSError:
+        return False
+    return pm == _patterns_cache["patterns_mtime"] and lm == _patterns_cache["lessons_mtime"]
+
+
 def _load_error_patterns() -> Dict:
     """Load recognized error patterns for faster detection.
-    Counts are always recomputed from lessons.jsonl so historical data survives restarts."""
+    Counts are always recomputed from lessons.jsonl so historical data survives restarts.
+    Results are cached by file mtime — repeated calls within the same run are O(1)."""
+    if _patterns_cache_valid():
+        return dict(_patterns_cache["data"])  # shallow copy keeps callers isolated
+
     default_patterns = {
         "bare_except": {"count": 0, "severity": "medium", "fix": "Use 'except SpecificError:'"},
         "missing_docstring": {"count": 0, "severity": "low", "fix": "Add triple-quoted docstring"},
@@ -122,6 +150,14 @@ def _load_error_patterns() -> Dict:
         except (IOError, OSError):
             pass
 
+    # Populate cache before returning
+    try:
+        _patterns_cache["patterns_mtime"] = PATTERNS_FILE.stat().st_mtime if PATTERNS_FILE.exists() else None
+        _patterns_cache["lessons_mtime"] = LESSONS_FILE.stat().st_mtime if LESSONS_FILE.exists() else None
+    except OSError:
+        pass
+    _patterns_cache["data"] = dict(patterns)
+
     return patterns
 
 def _save_error_patterns(patterns: Dict) -> bool:
@@ -146,11 +182,10 @@ def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied
     }
     
     saved = _save_lesson(lesson)
-    patterns = _load_error_patterns()
-    if error_type in patterns:
-        patterns[error_type]["count"] += 1
-        _save_error_patterns(patterns)
-    
+    # Note: no manual count increment needed — _load_error_patterns() always
+    # recomputes counts from lessons.jsonl from scratch, so the new lesson is
+    # reflected automatically on the next call. A manual += 1 here would write
+    # a stale count to error_patterns.json that gets overwritten on next load.
     return f"✅ Recorded lesson: {error_type} in {skill_name}" if saved else "⚠️ Failed to record lesson"
 
 def check_for_learned_fix(skill_name: str, error_type: str) -> Optional[str]:
@@ -174,6 +209,18 @@ class CodeAnalyzer(ast.NodeVisitor):
         self.skill = skill_name
         self.issues: List[Dict] = []
         self.patterns = _load_error_patterns()
+        # Pre-compute lines that contain f-string expressions so visit_Constant
+        # can skip Constant fragments that are embedded in JoinedStr nodes.
+        # Those fragments look like path suffixes but aren't hardcoded paths.
+        try:
+            tree = ast.parse(source_code)
+            self._fstring_lines: set = {
+                node.lineno
+                for node in ast.walk(tree)
+                if isinstance(node, ast.JoinedStr)
+            }
+        except SyntaxError:
+            self._fstring_lines = set()
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         """Flag bare except clauses that swallow all exceptions."""
@@ -245,6 +292,12 @@ class CodeAnalyzer(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> None:
         """Flag string constants that look like hardcoded absolute file paths."""
         if not isinstance(node.value, str):
+            self.generic_visit(node)
+            return
+
+        # Skip constants that are fragments inside an f-string — they are not
+        # hardcoded paths, the runtime value is dynamic.
+        if node.lineno in self._fstring_lines:
             self.generic_visit(node)
             return
 
@@ -365,7 +418,13 @@ def generate_patch(skill_name: str, issue_type: str, issue_line: int) -> Dict:
             if original_line.rstrip().endswith(')'):
                 fix_applied = original_line.rstrip()[:-1] + ', timeout=30)'
             else:
-                fix_applied = original_line + ', timeout=30'
+                # Call spans multiple lines — patching a single line would break syntax
+                return {
+                    "note": "Multi-line requests call: add timeout= manually to the closing parenthesis",
+                    "manual_review_required": True,
+                    "original_line": original_line.strip(),
+                    "requires_review": True,
+                }
     
     elif issue_type == "hardcoded_path":
         # FIX: Extract expression to avoid backslash in f-string (Python 3.12+)
@@ -600,9 +659,16 @@ def _call_llm_verdict(prompt: str) -> str:
             "stream": False,
             "options": {"temperature": 0.0, "num_predict": 512},
         }
-        resp = _requests.post(f"{ollama_base}/api/chat", json=payload, timeout=60)
-        resp.raise_for_status()
-        return resp.json().get("message", {}).get("content", "")
+        try:
+            resp = _requests.post(f"{ollama_base}/api/chat", json=payload, timeout=60)
+            resp.raise_for_status()
+            return resp.json().get("message", {}).get("content", "")
+        except _requests.exceptions.Timeout:
+            raise RuntimeError(f"Ollama timed out after 60s ({ollama_base})")
+        except _requests.exceptions.ConnectionError as e:
+            raise RuntimeError(f"Ollama unreachable at {ollama_base}: {e}")
+        except _requests.exceptions.HTTPError as e:
+            raise RuntimeError(f"Ollama returned HTTP {e.response.status_code}: {e}")
     else:
         litellm_base = os.getenv("LITELLM_API_BASE", "http://litellm:4000")
         api_key = os.getenv("LITELLM_MASTER_KEY", "")
@@ -615,14 +681,21 @@ def _call_llm_verdict(prompt: str) -> str:
             "temperature": 0.0,
             "max_tokens": 512,
         }
-        resp = _requests.post(
-            f"{litellm_base}/v1/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        try:
+            resp = _requests.post(
+                f"{litellm_base}/v1/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except _requests.exceptions.Timeout:
+            raise RuntimeError(f"LiteLLM timed out after 60s ({litellm_base})")
+        except _requests.exceptions.ConnectionError as e:
+            raise RuntimeError(f"LiteLLM unreachable at {litellm_base}: {e}")
+        except _requests.exceptions.HTTPError as e:
+            raise RuntimeError(f"LiteLLM returned HTTP {e.response.status_code}: {e}")
 
 
 def _verdict_check(skill_name: str, source: str) -> str:
@@ -635,7 +708,7 @@ def _verdict_check(skill_name: str, source: str) -> str:
     - FAIL = would raise on the happy path
     - PASS = traced execution returns expected result
     """
-    source_preview = source[:4000] + ("\n... [truncated]" if len(source) > 4000 else "")
+    source_preview = source[:8000] + ("\n... [truncated]" if len(source) > 8000 else "")
     prompt = f"""You are a strict verification agent for Python skill modules.
 
 TASK: Verify that skill '{skill_name}' is functionally correct.
@@ -717,9 +790,9 @@ def verify_skill(skill_name: str) -> str:
         )
 
     issues = []
-    if "NAME = " not in source:
+    if not re.search(r'^NAME\s*=', source, re.MULTILINE):
         issues.append("missing NAME metadata")
-    if "DOC = " not in source:
+    if not re.search(r'^DOC\s*=', source, re.MULTILINE):
         issues.append("missing DOC metadata")
 
     if issues:
@@ -893,10 +966,16 @@ def daily_review(skill_name: str = "") -> str:
     # ── 3. Load lessons from the last 7 days ──────────────────────────────────
     lessons = _load_lessons()
     cutoff = datetime.now() - timedelta(days=7)
-    recent_lessons = [
-        l for l in lessons
-        if l.get("timestamp") and datetime.fromisoformat(l["timestamp"]) >= cutoff
-    ]
+    recent_lessons = []
+    for l in lessons:
+        ts = l.get("timestamp")
+        if not ts:
+            continue
+        try:
+            if datetime.fromisoformat(ts) >= cutoff:
+                recent_lessons.append(l)
+        except (ValueError, TypeError):
+            continue  # skip lessons with malformed timestamps
 
     # Count recurring error types in recent lessons
     recurring: Dict[str, int] = {}
@@ -1005,6 +1084,7 @@ improve = fix
 __all__ = [
     "NAME",
     "DOC",
+    # Primary user-facing functions
     "audit",
     "fix",
     "verify_skill",
@@ -1014,6 +1094,14 @@ __all__ = [
     "suggest_tests",
     "learn_from_feedback",
     "status",
+    # Aliases
     "analyze",
     "improve",
+    # Lower-level functions callable by agents
+    "record_mistake",
+    "check_for_learned_fix",
+    "generate_patch",
+    "apply_patch",
+    "get_skill_health_report",
+    "analyze_skill_code",
 ]
