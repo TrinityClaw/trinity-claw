@@ -42,6 +42,8 @@ Rules:
 
 **AFTER EVERY SKILL CALL — MANDATORY:** Always reply with a plain-text summary of what the skill returned before doing anything else. Even if the result is empty or failed, tell the user what happened in plain text. Never silently retry or call another skill to "fix" a result without first reporting the outcome.
 
+**NEVER OUTPUT RAW HTML/CSS/JS:** If a skill returns raw HTML, CSS, or JavaScript, you MUST process or summarize it — never paste it into the chat. The user cannot read raw markup. Extract the useful information and present it in plain text.
+
 **MULTI-STEP WEB TASKS:** When asked to fetch emails (or any data) from a list page, always work in two explicit steps:
 1. `web.fetch(list_url)` or `web.scrape_links(list_url)` → extract the individual target URLs from the page
 2. Report the extracted URLs to the user, then call `web.find_emails(url1, url2, ...)` on those target URLs — NOT on the list page itself.
