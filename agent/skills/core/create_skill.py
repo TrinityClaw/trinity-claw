@@ -1,5 +1,6 @@
 import os
 import ast
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -15,6 +16,7 @@ DOC = (
 
 # Path mapping for Docker environment
 SKILLS_DIR = Path("/app/skills/dynamic").resolve()
+CORE_SKILLS_DIR = Path("/app/skills/core").resolve()
 
 # Max chars for SHORT_DOC before it inflates the skills_doc line noticeably
 _SHORT_DOC_LIMIT = 120
@@ -111,13 +113,13 @@ def create_new_skill(skill_filename: str, code: str) -> str:
         filename = os.path.basename(skill_filename.split('\n')[0].strip())
         if not filename.endswith(".py"):
             filename += ".py"
-        
+
         file_path = (SKILLS_DIR / filename).resolve()
-        
+
         # Security: Prevent path traversal (writing outside the sandbox)
         if not str(file_path).startswith(str(SKILLS_DIR)):
             return "❌ ACCESS DENIED: Cannot write outside /app/skills/dynamic"
-        
+
         # 2. Pre-sanitize common LLM Unicode artifacts that break Python syntax
         _UNICODE_FIXES = [
             ("\u2014", "-"),   # em dash — → -
@@ -132,10 +134,10 @@ def create_new_skill(skill_filename: str, code: str) -> str:
         for bad_char, replacement in _UNICODE_FIXES:
             code = code.replace(bad_char, replacement)
 
-        # 2b. Structural Code Audit
+        # 2b. Parse once — reused for all subsequent AST analysis
         try:
             print(f"🛠️ [DEBUG] create_skill.py: Parsing code (first 100 chars): {repr(code[:100])}")
-            ast.parse(code)
+            tree = ast.parse(code)
         except SyntaxError as e:
             print(f"❌ [DEBUG] create_skill.py: SyntaxError: {e}")
             # Show the actual broken line to help the LLM self-correct
@@ -158,6 +160,8 @@ def create_new_skill(skill_filename: str, code: str) -> str:
         # Text patterns blocked regardless of import aliasing
         # NOTE: os is NOT fully blocked — os.path.* is legitimate.
         #       Only the dangerous os sub-APIs are blocked below.
+        # NOTE: text-pattern matching can be bypassed via getattr/string concat.
+        #       This is a known limitation; the Docker sandbox is the primary safety net.
         _BLOCKED_PATTERNS = [
             ("__import__",            "__import__() call"),
             ("importlib.import_module", "dynamic importlib import"),
@@ -171,68 +175,47 @@ def create_new_skill(skill_filename: str, code: str) -> str:
             ("os.chmod",              "os.chmod() permission change"),
             ("os.chown",              "os.chown() ownership change"),
         ]
-        try:
-            tree = ast.parse(code)
-            for node in ast.walk(tree):
-                # Block dangerous imports
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        root = alias.name.split(".")[0]
-                        if root in _BLOCKED_IMPORTS:
-                            return f"❌ BLOCKED: Import of '{alias.name}' is not allowed in dynamic skills."
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module:
-                        root = node.module.split(".")[0]
-                        if root in _BLOCKED_IMPORTS:
-                            return f"❌ BLOCKED: Import of '{node.module}' is not allowed in dynamic skills."
-                # AST-exact check for eval/exec builtins (avoids false positives on execute(), etc.)
-                elif isinstance(node, ast.Call):
-                    func = node.func
-                    if isinstance(func, ast.Name) and func.id in ("eval", "exec"):
-                        return f"❌ BLOCKED: '{func.id}()' builtin is not allowed in dynamic skills."
-        except SyntaxError:
-            pass  # Already caught above
+        for node in ast.walk(tree):
+            # Block dangerous imports
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root in _BLOCKED_IMPORTS:
+                        return f"❌ BLOCKED: Import of '{alias.name}' is not allowed in dynamic skills."
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    root = node.module.split(".")[0]
+                    if root in _BLOCKED_IMPORTS:
+                        return f"❌ BLOCKED: Import of '{node.module}' is not allowed in dynamic skills."
+            # AST-exact check for eval/exec builtins (avoids false positives on execute(), etc.)
+            elif isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id in ("eval", "exec"):
+                    return f"❌ BLOCKED: '{func.id}()' builtin is not allowed in dynamic skills."
 
         # Block dangerous os sub-APIs by source text scan
         for pattern, label in _BLOCKED_PATTERNS:
             if pattern in code:
                 return f"❌ BLOCKED: '{label}' is not allowed in dynamic skills."
 
-        # 2c. Token hygiene audit — runs on the already-parsed tree from step 2b
-        _audit_tree = ast.parse(code)
-        _skill_stem = os.path.splitext(os.path.basename(skill_filename.split('\n')[0].strip()))[0]
-        _audit_errors, _audit_warnings, _token_report = _audit_skill_tokens(_skill_stem, _audit_tree)
+        # 2c. Token hygiene audit — reuses the already-parsed tree
+        _skill_stem = os.path.splitext(filename)[0]
+        _audit_errors, _audit_warnings, _token_report = _audit_skill_tokens(_skill_stem, tree)
         if _audit_errors:
             return "❌ TOKEN HYGIENE REJECTED:\n" + "\n\n".join(_audit_errors)
 
         # 3. Protect System Integrity — all core skills are read-only
-        protected = {
-            "__init__.py",
-            "create_skill.py",
-            "code_executor.py",
-            "dashboard.py",
-            "data_science.py",
-            "document_parser.py",
-            "email_sender.py",
-            "files.py",
-            "git_manager.py",
-            "image_viewer.py",
-            "notes.py",
-            "terminal.py",
-            "scheduler.py",
-            "self_improvement.py",
-            "sys.py",
-            "telegram_bot.py",
-            "url_monitor.py",
-            "web.py",
-            "web_builder.py",
-        }
+        # Scanned dynamically so the list stays accurate as skills are added/removed.
+        try:
+            protected = {p.name for p in CORE_SKILLS_DIR.glob("*.py")} | {"__init__.py", "create_skill.py"}
+        except Exception:
+            protected = {"__init__.py", "create_skill.py"}
         if filename in protected:
             return f"❌ ACCESS DENIED: '{filename}' is a core system file and cannot be modified."
 
         # 4. Ensure Directory Exists
         SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-        
+
         # 5. Physical Write & Verification
         file_path.write_text(code, encoding='utf-8')
 
@@ -243,16 +226,12 @@ def create_new_skill(skill_filename: str, code: str) -> str:
         file_size = file_path.stat().st_size
 
         # 6. Extract public function names so the agent knows what to call
+        # Reuses the already-parsed tree — no re-parse needed.
         skill_name = filename[:-3]
-        funcs = []
-        try:
-            _final_tree = ast.parse(code)
-            funcs = [
-                node.name for node in ast.walk(_final_tree)
-                if isinstance(node, ast.FunctionDef) and not node.name.startswith('_')
-            ]
-        except Exception:
-            pass
+        funcs = [
+            node.name for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and not node.name.startswith('_')
+        ]
 
         # 7. Auto-reload so the skill is immediately usable (no separate reload step)
         reload_result = reload()
@@ -280,14 +259,26 @@ def create_new_skill(skill_filename: str, code: str) -> str:
 
 def reload() -> str:
     """Reload all skills. Call this when the user asks to activate a skill they moved to core/."""
-    try:
-        req = urllib.request.Request(
-            "http://localhost:8001/skills/reload",
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return "✅ Skills reloaded — all skills in core/ and dynamic/ are now active."
-    except urllib.error.URLError as e:
-        return f"⚠️ Could not reach reload endpoint: {e.reason}. Ask user to restart the agent container."
-    except Exception as e:
-        return f"⚠️ Reload failed: {str(e)}"
+    req = urllib.request.Request(
+        "http://localhost:8001/skills/reload",
+        method="POST"
+    )
+    last_err = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = resp.read().decode("utf-8", errors="replace").strip()
+                if body:
+                    return f"✅ Skills reloaded — {body}"
+                return "✅ Skills reloaded — all skills in core/ and dynamic/ are now active."
+        except urllib.error.HTTPError as e:
+            # Non-transient server error — don't retry
+            body = e.read().decode("utf-8", errors="replace").strip()
+            return f"⚠️ Reload endpoint returned HTTP {e.code}: {body or e.reason}"
+        except urllib.error.URLError as e:
+            last_err = str(e.reason)
+        except Exception as e:
+            last_err = str(e)
+        if attempt == 0:
+            time.sleep(1)
+    return f"⚠️ Could not reach reload endpoint: {last_err}. Ask user to restart the agent container."
