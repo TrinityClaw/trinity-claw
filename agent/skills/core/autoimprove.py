@@ -289,7 +289,7 @@ def park_idea(idea: str, source: str = "") -> str:
 
     import hashlib as _hashlib
     import uuid as _uuid
-    idea_hash = _hashlib.md5(idea.encode()).hexdigest()[:12]
+    idea_hash = _hashlib.sha256(idea.encode()).hexdigest()[:12]
 
     ideas = _load_ideas()
     for existing in ideas:
@@ -435,40 +435,43 @@ def _call_llm_simple(prompt: str, max_tokens: int = 256) -> str:
         return ""
 
     model_source = os.getenv("MODEL_SOURCE", "cloud")
-    try:
-        if model_source == "local":
-            base    = os.getenv("OLLAMA_API_BASE", "http://ollama:11434")
-            model   = os.getenv("OLLAMA_MODEL", "llama3.2")
-            payload = {
-                "model":   model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream":  False,
-                "options": {"temperature": 0.0, "num_predict": max_tokens},
-            }
-            resp = _req.post(f"{base}/api/chat", json=payload, timeout=30)
-            resp.raise_for_status()
-            return resp.json().get("message", {}).get("content", "").strip()
-        else:
-            base    = os.getenv("LITELLM_API_BASE", "http://litellm:4000")
-            api_key = os.getenv("LITELLM_MASTER_KEY", "")
-            model   = os.getenv("DEFAULT_MODEL", "trinity-default")
-            headers = {"Authorization": f"Bearer {api_key}"}
-            payload = {
-                "model":       model,
-                "messages":    [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "max_tokens":  max_tokens,
-            }
-            resp = _req.post(
-                f"{base}/v1/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return ""
+    for attempt in range(2):
+        try:
+            if model_source == "local":
+                base    = os.getenv("OLLAMA_API_BASE", "http://ollama:11434")
+                model   = os.getenv("OLLAMA_MODEL", "llama3.2")
+                payload = {
+                    "model":   model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream":  False,
+                    "options": {"temperature": 0.0, "num_predict": max_tokens},
+                }
+                resp = _req.post(f"{base}/api/chat", json=payload, timeout=30)
+                resp.raise_for_status()
+                return resp.json().get("message", {}).get("content", "").strip()
+            else:
+                base    = os.getenv("LITELLM_API_BASE", "http://litellm:4000")
+                api_key = os.getenv("LITELLM_MASTER_KEY", "")
+                model   = os.getenv("DEFAULT_MODEL", "trinity-default")
+                headers = {"Authorization": f"Bearer {api_key}"}
+                payload = {
+                    "model":       model,
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                    "max_tokens":  max_tokens,
+                }
+                resp = _req.post(
+                    f"{base}/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception:
+            if attempt == 0:
+                time.sleep(1)
+    return ""
 
 
 # ── Research loop constants ────────────────────────────────────────────────────
@@ -616,6 +619,13 @@ def _refine_query(
                 }
                 if base_terms & refined_terms:
                     return refined
+                # LLM drifted off-topic — log so degradation is visible over time
+                _log({
+                    "timestamp": datetime.now().isoformat(),
+                    "event": "llm_query_drift",
+                    "base_query": base_query,
+                    "discarded_refinement": refined,
+                })
 
     # Fallback: mechanical keyword append (original behaviour)
     if missing:
@@ -659,7 +669,8 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
 
     # Coerce types — Trinity dispatcher passes all args as strings
     depth = str(depth).strip().lower()
-    save  = str(save).strip().lower() not in ("false", "0", "no", "")
+    _save_raw = str(save).strip().lower()
+    save = True if _save_raw == "" else _save_raw not in ("false", "0", "no")
 
     if max_iterations is not None and str(max_iterations).strip().lower() not in ("none", "null", ""):
         max_iters = int(str(max_iterations).strip())
@@ -1284,11 +1295,17 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     except ImportError as e:
         return f"❌ dependency missing — {e}"
 
-    # Snapshot
+    # Snapshot — persisted to disk so a mid-run crash leaves the original recoverable
     try:
         original_code = skill_path.read_text(encoding="utf-8")
     except Exception as e:
         return f"❌ Cannot read {skill_name}.py — {e}"
+
+    backup_path = skill_path.with_suffix(".py.bak")
+    try:
+        backup_path.write_text(original_code, encoding="utf-8")
+    except Exception as e:
+        return f"❌ Cannot write backup for {skill_name}.py — {e}"
 
     # Pre-audit for baseline
     before = si.analyze_skill_code(skill_name)
@@ -1301,6 +1318,7 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     after = si.analyze_skill_code(skill_name)
     if after.get("error"):
         skill_path.write_text(original_code, encoding="utf-8")
+        backup_path.unlink(missing_ok=True)
         suggestions[match_idx]["status"] = "failed"
         suggestions[match_idx]["applied_at"] = datetime.now().isoformat()
         suggestions[match_idx]["fail_reason"] = f"syntax error: {after['error']}"
@@ -1323,6 +1341,7 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
 
     if not test_passed:
         skill_path.write_text(original_code, encoding="utf-8")
+        backup_path.unlink(missing_ok=True)
         suggestions[match_idx]["status"]     = "failed"
         suggestions[match_idx]["applied_at"] = timestamp
         suggestions[match_idx]["fail_reason"] = f"runtime test failed: {test_result[:150]}"
@@ -1335,6 +1354,7 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
         return f"❌ FAILED: runtime test failed — core file restored\n{test_result[:200]}"
 
     # Success
+    backup_path.unlink(missing_ok=True)
     issues_fixed = match.get("occurrences", "?")
     suggestions[match_idx]["status"]     = "applied"
     suggestions[match_idx]["applied_at"] = timestamp
@@ -2690,6 +2710,12 @@ __all__ = [
     "suggest_core",
     "list_suggestions",
     "apply_suggestion",
+    "lessons_to_proposals",
+    "list_proposals",
+    "park_idea",
+    "list_ideas",
+    "dismiss_idea",
+    "loop_roi",
     "schedule_nightly",
     "report",
     "status",
