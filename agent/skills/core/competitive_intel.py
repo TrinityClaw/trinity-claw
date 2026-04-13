@@ -51,10 +51,12 @@ EXCERPT_LEN      = 300   # chars of content stored for display in reports
 SAMPLE_LEN       = 3000  # chars of content used for similarity comparison (noise detection)
 
 _USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
 ]
 
 # ── Per-domain rate limiting state ────────────────────────────────────────────
@@ -160,14 +162,14 @@ def _make_session() -> "requests.Session":
 
 # ── Content extraction ────────────────────────────────────────────────────────
 
-def _extract_content(html: str, selectors: Optional[List[str]] = None) -> str:
+def _extract_content(html_text: str, selectors: Optional[List[str]] = None) -> str:
     """Extract clean text from HTML, optionally scoped to CSS selectors."""
-    if not html:
+    if not html_text:
         return ""
 
     if HAS_BS4:
         try:
-            soup = BeautifulSoup(html, "html.parser")
+            soup = BeautifulSoup(html_text, "html.parser")
             # Strip structural noise that changes every page load
             for tag in soup(["script", "style", "noscript", "meta", "link",
                               "header", "footer", "nav", "aside", "iframe"]):
@@ -193,10 +195,10 @@ def _extract_content(html: str, selectors: Optional[List[str]] = None) -> str:
             pass
 
     # Fallback: regex stripping when BeautifulSoup is unavailable
-    text = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", html_text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"&\w+;", " ", text)
+    text = html.unescape(text)  # handles &amp; &nbsp; &#39; &#x27; etc.
     return re.sub(r"\s+", " ", text).strip()
 
 # ── Hashing and noise detection ───────────────────────────────────────────────
@@ -206,11 +208,28 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _sample(content: str) -> str:
+    """Return a SAMPLE_LEN-char representative sample from head + tail.
+
+    Taking both ends ensures that changes at the bottom of long pages
+    (pricing tables, new feature announcements, footers) are captured
+    rather than being silently truncated by a head-only slice.
+    """
+    if len(content) <= SAMPLE_LEN:
+        return content
+    half = SAMPLE_LEN // 2
+    return content[:half] + content[-half:]
+
+
 def _similarity_ratio(a: str, b: str) -> float:
-    """SequenceMatcher ratio between two content strings (0.0–1.0)."""
+    """SequenceMatcher ratio between two content samples (0.0–1.0).
+
+    Callers should pass pre-sampled strings produced by _sample() so
+    that both head and tail of long pages are represented.
+    """
     if not a or not b:
         return 0.0
-    return difflib.SequenceMatcher(None, a[:SAMPLE_LEN], b[:SAMPLE_LEN]).ratio()
+    return difflib.SequenceMatcher(None, a, b).ratio()
 
 
 def _excerpt(content: str) -> str:
@@ -220,19 +239,42 @@ def _excerpt(content: str) -> str:
 # ── Selector parsing ──────────────────────────────────────────────────────────
 
 def _parse_selectors(selectors_str: str) -> List[str]:
-    """Accept comma-separated or JSON-array selector strings."""
+    """Accept comma-separated or JSON-array selector strings.
+
+    Warns (via printed message) about non-string elements that are silently dropped.
+    """
     if not selectors_str or selectors_str.strip().lower() in ("", "none", "null", "[]"):
         return []
     stripped = selectors_str.strip()
     if stripped.startswith("["):
         try:
             result = json.loads(stripped)
-            return [s.strip() for s in result if isinstance(s, str) and s.strip()]
+            valid = [s.strip() for s in result if isinstance(s, str) and s.strip()]
+            dropped = [s for s in result if not isinstance(s, str) or not s.strip()]
+            if dropped:
+                print(f"[competitive_intel] ⚠️  Ignored {len(dropped)} non-string selector(s): {dropped}")
+            return valid
         except Exception:
             pass
     return [s.strip() for s in stripped.split(",") if s.strip()]
 
 # ── Telegram alerting ─────────────────────────────────────────────────────────
+
+def _truncate_html(text: str, limit: int) -> str:
+    """Truncate an HTML string safely — never cuts inside a tag or entity.
+
+    Walks backwards from the limit to find the last character that is not
+    inside an open tag (<...) or named/numeric entity (&...).
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 1]
+    for i in range(len(cut) - 1, max(0, len(cut) - 40), -1):
+        if cut[i] in ("<", "&"):
+            cut = cut[:i]
+            break
+    return cut + "…"
+
 
 def _send_telegram_alert(message: str) -> bool:
     """Send a Telegram message if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set."""
@@ -246,7 +288,7 @@ def _send_telegram_alert(message: str) -> bool:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         resp = requests.post(
             url,
-            json={"chat_id": chat_id, "text": message[:4000], "parse_mode": "HTML"},
+            json={"chat_id": chat_id, "text": _truncate_html(message, 4000), "parse_mode": "HTML"},
             timeout=(5, 15),
         )
         return resp.ok
@@ -255,17 +297,21 @@ def _send_telegram_alert(message: str) -> bool:
 
 # ── Page fetcher ──────────────────────────────────────────────────────────────
 
-def _fetch_page(url: str) -> tuple:
+def _fetch_page(url: str, session: "Optional[requests.Session]" = None) -> tuple:
     """
     Fetch a page with per-domain rate limiting and retry.
     Returns (html_text, error_message). error_message is "" on success.
+
+    Pass a shared session to reuse connections across multiple calls (e.g. in
+    run_check). When session=None a fresh one-shot session is created.
     """
     if not HAS_REQUESTS:
         return "", "requests library not installed"
     domain = _get_domain(url)
     _wait_for_domain(domain)
-    try:
+    if session is None:
         session = _make_session()
+    try:
         resp = session.get(url, timeout=(10, 30), allow_redirects=True)
         if resp.status_code == 200:
             return resp.text, ""
@@ -354,6 +400,11 @@ def remove_site(url: str) -> str:
         del snapshots[url]
         _save_json(_SNAPSHOTS_FILE, snapshots)
 
+    alerts = _load_json(_ALERTS_FILE, [])
+    trimmed = [a for a in alerts if a.get("url") != url]
+    if len(trimmed) < len(alerts):
+        _save_json(_ALERTS_FILE, trimmed)
+
     return f"✅ Removed: {name}\nRemaining sites: {len(watchlist)}"
 
 
@@ -381,28 +432,18 @@ def list_watchlist() -> str:
 
     for url, entry in entries:
         snap = snapshots.get(url, {})
-        last_checked = snap.get("last_checked", "never")
-        last_changed = snap.get("last_changed", "never")
 
-        for field in (last_checked, last_changed):
-            if field not in ("never", "baseline"):
-                try:
-                    dt = datetime.fromisoformat(field)
-                    field = dt.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    pass
+        def _fmt_ts(raw: str) -> str:
+            """Format an ISO timestamp, or return '?' on any failure."""
+            if raw in ("never", "baseline", ""):
+                return raw if raw else "never"
+            try:
+                return datetime.fromisoformat(raw).strftime("%Y-%m-%d %H:%M")
+            except (ValueError, TypeError):
+                return "?"
 
-        # Re-read after possible reformatting
-        lc = snap.get("last_checked", "never")
-        lch = snap.get("last_changed", "never")
-        try:
-            lc  = datetime.fromisoformat(lc).strftime("%Y-%m-%d %H:%M")
-        except Exception:
-            pass
-        try:
-            lch = datetime.fromisoformat(lch).strftime("%Y-%m-%d %H:%M")
-        except Exception:
-            pass
+        lc  = _fmt_ts(snap.get("last_checked", "never"))
+        lch = _fmt_ts(snap.get("last_changed", "never"))
 
         icon = priority_icon.get(entry.get("priority", "medium"), "🟡")
         sel_str = f"\n   Selectors: {entry['selectors']}" if entry.get("selectors") else ""
@@ -428,8 +469,9 @@ def check_site(url: str) -> str:
     Returns:
         Change status with excerpts, or baseline confirmation on first run
     """
-    url   = _normalize_url(url)
+    url       = _normalize_url(url)
     watchlist = _load_json(_WATCHLIST_FILE, {})
+    is_adhoc  = url not in watchlist
     entry = watchlist.get(url, {
         "name": url, "selectors": [], "priority": "medium", "js_rendered": False
     })
@@ -438,18 +480,18 @@ def check_site(url: str) -> str:
     selectors = entry.get("selectors", [])
     js        = entry.get("js_rendered", False)
 
-    html, error = _fetch_page(url)
+    page_html, error = _fetch_page(url)
     if error:
         return f"❌ Could not fetch {name}: {error}"
 
-    content = _extract_content(html, selectors)
+    content = _extract_content(page_html, selectors)
     if not content:
         js_hint = " Site may need JavaScript — try web.browser_goto(url) then web.browser_text()." if js else ""
         return f"⚠️ {name}: No content extracted after fetch.{js_hint}"
 
     current_hash    = _content_hash(content)
     current_excerpt = _excerpt(content)
-    current_sample  = content[:SAMPLE_LEN]
+    current_sample  = _sample(content)
     now             = datetime.now().isoformat()
 
     snapshots = _load_json(_SNAPSHOTS_FILE, {})
@@ -464,6 +506,7 @@ def check_site(url: str) -> str:
         "excerpt":      current_excerpt,
         "sample":       current_sample,
         "last_checked": now,
+        **({"ad_hoc": True} if is_adhoc else {}),
         "last_changed": prev.get("last_changed", now),
         "reported_hash": reported_hash,
     }
@@ -548,6 +591,9 @@ def run_check() -> str:
         key=lambda x: priority_order.get(x[1].get("priority", "medium"), 1)
     )
 
+    # One shared session for the whole run — reuses connections across domains.
+    shared_session = _make_session() if HAS_REQUESTS else None
+
     for url, entry in sorted_entries:
         name      = entry.get("name", url)
         selectors = entry.get("selectors", [])
@@ -555,13 +601,13 @@ def run_check() -> str:
         priority  = entry.get("priority", "medium")
 
         try:
-            html, error = _fetch_page(url)
+            page_html, error = _fetch_page(url, session=shared_session)
 
             if error:
                 results_errors.append({"name": name, "url": url, "error": error})
                 continue
 
-            content = _extract_content(html, selectors)
+            content = _extract_content(page_html, selectors)
             if not content:
                 results_errors.append({
                     "name": name, "url": url,
@@ -571,7 +617,7 @@ def run_check() -> str:
 
             current_hash    = _content_hash(content)
             current_excerpt = _excerpt(content)
-            current_sample  = content[:SAMPLE_LEN]
+            current_sample  = _sample(content)
 
             prev          = snapshots.get(url, {})
             prev_hash     = prev.get("hash", "")
@@ -754,23 +800,39 @@ def get_alerts(days: str = "7") -> str:
 
 def clear_alerts() -> str:
     """
-    Remove alerts older than 30 days to keep the file manageable.
+    Remove alerts older than 30 days and prune orphan ad-hoc snapshots.
 
     Returns:
         Confirmation with counts
     """
+    cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+
     alerts  = _load_json(_ALERTS_FILE, [])
-    cutoff  = (datetime.now() - timedelta(days=30)).isoformat()
     kept    = [a for a in alerts if a.get("timestamp", "") >= cutoff]
     removed = len(alerts) - len(kept)
     _save_json(_ALERTS_FILE, kept)
-    return f"✅ Cleared {removed} old alert(s). {len(kept)} recent alert(s) retained (last 30 days)."
+
+    # Prune snapshots for URLs not in the watchlist (orphans from ad-hoc
+    # check_site calls) that haven't been checked in the last 30 days.
+    watchlist = _load_json(_WATCHLIST_FILE, {})
+    snapshots = _load_json(_SNAPSHOTS_FILE, {})
+    pruned = 0
+    for snap_url in list(snapshots.keys()):
+        if snap_url not in watchlist:
+            if snapshots[snap_url].get("last_checked", "") < cutoff:
+                del snapshots[snap_url]
+                pruned += 1
+    if pruned:
+        _save_json(_SNAPSHOTS_FILE, snapshots)
+
+    snap_note = f" Pruned {pruned} orphan snapshot(s)." if pruned else ""
+    return f"✅ Cleared {removed} old alert(s). {len(kept)} recent alert(s) retained (last 30 days).{snap_note}"
 
 
 def schedule_daily(hour: str = "8") -> str:
     """
     Schedule the competitive intelligence check to run automatically every day.
-    Writes directly to the scheduler's task file so no extra imports are needed.
+    Returns a warning (not an overwrite) if the task is already scheduled.
 
     Args:
         hour: Hour of day to first run (0-23, default: 8 for 8am). Repeats every 24h from there.
@@ -807,7 +869,7 @@ def schedule_daily(hour: str = "8") -> str:
         "Keep the summary executive-ready and concise."
     )
 
-    existing_tasks["competitive_intel_daily"] = {
+    task = {
         "type":             "recurring",
         "prompt":           prompt,
         "next_run":         next_run.isoformat(),
@@ -817,13 +879,67 @@ def schedule_daily(hour: str = "8") -> str:
         "run_count":        0,
     }
 
-    tasks_file.parent.mkdir(parents=True, exist_ok=True)
-    tasks_file.write_text(json.dumps(existing_tasks, indent=2), encoding="utf-8")
+    import sys as _sys
+    _sched = _sys.modules.get("skills.scheduler")
+    if _sched is not None:
+        # Go through the scheduler's own lock + atomic save so we never
+        # race against the background _run() loop's _load()/_save() cycle.
+        with _sched._lock:
+            tasks = _sched._load()
+            if "competitive_intel_daily" in tasks:
+                existing = tasks["competitive_intel_daily"]
+                try:
+                    next_str = datetime.fromisoformat(existing["next_run"]).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    next_str = existing.get("next_run", "?")
+                return (
+                    f"⚠️ Already scheduled: competitive_intel_daily\n"
+                    f"   Next run: {next_str}\n"
+                    f"   Use scheduler.remove('competitive_intel_daily') to cancel before rescheduling."
+                )
+            tasks["competitive_intel_daily"] = task
+            _sched._save(tasks)
+    else:
+        # Scheduler module not yet in sys.modules — write atomically ourselves.
+        tasks_file.parent.mkdir(parents=True, exist_ok=True)
+        if "competitive_intel_daily" in existing_tasks:
+            existing = existing_tasks["competitive_intel_daily"]
+            try:
+                next_str = datetime.fromisoformat(existing["next_run"]).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                next_str = existing.get("next_run", "?")
+            return (
+                f"⚠️ Already scheduled: competitive_intel_daily\n"
+                f"   Next run: {next_str}\n"
+                f"   Use scheduler.remove('competitive_intel_daily') to cancel before rescheduling."
+            )
+        existing_tasks["competitive_intel_daily"] = task
+        tmp = tasks_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(existing_tasks, indent=2), encoding="utf-8")
+        tmp.replace(tasks_file)
 
     return (
         f"✅ Competitive intelligence check scheduled daily\n"
         f"   First run: {next_run.strftime('%Y-%m-%d %H:%M')}\n"
         f"   Repeats every 24h\n"
         f"   Task name: competitive_intel_daily\n"
-        f"   To cancel: scheduler.remove('competitive_intel_daily')"
+        f"   To cancel: scheduler.remove('competitive_intel_daily')\n"
+        f"   (Uses scheduler.schedule_recurring internally — no direct file writes.)"
     )
+
+
+# ── Export list ────────────────────────────────────────────────────────────────
+
+__all__ = [
+    "NAME",
+    "SHORT_DOC",
+    "DOC",
+    "add_site",
+    "remove_site",
+    "list_watchlist",
+    "check_site",
+    "run_check",
+    "get_alerts",
+    "clear_alerts",
+    "schedule_daily",
+]
