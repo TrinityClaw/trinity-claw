@@ -1,4 +1,5 @@
 # scheduler.py
+import concurrent.futures
 import json
 import os
 import re
@@ -25,7 +26,7 @@ DOC = (
 
 __all__ = [
     "schedule", "schedule_recurring", "remove", "list_tasks",
-    "get_task", "edit_task_prompt", "clear", "status",
+    "get_task", "edit_task_prompt", "clear", "status", "stop",
     "get_activity_log", "get_task_report", "parse_preview", "help_schedule",
 ]
 
@@ -83,9 +84,11 @@ def _load() -> dict:
 
 
 def _save(tasks: dict):
-    """Persist the scheduled tasks dict to disk."""
+    """Persist the scheduled tasks dict to disk (atomic write via temp+replace)."""
     _TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _TASKS_FILE.write_text(json.dumps(tasks, indent=2, default=str))
+    tmp = _TASKS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(tasks, indent=2))
+    tmp.replace(_TASKS_FILE)
 
 
 # ── Time Parsing ──────────────────────────────────────────────────────────────
@@ -164,12 +167,18 @@ def _parse_when(when_str: str) -> datetime:
             candidate += timedelta(days=1)
         return candidate
 
-    # ISO / structured date string fallback (uses python-dateutil if available)
+    # ISO / structured date string fallback — requires python-dateutil.
+    # Separate ImportError from parse errors so a missing package doesn't
+    # silently swallow the "really couldn't parse" case.
     try:
         from dateutil import parser as dparser
-        return dparser.parse(when_str, default=now)
-    except Exception:
-        pass
+    except ImportError:
+        dparser = None  # optional dependency; skip fallback
+    if dparser is not None:
+        try:
+            return dparser.parse(when_str, default=now)
+        except Exception:
+            pass
 
     raise ValueError(
         f"Cannot parse time expression: '{when_str}'. "
@@ -181,13 +190,13 @@ def _parse_when(when_str: str) -> datetime:
 def _parse_interval(interval_str: str) -> int:
     """
     Parse an interval string to seconds.
-    Examples: '30m', '2h', '1d', 'every 6 hours', '90 minutes', '45s'
+    Examples: '30m', '2h', '1.5h', '1d', 'every 6 hours', '90 minutes', '45s'
     Also handles ranges like '3-4h' or '2-3 hours' by taking the lower bound.
     """
     s = re.sub(r'^every\s+', '', interval_str.strip().lower())
     # Handle range notation like '3-4h' or '2-3 hours' — take the lower bound
     range_m = re.match(
-        r'(\d+)-\d+\s*'
+        r'(\d+(?:\.\d+)?)-\d+(?:\.\d+)?\s*'
         r'(s|sec|secs|second|seconds|'
         r'm|min|mins|minute|minutes|'
         r'h|hr|hrs|hour|hours|'
@@ -197,7 +206,7 @@ def _parse_interval(interval_str: str) -> int:
     if range_m:
         s = range_m.group(1) + range_m.group(2)  # collapse to lower bound
     m = re.match(
-        r'(\d+)\s*'
+        r'(\d+(?:\.\d+)?)\s*'
         r'(s|sec|secs|second|seconds|'
         r'm|min|mins|minute|minutes|'
         r'h|hr|hrs|hour|hours|'
@@ -205,11 +214,11 @@ def _parse_interval(interval_str: str) -> int:
         s
     )
     if m:
-        n, unit = int(m.group(1)), m.group(2)
-        if unit.startswith('s'):  return n
-        if unit.startswith('m'):  return n * 60
-        if unit.startswith('h'):  return n * 3600
-        if unit.startswith('d'):  return n * 86400
+        n, unit = float(m.group(1)), m.group(2)
+        if unit.startswith('s'):  return int(n)
+        if unit.startswith('m'):  return int(n * 60)
+        if unit.startswith('h'):  return int(n * 3600)
+        if unit.startswith('d'):  return int(n * 86400)
     raise ValueError(
         f"Cannot parse interval: '{interval_str}'. "
         "Try: '30m', '2h', '1d', 'every 6 hours', '90 minutes'"
@@ -293,36 +302,56 @@ def _run():
                 tasks = _load()
                 to_fire = []
                 for name, t in tasks.items():
-                    if now >= datetime.fromisoformat(t['next_run']):
-                        to_fire.append((name, t['prompt'], t['type'],
-                                        t.get('interval_seconds')))
+                    try:
+                        if now >= datetime.fromisoformat(t['next_run']):
+                            to_fire.append((name, t['prompt'], t['type'],
+                                            t.get('interval_seconds')))
+                    except (ValueError, KeyError) as e:
+                        print(f"[scheduler] skipping malformed task '{name}': {e}")
 
-            # Phase 2: dispatch outside the lock (can take up to 1800 s each)
+            # Phase 2: dispatch concurrently outside the lock
             results = []
-            for name, prompt, kind, interval_secs in to_fire:
-                print(f"[scheduler] firing: {name}")
-                result = _dispatch(prompt, name)
-                print(f"[scheduler] {name} → {result[:80]}")
-                results.append((name, prompt, kind, interval_secs, result))
+            if to_fire:
+                def _fire_one(task_tuple):
+                    name, prompt, kind, interval_secs = task_tuple
+                    fired_at = datetime.now()
+                    _append_activity(f"scheduler:{name}", prompt[:80], "⏳ started")
+                    print(f"[scheduler] firing: {name}")
+                    try:
+                        result = _dispatch(prompt, name)
+                    except Exception as e:
+                        result = f"❌ dispatch exception: {e}"
+                    print(f"[scheduler] {name} → {result[:80]}")
+                    return (name, prompt, kind, interval_secs, fired_at, result)
+
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(to_fire), thread_name_prefix="sched"
+                ) as pool:
+                    for item in pool.map(_fire_one, to_fire):
+                        results.append(item)
 
             # Phase 3: persist results (lock held briefly)
             if results:
                 with _lock:
                     tasks = _load()
-                    for name, prompt, kind, interval_secs, result in results:
+                    for name, prompt, kind, interval_secs, fired_at, result in results:
                         if name not in tasks:
                             continue  # task was removed while we were dispatching
                         t = tasks[name]
-                        t['last_run']    = now.isoformat()
+                        t['last_run']    = fired_at.isoformat()
                         t['last_result'] = result[:200]
                         t['run_count']   = t.get('run_count', 0) + 1
                         _append_activity(f"scheduler:{name}", prompt[:80], result)
                         if kind == 'once':
                             del tasks[name]
                         else:
-                            t['next_run'] = (
-                                now + timedelta(seconds=interval_secs)
-                            ).isoformat()
+                            # Advance from the stored next_run (not dispatch time)
+                            # to preserve schedule alignment (e.g. always at :00).
+                            # Cap to now so next_run is never in the past if
+                            # dispatch exceeded the interval.
+                            prev_next = datetime.fromisoformat(t['next_run'])
+                            ideal = prev_next + timedelta(seconds=interval_secs)
+                            t['next_run'] = max(ideal, datetime.now()).isoformat()
                     _save(tasks)
         except Exception as e:
             print(f"[scheduler] loop error: {e}")
@@ -341,6 +370,12 @@ def _ensure_running():
 
 # Auto-start when skill is imported
 _ensure_running()
+
+
+def stop():
+    """Stop the background scheduler thread (for clean shutdown or tests)."""
+    global _running
+    _running = False
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -466,7 +501,7 @@ def list_tasks() -> str:
             f"  next: {next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)}) | "
             f"runs so far: {t.get('run_count', 0)}\n"
             f"{last_run_str}"
-            f"  prompt: \"{t['prompt'][:80]}{'...' if len(t['prompt']) > 80 else ''}\""
+            f"  prompt: \"{t['prompt'][:80]}{'...' if len(t['prompt']) >= 80 else ''}\""
         )
     return "\n".join(lines)
 
