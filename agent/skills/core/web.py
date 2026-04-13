@@ -32,8 +32,12 @@ DOC = (
     "you MUST first call scrape_links(list_url) — NOT fetch() — to extract the individual site URLs, "
     "then pass those to find_emails. "
     "fetch() returns raw unparseable HTML. scrape_links() returns ready-to-use URLs. Always use scrape_links for URL extraction. "
+    "scrape_links(url, limit=50) — extract links from a page, returns numbered list of text+URL pairs. limit controls how many links to return. "
+    "extract_elements(url='https://...', selector='css') — scrape a URL and extract text from CSS-selected elements. "
+    "   Can also accept raw html_content instead of url. selector defaults to 'body'. "
     "Rate limiting and URL validation built-in. "
     "fetch(url) / get(url) / get_html(url) — all three are aliases that return raw HTML. "
+    "IMPORTANT: Only call public functions listed here. Never call private helpers like __fetch or _normalize_url. "
     "parse_feed(url, limit) — fetch and parse an RSS/Atom feed, returns structured news items."
 )
 
@@ -321,8 +325,17 @@ def scrape(url: str, selector: str = "body") -> str:
         return content
     return extract_elements(content, selector)
 
-def extract_elements(html_content: str, selector: str = "body") -> str:
-    """Return text content of elements matching a CSS selector in the given HTML."""
+def extract_elements(html_content: str = "", selector: str = "body", url: str = "") -> str:
+    """Return text content of elements matching a CSS selector.
+    Pass either html_content (raw HTML string) or url (fetched automatically).
+    selector defaults to 'body' (returns all page text).
+    """
+    if url:
+        html_content = fetch(url)
+        if html_content.startswith("❌"):
+            return html_content
+    if not html_content:
+        return "❌ provide either html_content or url"
     if HAS_BS4:
         soup = BeautifulSoup(html_content, 'html.parser')
         elements = soup.select(selector)
@@ -337,9 +350,10 @@ def extract_elements(html_content: str, selector: str = "body") -> str:
     else:
         return "❌ BeautifulSoup not installed"
 
-def scrape_links(url: str, absolute: bool = True) -> str:
+def scrape_links(url: str, absolute: bool = True, limit: int = 50) -> str:
     """
-    FIXED: Better link extraction with option for absolute URLs
+    Extract all links from a page. Returns a numbered list of text + URL pairs.
+    limit: max number of links to return (default 50).
     """
     content = fetch(url)
     if content.startswith("❌"):
@@ -362,12 +376,12 @@ def scrape_links(url: str, absolute: bool = True) -> str:
         if not links:
             return "No links found on page"
         results = [f"🔗 Found {len(links)} links:\n"]
-        for i, link in enumerate(links[:50], 1):
+        for i, link in enumerate(links[:limit], 1):
             display_text = link['text'] or f"Link {i}"
             results.append(f"{i}. {display_text}")
             results.append(f"   {link['url']}")
         return "\n".join(results)
-    
+
     # BeautifulSoup version - BETTER
     soup = BeautifulSoup(content, 'html.parser')
     links = []
@@ -400,14 +414,14 @@ def scrape_links(url: str, absolute: bool = True) -> str:
     
     if not links:
         return "No links found on page"
-    
+
     # Format results
     results = [f"🔗 Found {len(links)} links:\n"]
-    for i, link in enumerate(links[:50], 1):
+    for i, link in enumerate(links[:limit], 1):
         display_text = link['text'] or link['title'] or f"Link {i}"
         results.append(f"{i}. {display_text}")
         results.append(f"   {link['url']}")
-    
+
     return "\n".join(results)
 
 def scrape_images(url: str, absolute: bool = True) -> str:
