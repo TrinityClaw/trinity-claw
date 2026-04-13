@@ -26,9 +26,14 @@ DOC = (
     "find_and_download_image('sunset beach'). Do NOT search first — this function handles "
     "searching, finding a direct image URL, and downloading in one step. Returns the local path. "
     "find_emails(urls) — ALWAYS use this for email extraction tasks. "
-    "Call it directly with a comma-separated list of URLs, e.g. find_emails('https://example.com, https://example.org'). "
-    "Do NOT scrape or fetch first — this function handles fetching and email extraction in one step. "
+    "Pass a comma-separated list of the ACTUAL TARGET site URLs (not a list/directory page). "
+    "e.g. find_emails('https://example.com, https://example.org'). "
+    "If the user gives you a directory or list page (e.g. BuiltWith, Crunchbase, search results), "
+    "you MUST first call scrape_links(list_url) — NOT fetch() — to extract the individual site URLs, "
+    "then pass those to find_emails. "
+    "fetch() returns raw unparseable HTML. scrape_links() returns ready-to-use URLs. Always use scrape_links for URL extraction. "
     "Rate limiting and URL validation built-in. "
+    "fetch(url) / get(url) / get_html(url) — all three are aliases that return raw HTML. "
     "parse_feed(url, limit) — fetch and parse an RSS/Atom feed, returns structured news items."
 )
 
@@ -245,6 +250,10 @@ def fetch(url: str, timeout: int = 30) -> str:
         return f"❌ Error: {str(e)}"
 
 def get(url: str) -> str:
+    """Alias for fetch(url). Returns the raw HTML/text content of a URL."""
+    return fetch(url)
+
+def get_html(url: str) -> str:
     """Alias for fetch(url). Returns the raw HTML/text content of a URL."""
     return fetch(url)
 
