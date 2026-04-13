@@ -1,7 +1,9 @@
 import json
 import logging
+import fcntl
 from pathlib import Path
 from datetime import datetime, date, timedelta
+from contextlib import contextmanager
 
 NAME = "notes"
 
@@ -13,6 +15,7 @@ DOC = (
     "save(title, content, tags?)→save note; tags is optional comma-separated string e.g. 'meeting,q1'; "
     "load(title)→retrieve note text; "
     "tag(title, tags)→add tags to an existing note; "
+    "delete_tag(title, tags)→remove one or more tags from a note; tags is comma-separated; "
     "list_notes()→all notes with previews and tags; "
     "list_by_tag(tag)→filter notes by a specific tag; "
     "search(term)→notes matching keyword; "
@@ -32,7 +35,7 @@ DOC = (
     "prune_user_model(days_old?)→remove stale inferred patterns and low-confidence inferred preferences (default 30 days); "
     "log_activity(action, result, source?)→log a completed manual task to the activity log (source defaults to 'manual'); "
     "get_activity_log(hours?)→show what the agent did in the last N hours, both scheduled and manual (default 24h); "
-    "append(title, content)→add content to an existing note without overwriting it (creates note if it does not exist yet); "
+    "append(title, content, tags?)→add content to an existing note without overwriting it (creates note if it does not exist yet); "
     "end_day(summary, next_steps?, user_insights?)→wrap the day: writes today's journal entry with auto-pulled activity log and returns a full day overview; user_insights is what you learned about the user today; "
     "set_user_fact(key, value, source?, episode_id?)→store a permanent fact about the user (e.g. language, name, projects); archives previous value automatically; always call when learning stable user info; "
     "get_user_facts_card()→return compact user fact card with source and valid_from metadata; "
@@ -44,16 +47,64 @@ DOC = (
 _LOGS_FILE    = Path("/app/memory/session_logs.jsonl")
 _ACTIVITY_LOG = Path("/app/memory/activity_log.jsonl")
 
-NOTES_FILE             = Path("/app/memory/notes.json")
-JOURNAL_FILE           = Path("/app/memory/daily_journal.jsonl")
-JOURNAL_ARCHIVE_FILE   = Path("/app/memory/daily_journal_archive.jsonl")
-USER_MODEL_FILE        = Path("/app/memory/user_model.json")
-USER_FACTS_FILE        = Path("/app/memory/user_facts.json")
+NOTES_FILE              = Path("/app/memory/notes.json")
+JOURNAL_FILE            = Path("/app/memory/daily_journal.jsonl")
+JOURNAL_ARCHIVE_FILE    = Path("/app/memory/daily_journal_archive.jsonl")
+USER_MODEL_FILE         = Path("/app/memory/user_model.json")
+USER_FACTS_FILE         = Path("/app/memory/user_facts.json")
 USER_FACTS_HISTORY_FILE = Path("/app/memory/user_facts_history.jsonl")
 USER_PREFS_HISTORY_FILE = Path("/app/memory/user_prefs_history.jsonl")
 
-def _load_notes():
-    """Load notes from file"""
+# ── Input limits ───────────────────────────────────────────────────────────────
+MAX_NOTES      = 500
+MAX_TITLE      = 200
+MAX_CONTENT    = 100_000
+MAX_TAG_LEN    = 50
+MAX_TAGS       = 20
+MAX_KEY_LEN    = 100
+MAX_VALUE_LEN  = 2_000
+MAX_INSIGHT    = 1_000
+MAX_PATTERN    = 500
+MAX_REJECTION  = 500
+
+
+def _trunc(s, n: int) -> str:
+    """Truncate a value to n characters, converting to str if needed."""
+    return str(s)[:n]
+
+
+def _clean_tags(raw: str) -> list:
+    """Parse a comma-separated tag string into a sanitised list."""
+    tags = [_trunc(t.strip(), MAX_TAG_LEN) for t in raw.split(",") if t.strip()]
+    return tags[:MAX_TAGS]
+
+
+# ── File locking & atomic writes ───────────────────────────────────────────────
+
+@contextmanager
+def _file_lock(path: Path):
+    """Exclusive advisory lock for the duration of a load-modify-save cycle."""
+    lock_path = path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def _atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write text to path atomically via a sibling .tmp file + rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding=encoding)
+    tmp.replace(path)
+
+
+# ── Notes ──────────────────────────────────────────────────────────────────────
+
+def _load_notes() -> dict:
     NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
     if NOTES_FILE.exists():
         try:
@@ -63,30 +114,36 @@ def _load_notes():
             return {}
     return {}
 
-def _save_notes(notes):
-    """Save notes to file"""
-    NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    NOTES_FILE.write_text(json.dumps(notes, indent=2))
+
+def _save_notes(notes: dict) -> None:
+    _atomic_write(NOTES_FILE, json.dumps(notes, indent=2))
+
 
 def save(title: str, content: str, tags: str = "") -> str:
-    """Save a note with optional comma-separated tags"""
+    """Save a note with optional comma-separated tags."""
     try:
-        notes    = _load_notes()
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
-        notes[title] = {
-            "content": content,
-            "created": datetime.now().isoformat(),
-            "updated": datetime.now().isoformat(),
-            "tags":    tag_list,
-        }
-        _save_notes(notes)
+        title   = _trunc(title, MAX_TITLE)
+        content = _trunc(content, MAX_CONTENT)
+        tag_list = _clean_tags(tags)
+        with _file_lock(NOTES_FILE):
+            notes = _load_notes()
+            if title not in notes and len(notes) >= MAX_NOTES:
+                return f"❌ Note limit reached ({MAX_NOTES}). Delete old notes before saving new ones."
+            notes[title] = {
+                "content": content,
+                "created": datetime.now().isoformat(),
+                "updated": datetime.now().isoformat(),
+                "tags":    tag_list,
+            }
+            _save_notes(notes)
         tag_str = f" [tags: {', '.join(tag_list)}]" if tag_list else ""
         return f"✅ Note saved: '{title}' ({len(content)} chars){tag_str}"
     except Exception as e:
         return f"❌ Error saving note: {e}"
 
+
 def load(title: str) -> str:
-    """Load a note by title"""
+    """Load a note by title."""
     try:
         notes = _load_notes()
         if title in notes:
@@ -97,13 +154,13 @@ def load(title: str) -> str:
     except Exception as e:
         return f"❌ Error loading note: {e}"
 
+
 def list_notes() -> str:
-    """List all note titles with metadata and tags"""
+    """List all note titles with metadata and tags."""
     try:
         notes = _load_notes()
         if not notes:
             return "📭 No notes saved yet"
-
         result = "📚 Your Notes:\n"
         for i, (title, data) in enumerate(notes.items(), 1):
             content_preview = data["content"][:50].replace('\n', ' ')
@@ -114,34 +171,57 @@ def list_notes() -> str:
     except Exception as e:
         return f"❌ Error listing notes: {e}"
 
+
 def delete(title: str) -> str:
-    """Delete a note"""
+    """Delete a note."""
     try:
-        notes = _load_notes()
-        if title in notes:
-            del notes[title]
-            _save_notes(notes)
-            return f"✅ Note deleted: '{title}'"
+        with _file_lock(NOTES_FILE):
+            notes = _load_notes()
+            if title in notes:
+                del notes[title]
+                _save_notes(notes)
+                return f"✅ Note deleted: '{title}'"
         return f"❌ Note '{title}' not found"
     except Exception as e:
         return f"❌ Error deleting note: {e}"
 
+
 def tag(title: str, tags: str) -> str:
     """Add tags to an existing note. Tags is a comma-separated string."""
     try:
-        notes = _load_notes()
-        if title not in notes:
-            return f"❌ Note '{title}' not found"
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-        existing = notes[title].get("tags", [])
-        # Merge, preserving order, no duplicates
-        merged = list(dict.fromkeys(existing + tag_list))
-        notes[title]["tags"]    = merged
-        notes[title]["updated"] = datetime.now().isoformat()
-        _save_notes(notes)
+        tag_list = _clean_tags(tags)
+        with _file_lock(NOTES_FILE):
+            notes = _load_notes()
+            if title not in notes:
+                return f"❌ Note '{title}' not found"
+            existing = notes[title].get("tags", [])
+            merged   = list(dict.fromkeys(existing + tag_list))[:MAX_TAGS]
+            notes[title]["tags"]    = merged
+            notes[title]["updated"] = datetime.now().isoformat()
+            _save_notes(notes)
         return f"✅ Tags on '{title}': {', '.join(merged)}"
     except Exception as e:
         return f"❌ Error tagging note: {e}"
+
+
+def delete_tag(title: str, tags: str) -> str:
+    """Remove one or more tags from a note. Tags is a comma-separated string."""
+    try:
+        to_remove = {t.strip().lower() for t in tags.split(",") if t.strip()}
+        with _file_lock(NOTES_FILE):
+            notes = _load_notes()
+            if title not in notes:
+                return f"❌ Note '{title}' not found"
+            current = notes[title].get("tags", [])
+            updated = [t for t in current if t.lower() not in to_remove]
+            notes[title]["tags"]    = updated
+            notes[title]["updated"] = datetime.now().isoformat()
+            _save_notes(notes)
+        removed = len(current) - len(updated)
+        tag_str = ", ".join(updated) if updated else "(none)"
+        return f"✅ Removed {removed} tag(s) from '{title}'. Remaining: {tag_str}"
+    except Exception as e:
+        return f"❌ Error deleting tag: {e}"
 
 
 def list_by_tag(tag_name: str) -> str:
@@ -165,42 +245,79 @@ def list_by_tag(tag_name: str) -> str:
 
 
 def search(keyword: str) -> str:
-    """Search notes by keyword"""
+    """Search notes by keyword."""
     try:
-        notes = _load_notes()
+        notes   = _load_notes()
         results = []
         for title, data in notes.items():
             if keyword.lower() in data["content"].lower() or keyword.lower() in title.lower():
                 results.append(f"- **{title}**: {data['content'][:100]}...")
-        
         if results:
             return "🔍 Search results:\n" + "\n".join(results)
         return f"❌ No notes found containing '{keyword}'"
     except Exception as e:
         return f"❌ Error searching notes: {e}"
 
+
 def export_all() -> str:
-    """Export all notes as JSON string"""
+    """Export all notes as JSON string."""
     try:
         notes = _load_notes()
         return json.dumps(notes, indent=2)
     except Exception as e:
         return f"❌ Error exporting notes: {e}"
 
+
+def append(title: str, content: str, tags: str = "") -> str:
+    """Add content to the bottom of an existing note without overwriting it.
+    Creates the note if it does not exist yet. Optional tags apply only when creating."""
+    try:
+        title   = _trunc(title, MAX_TITLE)
+        content = _trunc(content, MAX_CONTENT)
+        tag_list = _clean_tags(tags)
+        with _file_lock(NOTES_FILE):
+            notes = _load_notes()
+            if title in notes:
+                existing = notes[title]["content"]
+                # Respect per-note content cap after append
+                combined = _trunc(existing + "\n\n" + content, MAX_CONTENT)
+                notes[title]["content"] = combined
+                notes[title]["updated"] = datetime.now().isoformat()
+                if tag_list:
+                    merged = list(dict.fromkeys(notes[title].get("tags", []) + tag_list))[:MAX_TAGS]
+                    notes[title]["tags"] = merged
+                action = "Appended to"
+            else:
+                if len(notes) >= MAX_NOTES:
+                    return f"❌ Note limit reached ({MAX_NOTES}). Delete old notes before creating new ones."
+                notes[title] = {
+                    "content": content,
+                    "created": datetime.now().isoformat(),
+                    "updated": datetime.now().isoformat(),
+                    "tags":    tag_list,
+                }
+                action = "Created"
+            _save_notes(notes)
+        return f"✅ {action} note '{title}' ({len(content)} chars added)"
+    except Exception as e:
+        return f"❌ Error appending to note: {e}"
+
+
 def get_last_logs(n: int = 10) -> str:
-    """Retrieve the last N entries from session logs"""
+    """Retrieve the last N entries from session logs."""
     n = int(n)
     if not _LOGS_FILE.exists():
         return "❌ No session logs found."
     try:
-        lines = _LOGS_FILE.read_text().splitlines()
+        lines   = _LOGS_FILE.read_text().splitlines()
         entries = [json.loads(l) for l in lines[-n:] if l.strip()]
         return json.dumps(entries, indent=2)
     except Exception as e:
         return f"❌ Error reading logs: {e}"
 
+
 def search_logs(keyword: str) -> str:
-    """Search session logs for a keyword (e.g. 'error', 'git')"""
+    """Search session logs for a keyword (e.g. 'error', 'git')."""
     if not _LOGS_FILE.exists():
         return "❌ No session logs found."
     try:
@@ -237,9 +354,8 @@ def _load_journal() -> dict:
 
 
 def _save_journal(entries: dict) -> None:
-    JOURNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps(e) for e in sorted(entries.values(), key=lambda x: x["date"])]
-    JOURNAL_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _atomic_write(JOURNAL_FILE, "\n".join(lines) + "\n")
 
 
 def compress_journal(days_old: int = 15) -> str:
@@ -249,30 +365,31 @@ def compress_journal(days_old: int = 15) -> str:
     Returns a brief status string. Called automatically by end_day()."""
     try:
         days_old = int(days_old)
-        cutoff = (date.today() - timedelta(days=days_old)).isoformat()
-        entries = _load_journal()
+        cutoff   = (date.today() - timedelta(days=days_old)).isoformat()
+        with _file_lock(JOURNAL_FILE):
+            entries = _load_journal()
+            old = {k: v for k, v in entries.items()
+                   if k < cutoff and not v.get("compressed")}
+            if not old:
+                return f"(journal already compact — no entries older than {days_old} days to compress)"
 
-        old = {k: v for k, v in entries.items()
-               if k < cutoff and not v.get("compressed")}
-        if not old:
-            return f"(journal already compact — no entries older than {days_old} days to compress)"
+            # Archive originals first (append-safe, no full-rewrite needed)
+            JOURNAL_ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with _file_lock(JOURNAL_ARCHIVE_FILE):
+                with JOURNAL_ARCHIVE_FILE.open("a", encoding="utf-8") as f:
+                    for e in sorted(old.values(), key=lambda x: x["date"]):
+                        f.write(json.dumps(e) + "\n")
 
-        # Archive originals first (append-safe)
-        JOURNAL_ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with JOURNAL_ARCHIVE_FILE.open("a", encoding="utf-8") as f:
-            for e in sorted(old.values(), key=lambda x: x["date"]):
-                f.write(json.dumps(e) + "\n")
+            # Replace with compressed stubs in the live journal
+            for date_key, e in old.items():
+                entries[date_key] = {
+                    "date":       e["date"],
+                    "written_at": e.get("written_at", ""),
+                    "summary":    e.get("summary", "")[:250],
+                    "compressed": True,
+                }
+            _save_journal(entries)
 
-        # Replace with compressed stubs in the live journal
-        for date_key, e in old.items():
-            entries[date_key] = {
-                "date":       e["date"],
-                "written_at": e.get("written_at", ""),
-                "summary":    e.get("summary", "")[:250],
-                "compressed": True,
-            }
-
-        _save_journal(entries)
         return f"compressed {len(old)} journal entries older than {days_old} days (originals archived)"
     except Exception as ex:
         return f"compress_journal error: {ex}"
@@ -282,22 +399,23 @@ def write_daily_entry(summary: str, learned: str, user_insights: str = "", next_
     """Save or update today's journal entry. Appends to an existing entry if one exists for today."""
     try:
         today = date.today().isoformat()
-        entries = _load_journal()
-        if today in entries:
-            old = entries[today]
-            summary = (old.get("summary", "") + "\n\n[UPDATE] " + summary).strip()
-            learned = (old.get("learned", "") + ("\n" + learned if learned else "")).strip()
-            user_insights = (old.get("user_insights", "") + ("\n" + user_insights if user_insights else "")).strip()
-            next_steps = next_steps or old.get("next_steps", "")
-        entries[today] = {
-            "date": today,
-            "written_at": datetime.now().isoformat(),
-            "summary": summary,
-            "learned": learned,
-            "user_insights": user_insights,
-            "next_steps": next_steps,
-        }
-        _save_journal(entries)
+        with _file_lock(JOURNAL_FILE):
+            entries = _load_journal()
+            if today in entries:
+                old           = entries[today]
+                summary       = (old.get("summary", "") + "\n\n[UPDATE] " + summary).strip()
+                learned       = (old.get("learned", "") + ("\n" + learned if learned else "")).strip()
+                user_insights = (old.get("user_insights", "") + ("\n" + user_insights if user_insights else "")).strip()
+                next_steps    = next_steps or old.get("next_steps", "")
+            entries[today] = {
+                "date":          today,
+                "written_at":    datetime.now().isoformat(),
+                "summary":       summary,
+                "learned":       learned,
+                "user_insights": user_insights,
+                "next_steps":    next_steps,
+            }
+            _save_journal(entries)
         return f"✅ Daily entry for {today} saved."
     except Exception as e:
         return f"❌ Error writing daily entry: {e}"
@@ -310,14 +428,15 @@ def get_journal(days: int = 7) -> str:
             days = int(str(days).strip())
         except (ValueError, TypeError):
             days = 7
-        cutoff = (date.today() - timedelta(days=days)).isoformat()
+        cutoff  = (date.today() - timedelta(days=days)).isoformat()
         entries = _load_journal()
-        recent = [e for e in entries.values() if e["date"] >= cutoff]
+        recent  = [e for e in entries.values() if e["date"] >= cutoff]
         if not recent:
             return f"No journal entries in the last {days} days."
         result = []
         for e in sorted(recent, key=lambda x: x["date"], reverse=True):
-            result.append(f"=== {e['date']} ===")
+            label = " [compressed]" if e.get("compressed") else ""
+            result.append(f"=== {e['date']}{label} ===")
             result.append(f"Summary: {e['summary']}")
             if e.get("learned"):
                 result.append(f"Learned: {e['learned']}")
@@ -334,12 +453,13 @@ def get_journal(days: int = 7) -> str:
 def get_today() -> str:
     """Return today's journal entry, or a message if none exists yet."""
     try:
-        today = date.today().isoformat()
+        today   = date.today().isoformat()
         entries = _load_journal()
         if today not in entries:
             return f"No entry for today ({today}) yet."
-        e = entries[today]
-        parts = [f"Today ({today}):"]
+        e     = entries[today]
+        label = " [compressed]" if e.get("compressed") else ""
+        parts = [f"Today ({today}){label}:"]
         parts.append(f"Summary: {e['summary']}")
         if e.get("learned"):
             parts.append(f"Learned: {e['learned']}")
@@ -390,42 +510,44 @@ def _load_user_model() -> dict:
 
 def _save_user_model(model: dict) -> None:
     model.setdefault("meta", {})["last_updated"] = datetime.now().isoformat()
-    USER_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
-    USER_MODEL_FILE.write_text(json.dumps(model, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write(USER_MODEL_FILE, json.dumps(model, indent=2, ensure_ascii=False))
 
 
 def set_preference(key: str, value, source: str = "user", confidence: float = 1.0, episode_id: str = "") -> str:
     """Set a named preference. source: 'user'|'inferred'|'system'. confidence: 0.0–1.0.
     Automatically archives the previous value with a valid_until timestamp before overwriting."""
     try:
-        model = _load_user_model()
+        key   = _trunc(key, MAX_KEY_LEN)
+        value = _trunc(value, MAX_VALUE_LEN)
+        with _file_lock(USER_MODEL_FILE):
+            model = _load_user_model()
 
-        # Archive old value before overwriting
-        old = model.get("preferences", {}).get(key)
-        if old is not None:
-            archived = {
-                "key":        key,
-                "value":      old.get("value"),
-                "source":     old.get("source", "unknown"),
-                "confidence": old.get("confidence", 1.0),
-                "valid_from": old.get("valid_from") or old.get("updated_at", "")[:10],
-                "valid_until": date.today().isoformat(),
-                "episode_id": old.get("episode_id"),
-                "archived_at": datetime.now().isoformat(),
+            # Archive old value before overwriting
+            old = model.get("preferences", {}).get(key)
+            if old is not None:
+                archived = {
+                    "key":        key,
+                    "value":      old.get("value"),
+                    "source":     old.get("source", "unknown"),
+                    "confidence": old.get("confidence", 1.0),
+                    "valid_from": old.get("valid_from") or old.get("updated_at", "")[:10],
+                    "valid_until": date.today().isoformat(),
+                    "episode_id": old.get("episode_id"),
+                    "archived_at": datetime.now().isoformat(),
+                }
+                USER_PREFS_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with USER_PREFS_HISTORY_FILE.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(archived) + "\n")
+
+            model["preferences"][key] = {
+                "value":      value,
+                "confidence": round(float(confidence), 2),
+                "source":     source,
+                "updated_at": datetime.now().isoformat(),
+                "valid_from": date.today().isoformat(),
+                "episode_id": episode_id or None,
             }
-            USER_PREFS_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with USER_PREFS_HISTORY_FILE.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(archived) + "\n")
-
-        model["preferences"][key] = {
-            "value":      value,
-            "confidence": round(float(confidence), 2),
-            "source":     source,
-            "updated_at": datetime.now().isoformat(),
-            "valid_from": date.today().isoformat(),
-            "episode_id": episode_id or None,
-        }
-        _save_user_model(model)
+            _save_user_model(model)
         icon = {"user": "👤", "inferred": "🤖", "system": "⚙️"}.get(source, "•")
         return f"✅ Preference set: {key} = {value!r} {icon} (confidence: {float(confidence):.0%})"
     except Exception as e:
@@ -446,18 +568,16 @@ def get_preference_history(key: str) -> str:
     try:
         lines = [f"📜 Preference history: '{key}'"]
 
-        # Current value
-        model = _load_user_model()
+        model   = _load_user_model()
         current = model.get("preferences", {}).get(key)
         if current:
-            vf   = current.get("valid_from") or current.get("updated_at", "?")[:10]
-            src  = current.get("source", "?")
-            conf = current.get("confidence", 1.0)
-            ep   = current.get("episode_id") or ""
+            vf     = current.get("valid_from") or current.get("updated_at", "?")[:10]
+            src    = current.get("source", "?")
+            conf   = current.get("confidence", 1.0)
+            ep     = current.get("episode_id") or ""
             ep_str = f" ep={ep}" if ep else ""
             lines.append(f"  [current]  {current['value']!r}  conf={conf:.0%}  since {vf}  ({src}{ep_str})")
 
-        # Archived values
         if USER_PREFS_HISTORY_FILE.exists():
             history = []
             for line in USER_PREFS_HISTORY_FILE.read_text(encoding="utf-8").splitlines():
@@ -471,11 +591,11 @@ def get_preference_history(key: str) -> str:
                 except Exception:
                     continue
             for e in sorted(history, key=lambda x: x.get("valid_from") or "", reverse=True):
-                vf   = e.get("valid_from") or "?"
-                vu   = e.get("valid_until") or "?"
-                src  = e.get("source") or "?"
-                conf = e.get("confidence", 1.0)
-                ep   = e.get("episode_id") or ""
+                vf     = e.get("valid_from") or "?"
+                vu     = e.get("valid_until") or "?"
+                src    = e.get("source") or "?"
+                conf   = e.get("confidence", 1.0)
+                ep     = e.get("episode_id") or ""
                 ep_str = f" ep={ep}" if ep else ""
                 lines.append(f"  [{vf} → {vu}]  {e['value']!r}  conf={conf:.0%}  ({src}{ep_str})")
 
@@ -489,9 +609,12 @@ def get_preference_history(key: str) -> str:
 def set_context(key: str, value: str) -> str:
     """Update one field of the current working context (e.g. project, focus, deadline)."""
     try:
-        model = _load_user_model()
-        model.setdefault("context", {})[key] = value
-        _save_user_model(model)
+        key   = _trunc(key, MAX_KEY_LEN)
+        value = _trunc(value, MAX_VALUE_LEN)
+        with _file_lock(USER_MODEL_FILE):
+            model = _load_user_model()
+            model.setdefault("context", {})[key] = value
+            _save_user_model(model)
         return f"✅ Context updated: {key} = {value!r}"
     except Exception as e:
         return f"❌ set_context error: {e}"
@@ -500,24 +623,28 @@ def set_context(key: str, value: str) -> str:
 def record_pattern(pattern: str, evidence: str = "", action: str = "") -> str:
     """Add or increment a behavioral pattern Trinity has observed about the user."""
     try:
-        model = _load_user_model()
-        existing = next((p for p in model.get("patterns", []) if p["pattern"] == pattern), None)
-        if existing:
-            existing["evidence_count"] += 1
-            existing["last_seen"] = datetime.now().isoformat()
-            if action:
-                existing["suggested_action"] = action
-            count = existing["evidence_count"]
-        else:
-            model.setdefault("patterns", []).append({
-                "pattern": pattern,
-                "evidence": evidence,
-                "evidence_count": 1,
-                "last_seen": datetime.now().isoformat(),
-                "suggested_action": action,
-            })
-            count = 1
-        _save_user_model(model)
+        pattern  = _trunc(pattern, MAX_PATTERN)
+        evidence = _trunc(evidence, MAX_VALUE_LEN)
+        action   = _trunc(action, MAX_VALUE_LEN)
+        with _file_lock(USER_MODEL_FILE):
+            model    = _load_user_model()
+            existing = next((p for p in model.get("patterns", []) if p["pattern"] == pattern), None)
+            if existing:
+                existing["evidence_count"] += 1
+                existing["last_seen"]       = datetime.now().isoformat()
+                if action:
+                    existing["suggested_action"] = action
+                count = existing["evidence_count"]
+            else:
+                model.setdefault("patterns", []).append({
+                    "pattern":          pattern,
+                    "evidence":         evidence,
+                    "evidence_count":   1,
+                    "last_seen":        datetime.now().isoformat(),
+                    "suggested_action": action,
+                })
+                count = 1
+            _save_user_model(model)
         return f"📝 Pattern recorded: '{pattern}' (seen {count}×)"
     except Exception as e:
         return f"❌ record_pattern error: {e}"
@@ -526,13 +653,16 @@ def record_pattern(pattern: str, evidence: str = "", action: str = "") -> str:
 def add_rejection(idea: str, reason: str = "") -> str:
     """Record a dismissed idea so Trinity doesn't suggest it again."""
     try:
-        model = _load_user_model()
-        model.setdefault("rejections", []).append({
-            "idea": idea,
-            "reason": reason,
-            "dismissed_at": datetime.now().isoformat()[:10],
-        })
-        _save_user_model(model)
+        idea   = _trunc(idea, MAX_REJECTION)
+        reason = _trunc(reason, MAX_VALUE_LEN)
+        with _file_lock(USER_MODEL_FILE):
+            model = _load_user_model()
+            model.setdefault("rejections", []).append({
+                "idea":         idea,
+                "reason":       reason,
+                "dismissed_at": datetime.now().isoformat()[:10],
+            })
+            _save_user_model(model)
         return f"🚫 Rejection recorded: '{idea}'"
     except Exception as e:
         return f"❌ add_rejection error: {e}"
@@ -585,26 +715,26 @@ def prune_user_model(days_old: int = 30) -> str:
     """Remove stale inferred patterns and low-confidence inferred preferences."""
     try:
         days_old = int(days_old)
-        model = _load_user_model()
-        cutoff = (datetime.now() - timedelta(days=days_old)).isoformat()
+        cutoff   = (datetime.now() - timedelta(days=days_old)).isoformat()
+        with _file_lock(USER_MODEL_FILE):
+            model    = _load_user_model()
+            before_p = len(model.get("patterns", []))
+            model["patterns"] = [
+                p for p in model.get("patterns", [])
+                if p.get("last_seen", "") >= cutoff
+            ]
+            pruned_p = before_p - len(model["patterns"])
 
-        before_p = len(model.get("patterns", []))
-        model["patterns"] = [
-            p for p in model.get("patterns", [])
-            if p.get("last_seen", "") >= cutoff
-        ]
-        pruned_p = before_p - len(model["patterns"])
+            pruned_pref = 0
+            for key in list(model.get("preferences", {}).keys()):
+                p = model["preferences"][key]
+                if (p.get("source") == "inferred"
+                        and p.get("confidence", 1.0) < 0.6
+                        and p.get("updated_at", "") < cutoff):
+                    del model["preferences"][key]
+                    pruned_pref += 1
 
-        pruned_pref = 0
-        for key in list(model.get("preferences", {}).keys()):
-            p = model["preferences"][key]
-            if (p.get("source") == "inferred"
-                    and p.get("confidence", 1.0) < 0.6
-                    and p.get("updated_at", "") < cutoff):
-                del model["preferences"][key]
-                pruned_pref += 1
-
-        _save_user_model(model)
+            _save_user_model(model)
         return f"🧹 Pruned: {pruned_p} stale patterns, {pruned_pref} low-confidence preferences"
     except Exception as e:
         return f"❌ prune_user_model error: {e}"
@@ -613,12 +743,14 @@ def prune_user_model(days_old: int = 30) -> str:
 def update_user_model(insight: str) -> str:
     """Append a free-form insight about the user to the persistent profile."""
     try:
-        model = _load_user_model()
-        model.setdefault("insights", []).append({
-            "date": datetime.now().isoformat()[:10],
-            "insight": insight,
-        })
-        _save_user_model(model)
+        insight = _trunc(insight, MAX_INSIGHT)
+        with _file_lock(USER_MODEL_FILE):
+            model = _load_user_model()
+            model.setdefault("insights", []).append({
+                "date":    datetime.now().isoformat()[:10],
+                "insight": insight,
+            })
+            _save_user_model(model)
         return f"✅ User model updated: {insight[:80]}"
     except Exception as e:
         return f"❌ Error updating user model: {e}"
@@ -629,9 +761,9 @@ def get_user_model() -> str:
     try:
         if not USER_MODEL_FILE.exists():
             return "No user model built yet."
-        model = _load_user_model()
+        model   = _load_user_model()
         updated = (model.get("meta") or {}).get("last_updated") or "unknown"
-        lines = [f"👤 User Model  (last updated: {updated[:10]})"]
+        lines   = [f"👤 User Model  (last updated: {updated[:10]})"]
 
         prefs = model.get("preferences", {})
         lines.append(f"\n🔹 Preferences ({len(prefs)}):")
@@ -692,38 +824,16 @@ def log_activity(action: str, result: str, source: str = "manual") -> str:
         entry = json.dumps({
             "ts":     datetime.now().isoformat(timespec="seconds"),
             "source": source,
-            "action": action[:120],
-            "result": result[:200],
+            "action": _trunc(action, 120),
+            "result": _trunc(result, 200),
             "ok":     not result.startswith("❌"),
         })
-        with _ACTIVITY_LOG.open("a", encoding="utf-8") as f:
-            f.write(entry + "\n")
+        with _file_lock(_ACTIVITY_LOG):
+            with _ACTIVITY_LOG.open("a", encoding="utf-8") as f:
+                f.write(entry + "\n")
         return f"✅ Activity logged: {action[:60]}"
     except Exception as e:
         return f"❌ log_activity error: {e}"
-
-
-def append(title: str, content: str) -> str:
-    """Add content to the bottom of an existing note without overwriting it.
-    Creates the note if it does not exist yet."""
-    try:
-        notes = _load_notes()
-        if title in notes:
-            notes[title]["content"] = notes[title]["content"] + "\n\n" + content
-            notes[title]["updated"] = datetime.now().isoformat()
-            action = "Appended to"
-        else:
-            notes[title] = {
-                "content": content,
-                "created": datetime.now().isoformat(),
-                "updated": datetime.now().isoformat(),
-                "tags":    [],
-            }
-            action = "Created"
-        _save_notes(notes)
-        return f"✅ {action} note '{title}' ({len(content)} chars added)"
-    except Exception as e:
-        return f"❌ Error appending to note: {e}"
 
 
 def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
@@ -750,18 +860,15 @@ def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
                     continue
 
         activity_block = "\n".join(activity_lines) if activity_lines else "No logged activity today."
-        learned = f"Tasks today ({len(activity_lines)}):\n{activity_block}"
+        learned        = f"Tasks today ({len(activity_lines)}):\n{activity_block}"
 
-        # Write (or append to) today's journal entry
-        journal_result = write_daily_entry(
+        journal_result   = write_daily_entry(
             summary=summary,
             learned=learned,
             user_insights=user_insights,
             next_steps=next_steps,
         )
-
-        # Silently compress old journal entries to keep memory lean
-        compress_journal(days_old=15)
+        compress_result  = compress_journal(days_old=15)
 
         lines = [
             f"🌙 Day wrapped — {today}",
@@ -772,7 +879,7 @@ def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
         ]
         if next_steps:
             lines += ["", f"Tomorrow: {next_steps}"]
-        lines += ["", journal_result]
+        lines += ["", journal_result, f"(journal: {compress_result})"]
         return "\n".join(lines)
     except Exception as e:
         return f"❌ Error in end_day: {e}"
@@ -788,50 +895,50 @@ def set_user_fact(key: str, value: str, source: str = "user", episode_id: str = 
     Call this whenever you learn something stable about the user that should persist across sessions.
     Automatically archives the previous value with a valid_until timestamp before overwriting."""
     try:
-        facts: dict = {}
-        if USER_FACTS_FILE.exists():
-            try:
-                facts = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
-            except Exception:
-                facts = {}
+        k     = _trunc(key.strip().lower(), MAX_KEY_LEN)
+        value = _trunc(value.strip(), MAX_VALUE_LEN)
+        with _file_lock(USER_FACTS_FILE):
+            facts: dict = {}
+            if USER_FACTS_FILE.exists():
+                try:
+                    facts = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    facts = {}
 
-        k = key.strip().lower()
+            # Archive old value before overwriting
+            old = facts.get(k)
+            if old is not None and not k.startswith("_"):
+                if isinstance(old, dict):
+                    old_val = old.get("value", "")
+                    old_src = old.get("source", "unknown")
+                    old_vf  = old.get("valid_from")
+                    old_ep  = old.get("episode_id")
+                else:
+                    old_val = old
+                    old_src = "unknown"
+                    old_vf  = None
+                    old_ep  = None
+                archived = {
+                    "key":        k,
+                    "value":      old_val,
+                    "source":     old_src,
+                    "valid_from": old_vf,
+                    "valid_until": date.today().isoformat(),
+                    "episode_id": old_ep,
+                    "archived_at": datetime.now().isoformat(),
+                }
+                USER_FACTS_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with USER_FACTS_HISTORY_FILE.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(archived) + "\n")
 
-        # Archive old value before overwriting
-        old = facts.get(k)
-        if old is not None and not k.startswith("_"):
-            if isinstance(old, dict):
-                old_val  = old.get("value", "")
-                old_src  = old.get("source", "unknown")
-                old_vf   = old.get("valid_from")
-                old_ep   = old.get("episode_id")
-            else:
-                old_val  = old
-                old_src  = "unknown"
-                old_vf   = None
-                old_ep   = None
-            archived = {
-                "key":        k,
-                "value":      old_val,
-                "source":     old_src,
-                "valid_from": old_vf,
-                "valid_until": date.today().isoformat(),
-                "episode_id": old_ep,
-                "archived_at": datetime.now().isoformat(),
+            facts[k] = {
+                "value":      value,
+                "source":     source,
+                "valid_from": date.today().isoformat(),
+                "episode_id": episode_id or None,
             }
-            USER_FACTS_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with USER_FACTS_HISTORY_FILE.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(archived) + "\n")
-
-        facts[k] = {
-            "value":      value.strip(),
-            "source":     source,
-            "valid_from": date.today().isoformat(),
-            "episode_id": episode_id or None,
-        }
-        facts["_updated"] = datetime.now().isoformat()
-        USER_FACTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        USER_FACTS_FILE.write_text(json.dumps(facts, indent=2, ensure_ascii=False), encoding="utf-8")
+            facts["_updated"] = datetime.now().isoformat()
+            _atomic_write(USER_FACTS_FILE, json.dumps(facts, indent=2, ensure_ascii=False))
         return f"✅ User fact saved: {key} = {value!r}"
     except Exception as e:
         return f"❌ set_user_fact error: {e}"
@@ -867,12 +974,11 @@ def get_fact_history(key: str) -> str:
     """Return the full timeline of a user fact — current value plus all archived previous values
     with their validity windows and provenance (source, episode_id)."""
     try:
-        k = key.strip().lower()
+        k     = key.strip().lower()
         lines = [f"📜 Fact history: '{k}'"]
 
-        # Current value
         if USER_FACTS_FILE.exists():
-            facts = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
+            facts   = json.loads(USER_FACTS_FILE.read_text(encoding="utf-8"))
             current = facts.get(k)
             if current is not None:
                 if isinstance(current, dict):
@@ -884,7 +990,6 @@ def get_fact_history(key: str) -> str:
                 else:
                     lines.append(f"  [current]  {current!r}  (no metadata)")
 
-        # Archived values
         if USER_FACTS_HISTORY_FILE.exists():
             history = []
             for line in USER_FACTS_HISTORY_FILE.read_text(encoding="utf-8").splitlines():
@@ -922,14 +1027,14 @@ def get_activity_log(hours: int = 24) -> str:
             hours = 24
         if not _ACTIVITY_LOG.exists():
             return "📭 No activity logged yet."
-        cutoff = datetime.now() - timedelta(hours=hours)
+        cutoff  = datetime.now() - timedelta(hours=hours)
         entries = []
         for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                e = json.loads(line)
+                e  = json.loads(line)
                 ts = datetime.fromisoformat(e["ts"])
                 if ts >= cutoff:
                     entries.append(e)
