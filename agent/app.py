@@ -104,12 +104,12 @@ skills: Dict[str, Any] = {}
 skill_metadata: Dict[str, Dict] = {}
 
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
-SESSION_MAX_MESSAGES = 20        # 10 turns (user + assistant pairs) — tight for 12288 ctx
+SESSION_MAX_MESSAGES = 16        # 8 turns (user + assistant pairs) — tighter for 12288 ctx
 SESSION_TIMEOUT_MINUTES = 120    # auto-expire after 2h inactivity
-SESSION_SUMMARY_KEEP = 10        # recent messages to keep verbatim after rolling summary
+SESSION_SUMMARY_KEEP = 4         # Keep only last 4 messages verbatim (reduced from 6)
 JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds this
-TOOL_RESULT_PRUNE_CHARS = 300    # prune tool results longer than this in older turns
-TOOL_RESULT_PROTECT_RECENT = 4   # always keep the last N tool results verbatim
+TOOL_RESULT_PRUNE_CHARS = 200    # prune tool results longer than this in older turns (reduced from 300)
+TOOL_RESULT_PROTECT_RECENT = 2   # always keep the last N tool results verbatim (reduced from 4)
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
 session_store: Dict[str, Dict] = {}
 
@@ -1027,6 +1027,13 @@ def _prune_tool_results(messages: List[Dict]) -> List[Dict]:
             and len(msg["content"]) > TOOL_RESULT_PRUNE_CHARS
         ):
             msg = {**msg, "content": f"[tool result pruned — {len(msg['content'])} chars]"}
+        # ALSO: Cap even protected tool results to prevent bloat
+        elif (
+            msg.get("role") == "tool"
+            and isinstance(msg.get("content"), str)
+            and len(msg["content"]) > 1000  # Hard cap for ANY tool result
+        ):
+            msg = {**msg, "content": msg["content"][:1000] + f"\n...[truncated, {len(msg['content'])} chars total]"}
         pruned.append(msg)
     return pruned
 
@@ -1089,8 +1096,13 @@ def summarize_messages(messages: List[Dict], existing_summary: str = "") -> str:
             "You are updating an existing conversation summary with new turns.\n"
             "Rewrite the summary under these five headings — keep it concise:\n"
             "**Goal** | **Progress** | **Decisions** | **Files/Resources** | **Next Steps**\n\n"
-            "Preserve everything from the previous summary that is still relevant, "
-            "and incorporate the new information. Do not lose earlier decisions or context."
+            "RULES:\n"
+            "- Keep the ENTIRE summary under 400 tokens total\n"
+            "- Condense old information aggressively\n"
+            "- Only preserve decisions and facts that are still relevant\n"
+            "- Drop completed tasks and resolved items\n"
+            "- Merge similar items together\n"
+            "- Use bullet points, not paragraphs\n"
         )
         user_content = (
             f"PREVIOUS SUMMARY:\n{existing_summary}\n\n"
@@ -1101,9 +1113,11 @@ def summarize_messages(messages: List[Dict], existing_summary: str = "") -> str:
         system_instruction = (
             "Summarize the following conversation under these five headings — keep it concise:\n"
             "**Goal** | **Progress** | **Decisions** | **Files/Resources** | **Next Steps**\n\n"
-            "Preserve key facts, user preferences, decisions made, files touched, "
-            "and any unresolved questions. This summary will be injected as context "
-            "for a future AI agent turn."
+            "RULES:\n"
+            "- Keep the ENTIRE summary under 300 tokens\n"
+            "- Use bullet points, not paragraphs\n"
+            "- Only include key decisions and current state\n"
+            "- Skip minor details and completed steps\n"
         )
         user_content = transcript_text
 
@@ -1115,7 +1129,13 @@ def summarize_messages(messages: List[Dict], existing_summary: str = "") -> str:
     try:
         model_source = os.getenv("MODEL_SOURCE", "cloud")
         result = _call_llm(prompt, model_source, "trinity-default")
-        return result.get("content") or "\n".join(transcript_parts[-4:])
+        summary = result.get("content") or "\n".join(transcript_parts[-4:])
+        
+        # HARD CAP: Truncate if summary is still too large
+        if len(summary) > 1500:
+            summary = summary[:1500] + "\n...[truncated]"
+        
+        return summary
     except Exception as e:
         print(f"⚠️  Memory summarization failed: {e}")
         return "\n".join(transcript_parts[-4:])  # graceful fallback
@@ -2690,6 +2710,9 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
         "dashboard":         {"dashboard", "status", "health", "uptime", "metrics"},
         "weather":           {"weather", "forecast", "temperature", "rain", "wind",
                               "humidity", "snow", "sunny", "cloudy", "celsius", "fahrenheit"},
+        "email_collector":   {"collect", "harvest", "scrape", "emails", "email list",
+                              "find emails", "extract emails", "contacts from", "email collector",
+                              "directory", "listing"},
     }
     _msg_words = set(req.message.lower().split())
 
