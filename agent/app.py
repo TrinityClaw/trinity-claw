@@ -1760,6 +1760,23 @@ def execute_skill_tags(response_text: str) -> tuple:
                     except Exception:
                         pass  # keep original args/kwargs if introspection fails
 
+            # Pre-dispatch lesson check: warn the model if this call has failed before
+            if "self_improvement" in skills:
+                try:
+                    _lesson_warning = skills["self_improvement"].check_lessons(skill_name, func_name)
+                    if _lesson_warning:
+                        output = _lesson_warning + "\n"
+                        execution_log.append({
+                            "skill": skill_name, "function": func_name,
+                            "status": "lesson_warning", "warning": _lesson_warning
+                        })
+                        # Inject warning and let the model decide whether to proceed.
+                        # We still fall through and execute — the model sees the lesson
+                        # in context on the next iteration if it loops.
+                        print(f"📚 Lesson fired: {_lesson_warning[:100]}")
+                except Exception:
+                    pass
+
             # Execute the skill
             result = call_skill_improved(skill_name, func_name, *args, **kwargs)
 
