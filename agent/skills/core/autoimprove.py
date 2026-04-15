@@ -1369,10 +1369,29 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
         "after_score":  after_score,
         "issues_fixed": issues_fixed,
     })
+
+    # Auto-close open improvement ideas whose source matches the applied skill.
+    # Uses existing "dismissed" status + dismissed_reason field to avoid schema changes.
+    auto_dismissed: List[str] = []
+    try:
+        ideas = _load_ideas()
+        for i, idea in enumerate(ideas):
+            if (idea.get("status") == "open"
+                    and skill_name.lower() in idea.get("source", "").lower()):
+                ideas[i]["status"]           = "dismissed"
+                ideas[i]["dismissed_at"]     = datetime.now().isoformat()
+                ideas[i]["dismissed_reason"] = f"auto-closed by apply_suggestion({skill_name}, {issue_type})"
+                auto_dismissed.append(idea.get("id", "?"))
+        if auto_dismissed:
+            _save_ideas(ideas)
+    except Exception:
+        pass
+
+    suffix = f"\nAuto-dismissed {len(auto_dismissed)} related idea(s)." if auto_dismissed else ""
     return (
         f"✅ APPLIED: {skill_name} [{issue_type}] — "
         f"score {before_score}→{after_score}, {issues_fixed} occurrence(s) fixed\n"
-        f"Core skill updated at: {skill_path}"
+        f"Core skill updated at: {skill_path}{suffix}"
     )
 
 
@@ -1437,8 +1456,14 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
     except Exception as e:
         return f"❌ could not read error_patterns.json: {e}"
 
-    # Collect example messages from lessons.jsonl for richer proposals
-    lessons_by_type: Dict[str, List[str]] = {}
+    # Collect example messages from lessons.jsonl for richer proposals.
+    # Also count (skill, error_type) pairs for Phase 2 runtime-error proposals —
+    # these never appear in error_patterns.json which only tracks AST/static issues.
+    lessons_by_type:  Dict[str, List[str]] = {}
+    runtime_counts:   Dict[str, int]       = {}   # key = "skill::error_type"
+    runtime_examples: Dict[str, List[str]] = {}
+    runtime_fixes:    Dict[str, str]       = {}
+
     if LESSONS_FILE.exists():
         try:
             for line in LESSONS_FILE.read_text(encoding="utf-8").splitlines():
@@ -1446,10 +1471,20 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
                     continue
                 try:
                     lesson = json.loads(line)
-                    et = lesson.get("error_type") or lesson.get("type", "")
+                    et  = lesson.get("error_type") or lesson.get("type", "")
                     msg = lesson.get("error_msg") or lesson.get("message", "")
                     if et and msg:
                         lessons_by_type.setdefault(et, []).append(str(msg)[:120])
+                    # Runtime pair tracking — one counter per (skill, error_type) combo
+                    skill = lesson.get("skill", "").strip()
+                    if skill and et:
+                        rkey = f"{skill}::{et}"
+                        runtime_counts[rkey] = runtime_counts.get(rkey, 0) + 1
+                        if msg:
+                            runtime_examples.setdefault(rkey, []).append(str(msg)[:120])
+                        fix = lesson.get("fix_applied", "") or ""
+                        if fix and rkey not in runtime_fixes:
+                            runtime_fixes[rkey] = str(fix)[:200]
                 except json.JSONDecodeError:
                     continue
         except Exception:
@@ -1461,6 +1496,12 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
         p["error_type"]
         for p in existing
         if p.get("status") == "pending"
+    }
+    # Separate dedup set for runtime proposals — keyed by "skill::error_type"
+    pending_runtime_keys = {
+        p["runtime_key"]
+        for p in existing
+        if p.get("status") == "pending" and p.get("runtime_key")
     }
 
     new_proposals = []
@@ -1494,6 +1535,35 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
         }
         new_proposals.append(proposal)
         pending_types.add(error_type)
+
+    # ── Phase 2: runtime errors from lessons.jsonl ────────────────────────────
+    # error_patterns.json only tracks AST/static patterns (bare_except,
+    # missing_docstring, etc.). Runtime errors — skill_error, TypeError,
+    # ValueError, etc. — live exclusively in lessons.jsonl and were never
+    # reaching this pipeline. This phase closes that gap.
+    for rkey, count in sorted(runtime_counts.items(), key=lambda x: -x[1]):
+        if count < threshold:
+            continue
+        if rkey in pending_runtime_keys:
+            skipped_dup += 1
+            continue
+        skill_stem, et = rkey.split("::", 1)
+        fix_hint = runtime_fixes.get(rkey, "")
+        sev = "high" if count >= 6 else "medium" if count >= 4 else "low"
+        proposal = {
+            "timestamp":        datetime.now().isoformat(),
+            "error_type":       et,
+            "skill":            skill_stem,
+            "runtime_key":      rkey,
+            "count":            count,
+            "severity":         sev,
+            "suggested_fix":    fix_hint or f"Review {skill_stem} — {et} recurring {count}x, no fix recorded yet",
+            "status":           "pending",
+            "source":           "lessons.jsonl",
+            "example_messages": runtime_examples.get(rkey, [])[:3],
+        }
+        new_proposals.append(proposal)
+        pending_runtime_keys.add(rkey)
 
     if new_proposals:
         all_proposals = existing + new_proposals
