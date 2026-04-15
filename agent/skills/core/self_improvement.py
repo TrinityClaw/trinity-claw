@@ -186,6 +186,27 @@ def check_for_learned_fix(skill_name: str, error_type: str) -> Optional[str]:
             return lesson.get("fix_applied")
     return None
 
+
+def check_lessons(skill_name: str, func_name: str) -> Optional[str]:
+    """Pre-dispatch check: return a warning string if this skill.function has
+    failed before, so the caller can surface the lesson before executing.
+    Returns None if no prior failures exist (the common, happy path).
+
+    Called by app.py before executing each skill tag — zero tool-call overhead."""
+    key = f"{skill_name}.{func_name}"
+    lessons = _load_lessons()
+    matches = [l for l in lessons if l.get("skill") == key]
+    if not matches:
+        return None
+    # Most recent failure wins
+    last = matches[-1]
+    error_type = last.get("error_type", "error")
+    fix        = last.get("fix_applied", "").strip()
+    msg = f"⚠️ [lesson] {key} has failed before ({error_type})"
+    if fix:
+        msg += f" — known fix: {fix[:120]}"
+    return msg
+
 # ============================================================================
 # AST-BASED CODE ANALYSIS
 # ============================================================================
