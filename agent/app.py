@@ -917,10 +917,18 @@ def save_to_jsonl(user_message: str, ai_reply: str, metadata: Optional[Dict] = N
         }
         with open(MEMORY_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
-        # Compact if the file has grown large (check is O(1))
+        # Compact if the file has grown large (by size) or line count is high.
+        # Both checks are O(1)/cheap and must agree with the guard inside compact_jsonl().
         try:
-            if os.path.getsize(MEMORY_FILE) > 2_000_000:
+            _mf_size = os.path.getsize(MEMORY_FILE)
+            if _mf_size > 2_000_000:
                 compact_jsonl()
+            else:
+                # Fast line-count check: avoids reading the whole file on every save.
+                with open(MEMORY_FILE, "rb") as _mf:
+                    _mf_lines = _mf.read().count(b"\n")
+                if _mf_lines > JSONL_MAX_LINES:
+                    compact_jsonl()
         except OSError:
             pass
     except Exception as e:
@@ -3006,7 +3014,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
                     "refactor", "email", "schedule", "script", "skill",
                 }
                 _needs_user_model = (
-                    len(req.message) > 80
+                    len(req.message) > 40
                     or bool(_msg_words & _USER_MODEL_TRIGGERS)
                 )
                 if _needs_user_model:
