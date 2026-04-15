@@ -178,7 +178,7 @@ def get_today() -> str:
 
 def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
     """Wrap up the day: writes today's journal entry with a full activity summary.
-    Automatically pulls today's activity log so nothing important is missed."""
+    Automatically pulls today's activity log AND extracts user insights so nothing important is missed."""
     try:
         today = date.today().isoformat()
 
@@ -200,6 +200,19 @@ def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
         activity_block = "\n".join(activity_lines) if activity_lines else "No logged activity today."
         learned        = f"Tasks today ({len(activity_lines)}):\n{activity_block}"
 
+        # Auto-extract user insights if none provided
+        if not user_insights.strip():
+            # Derive insights from today's activity and interactions
+            if activity_lines:
+                # Look for patterns in today's activities that reveal user preferences/habits
+                user_actions = [a for a in activity_lines if "user" in a.lower() or "request" in a.lower()]
+                if user_actions:
+                    user_insights = f"User interacted with agent on {len(user_actions)} tasks today"
+                else:
+                    user_insights = f"Agent completed {len(activity_lines)} tasks for user today"
+            else:
+                user_insights = "No user interactions logged today"
+
         journal_result  = write_daily_entry(
             summary=summary,
             learned=learned,
@@ -217,6 +230,8 @@ def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
         ]
         if next_steps:
             lines += ["", f"Tomorrow: {next_steps}"]
+        if user_insights:
+            lines += ["", f"User insights: {user_insights}"]
         lines += ["", journal_result, f"(journal: {compress_result})"]
         return "\n".join(lines)
     except Exception as e:
