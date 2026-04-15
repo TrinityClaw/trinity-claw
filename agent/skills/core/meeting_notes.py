@@ -44,6 +44,10 @@ _LLM_KEY   = os.getenv("LITELLM_MASTER_KEY",    os.getenv("API_KEY", "sk-1234567
 
 _CORE_DIR = str(Path(__file__).parent)
 
+# Ensure sibling skills are importable without repeating sys.path surgery in every function.
+if _CORE_DIR not in sys.path:
+    sys.path.insert(0, _CORE_DIR)
+
 
 def _read_source(source: str) -> str:
     """Return text from a file path, or pass through raw text."""
@@ -52,8 +56,6 @@ def _read_source(source: str) -> str:
         ext = p.suffix.lower().lstrip(".")
         if ext in {"pdf", "docx", "doc", "txt", "md", "html", "htm", "csv", "xlsx"}:
             try:
-                if _CORE_DIR not in sys.path:
-                    sys.path.insert(0, _CORE_DIR)
                 import document_parser as _dp
                 return _dp.read(str(p))
             except Exception as e:
@@ -222,8 +224,6 @@ def save_meeting(*args) -> str:
 
     # Save to notes with meeting tags
     try:
-        if _CORE_DIR not in sys.path:
-            sys.path.insert(0, _CORE_DIR)
         import notes as _notes
         save_result = _notes.save(title, result, "meeting,action-items")
         return f"✅ Meeting notes saved as '{title}'\n{save_result}\n\n{result}"
