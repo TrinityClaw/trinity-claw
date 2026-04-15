@@ -1111,7 +1111,11 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
         if analysis.get("error"):
             continue
 
-        for issue_type in AUTO_FIXABLE:
+        # Scan AUTO_FIXABLE types (can be auto-applied) plus high/critical types
+        # that require manual review (sql_injection_risk, hardcoded_path).
+        SUGGEST_TYPES = AUTO_FIXABLE + ("sql_injection_risk", "hardcoded_path")
+
+        for issue_type in SUGGEST_TYPES:
             matching = [i for i in analysis["issues"] if i["type"] == issue_type]
             if not matching:
                 continue
@@ -1142,7 +1146,7 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
             pending_keys.add(key)
 
         if not any(
-            i["type"] in AUTO_FIXABLE for i in analysis["issues"]
+            i["type"] in SUGGEST_TYPES for i in analysis["issues"]
         ):
             skipped_clean += 1
 
@@ -1174,6 +1178,19 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
             )
         lines.append("")
         lines.append("To apply one: autoimprove.apply_suggestion('skill_name', 'issue_type')")
+
+        # Notify via Telegram so suggestions don't silently pile up unread.
+        try:
+            tg = _import_skill("telegram_bot")
+            critical = [s for s in new_suggestions if s["severity"] == "critical"]
+            flag = "🚨" if critical else "🔧"
+            tg.send(
+                f"{flag} autoimprove: {len(new_suggestions)} new core skill suggestion(s) pending.\n"
+                + (f"⚠️ {len(critical)} critical severity — review now.\n" if critical else "")
+                + "Run: autoimprove.list_suggestions()"
+            )
+        except Exception:
+            pass  # Never let a notification failure break the improvement loop
     else:
         lines.append("✅ No new suggestions — core looks clean or all issues already pending.")
 

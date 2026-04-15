@@ -160,16 +160,6 @@ def _load_error_patterns() -> Dict:
 
     return patterns
 
-def _save_error_patterns(patterns: Dict) -> bool:
-    """Save updated error patterns. Returns True on success."""
-    try:
-        PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(PATTERNS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(patterns, f, indent=2, ensure_ascii=False)
-        return True
-    except (IOError, OSError):
-        return False
-
 def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied: str = "") -> str:
     """Record a mistake + fix for future learning."""
     lesson = {
@@ -427,10 +417,17 @@ def generate_patch(skill_name: str, issue_type: str, issue_line: int) -> Dict:
                 }
     
     elif issue_type == "hardcoded_path":
-        # FIX: Extract expression to avoid backslash in f-string (Python 3.12+)
-        clean_path = original_line.strip().strip("'\"")
-        fix_applied = f"# Consider: from pathlib import Path\n# Path('{clean_path}')"
-    
+        # No safe single-line auto-fix: refactoring to pathlib requires knowing the
+        # surrounding context (variable assignment, function call, etc.).
+        # Return manual_review so the caller surfaces it as a suggestion without
+        # inflating the health score with a comment-only pseudo-fix.
+        return {
+            "note": f"Hardcoded path requires manual refactor to pathlib.Path — see line {issue_line}",
+            "manual_review_required": True,
+            "original_line": original_line.strip(),
+            "requires_review": True,
+        }
+
     if not fix_applied:
         return {
             "note": "No auto-fix available for this issue type",
@@ -527,9 +524,15 @@ def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
         }
     # ── END VERIFICATION GATE ──────────────────────────────────────────────────
 
+    tmp = path.with_suffix(".py.tmp")
     try:
-        path.write_text(new_source, encoding='utf-8')
+        tmp.write_text(new_source, encoding='utf-8')
+        os.replace(tmp, path)
     except (IOError, OSError) as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         return {"error": f"Could not write to {skill_name}.py: {e}"}
 
     record_mistake(
