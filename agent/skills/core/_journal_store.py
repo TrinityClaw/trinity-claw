@@ -200,8 +200,12 @@ def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
         activity_block = "\n".join(activity_lines) if activity_lines else "No logged activity today."
         learned        = f"Tasks today ({len(activity_lines)}):\n{activity_block}"
 
-        # Auto-extract user insights if none provided
-        if not user_insights.strip():
+        # Auto-extract user insights if none provided or if a placeholder was passed
+        _PLACEHOLDER_INSIGHTS = {
+            "", "learned", "summary", "user_insights", "next_steps",
+            "learned.", "summary.", "user_insights.", "none", "n/a", "-", "...",
+        }
+        if user_insights.strip().lower() in _PLACEHOLDER_INSIGHTS:
             # Derive insights from today's activity and interactions
             if activity_lines:
                 # Look for patterns in today's activities that reveal user preferences/habits

@@ -142,6 +142,33 @@ def _load_log(days: int = 7) -> List[Dict]:
     return entries
 
 
+# ── False-positive / regression detection ─────────────────────────────────────
+
+def _check_prior_improved(skill_name: str, issue_type: str) -> bool:
+    """Return True if the most recent log entry for this skill+issue_type was IMPROVED.
+
+    Used at the top of run_experiment: if True, the issue has regressed after a
+    previous fix — meaning that fix was a false positive. The outcome is then
+    flagged in the log with 'regressed_after_fix: True' for tracking.
+    """
+    if not IMPROVE_LOG.exists():
+        return False
+    try:
+        for line in reversed(IMPROVE_LOG.read_text(encoding="utf-8").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                if e.get("skill") == skill_name and e.get("issue_type") == issue_type:
+                    return e.get("outcome") == "IMPROVED"
+            except json.JSONDecodeError:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 # ── MAD confidence scoring ────────────────────────────────────────────────────
 
 def _load_all_score_deltas(cap: int = 50) -> List[float]:
@@ -290,11 +317,19 @@ def park_idea(idea: str, source: str = "") -> str:
     import hashlib as _hashlib
     import uuid as _uuid
     idea_hash = _hashlib.sha256(idea.encode()).hexdigest()[:12]
+    # Prefix used for near-duplicate detection (ignores trailing counts/numbers)
+    idea_prefix = idea[:60].lower().strip()
 
     ideas = _load_ideas()
     for existing in ideas:
-        if existing.get("status") == "open" and existing.get("hash") == idea_hash:
+        if existing.get("status") != "open":
+            continue
+        # Exact-hash dedup
+        if existing.get("hash") == idea_hash:
             return f"💡 Duplicate skipped [{existing['id']}]: {idea[:80]}"
+        # Near-duplicate dedup: same first 60 chars (catches same idea with different counts)
+        if existing.get("idea", "")[:60].lower().strip() == idea_prefix:
+            return f"💡 Near-duplicate skipped [{existing['id']}]: {idea[:80]}"
 
     idea_id = datetime.now().strftime("%Y%m%d") + "_" + _uuid.uuid4().hex[:6]
     entry = {
@@ -354,6 +389,24 @@ def list_ideas(status: str = "open") -> str:
         ]
 
     return "\n".join(lines)
+
+
+def get_latest_idea() -> str:
+    """
+    Return the single most-recent open improvement idea as a plain string,
+    or an empty string if none exist.
+
+    Intended for lightweight system-prompt injection — callers should not
+    show this to the user directly; use list_ideas() for that.
+
+    Returns:
+        The idea text (≤140 chars), or '' if no open ideas.
+    """
+    ideas = _load_ideas()
+    for entry in reversed(ideas):  # newest last in JSONL
+        if entry.get("status", "open") == "open":
+            return str(entry.get("idea", ""))[:140]
+    return ""
 
 
 def dismiss_idea(idea_id: str) -> str:
@@ -971,6 +1024,10 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
     if not target_issues:
         return f"NO_CHANGE: no '{issue_type}' in {skill_name} (score={before_score})"
 
+    # Regression check: if the previous logged outcome for this skill+issue was IMPROVED,
+    # the fix didn't hold — flag it so the false-positive rate stays visible in report().
+    _regressed = _check_prior_improved(skill_name, issue_type)
+
     # 3. Apply patch
     try:
         si.fix(skill_name, issue_type, "all")
@@ -1021,19 +1078,20 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
     conf_ratio, conf_label = _compute_confidence(score_delta, recent_deltas)
 
     _log({
-        "timestamp":        timestamp,
-        "skill":            skill_name,
-        "issue_type":       issue_type,
-        "outcome":          outcome,
-        "before_score":     before_score,
-        "after_score":      after_score,
-        "score_delta":      score_delta,
-        "confidence":       conf_ratio,
-        "confidence_label": conf_label,
-        "issues_fixed":     issues_fixed,
-        "test_passed":      test_passed,
-        "test_detail":      test_detail,
-        "reason":           reason,
+        "timestamp":          timestamp,
+        "skill":              skill_name,
+        "issue_type":         issue_type,
+        "outcome":            outcome,
+        "before_score":       before_score,
+        "after_score":        after_score,
+        "score_delta":        score_delta,
+        "confidence":         conf_ratio,
+        "confidence_label":   conf_label,
+        "issues_fixed":       issues_fixed,
+        "test_passed":        test_passed,
+        "test_detail":        test_detail,
+        "reason":             reason,
+        "regressed_after_fix": _regressed,  # True → previous IMPROVED didn't hold
     })
 
     icon     = "✅" if outcome == "IMPROVED" else ("🔄" if outcome == "REVERTED" else "—")
@@ -2266,9 +2324,19 @@ def schedule_nightly(run_time: str = "2am", max_experiments=5) -> str:
         every="1d",
         prompt=prompt,
     )
+
+    # Also schedule nightly KB ingest so new documents are indexed automatically
+    _kb_result = ""
+    try:
+        kb = _import_skill("knowledge_base")
+        if hasattr(kb, "schedule_nightly_kb"):
+            _kb_result = "\n" + kb.schedule_nightly_kb(run_time)
+    except Exception as _kb_err:
+        _kb_result = f"\n⚠️  KB schedule skipped: {_kb_err}"
+
     return (
         f"✅ Nightly improvement loop scheduled (every day, starting around {run_time}):\n"
-        f"{result}\n\n"
+        f"{result}{_kb_result}\n\n"
         f"In the morning:\n"
         f"  autoimprove.report(1)          → see what was auto-fixed overnight\n"
         f"  autoimprove.list_suggestions() → review proposed fixes for core skills"
@@ -2316,6 +2384,16 @@ def report(days=7) -> str:
                    and e.get("confidence") is not None and (e.get("confidence") or 0) < 1.0)
     has_conf = (genuine + marginal + noise) > 0
 
+    # False-positive rate: IMPROVED experiments that turned out to be regressions
+    # (the same issue recurred on the very next run_experiment for that skill+issue).
+    regressions = sum(1 for e in entries if e.get("regressed_after_fix"))
+    fp_rate_str = ""
+    if improved > 0:
+        fp_pct = (regressions / improved) * 100
+        fp_rate_str = f"{regressions}/{improved} ({fp_pct:.0f}%)"
+    elif regressions:
+        fp_rate_str = str(regressions)
+
     lines = [
         f"📈 AutoImprove Report — last {days} day(s)",
         "=" * 52,
@@ -2326,6 +2404,8 @@ def report(days=7) -> str:
         f"  📋 Reviews/scans   : {reviews}",
         f"Core suggestions     : {pending_count} pending review",
     ]
+    if fp_rate_str:
+        lines.append(f"  ⚠️  Fix regressions : {fp_rate_str}  ← fixes that didn't hold")
 
     if has_conf:
         lines += [

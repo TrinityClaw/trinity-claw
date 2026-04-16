@@ -448,6 +448,49 @@ def get_summary(*args) -> str:
     return f"📋 Summary — {filename}\n(Indexed: {ingested})\n\n{summary}"
 
 
+def schedule_nightly_kb(run_time: str = "2am") -> str:
+    """
+    Schedule nightly auto-ingestion of /app/memory/knowledge/ into ChromaDB.
+
+    Any files dropped into the knowledge folder during the day are picked up
+    automatically overnight — no manual ingest_folder() call needed.
+    New documents trigger a Telegram notification if the bot is configured.
+
+    Args:
+        run_time: Friendly time hint shown in confirmation (default '2am').
+                  The actual schedule is 'every 1 day' via APScheduler.
+
+    Returns:
+        Confirmation string from scheduler.
+    """
+    import importlib as _il
+    import sys as _sys
+    _core = str(Path(__file__).parent)
+    if _core not in _sys.path:
+        _sys.path.insert(0, _core)
+    try:
+        sched = _il.import_module("scheduler")
+    except ImportError:
+        return "❌ scheduler skill not available — cannot schedule nightly KB ingest."
+
+    prompt = (
+        "Auto-ingest any new or changed documents in /app/memory/knowledge/. "
+        "Call knowledge_base.ingest_folder() and report how many new documents were indexed. "
+        "If new documents were added, also notify via telegram_bot.send_message() with a brief summary."
+    )
+    result = sched.schedule_recurring(
+        name="kb_nightly_ingest",
+        every="1d",
+        prompt=prompt,
+    )
+    return (
+        f"✅ Nightly KB ingest scheduled (every day, around {run_time}):\n"
+        f"{result}\n\n"
+        f"Drop files into /app/memory/knowledge/ and they'll be indexed automatically.\n"
+        f"Check index: knowledge_base.list_ingested()"
+    )
+
+
 def status(*args) -> str:
     """
     Show knowledge base health: folder path, document count, ChromaDB stats.
