@@ -173,6 +173,34 @@ def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _classify_skill_error(error_msg: str) -> str:
+    """Derive a specific error sub-type from an error message string.
+
+    Used when we have no exception object — only the string returned by a skill.
+    Produces fine-grained lesson keys instead of the generic 'skill_error' bucket,
+    which was collapsing 18-25 distinct daily errors into one entry and preventing
+    per-pattern deduplication.
+    """
+    m = error_msg.lower()
+    if "timed out" in m or "timeout" in m:
+        return "TimeoutError"
+    if "attributeerror" in m or "has no attribute" in m or "'nonetype'" in m:
+        return "AttributeError"
+    if "typeerror" in m or "argument" in m and ("unexpected" in m or "missing" in m or "takes" in m):
+        return "TypeError"
+    if "valueerror" in m or "invalid" in m and ("value" in m or "argument" in m):
+        return "ValueError"
+    if "keyerror" in m or "key not found" in m:
+        return "KeyError"
+    if "filenotfounderror" in m or "no such file" in m:
+        return "FileNotFoundError"
+    if "connectionerror" in m or "connection refused" in m or "connect" in m and "fail" in m:
+        return "ConnectionError"
+    if "permissionerror" in m or "permission denied" in m:
+        return "PermissionError"
+    return "skill_error"
+
+
 def load_skills_improved():
     """
     Improved skill loading with cache invalidation and metadata extraction.
@@ -1827,7 +1855,7 @@ def execute_skill_tags(response_text: str) -> tuple:
                     try:
                         skills["self_improvement"].record_mistake(
                             skill_name=f"{skill_name}.{func_name}",
-                            error_type="skill_error",
+                            error_type=_classify_skill_error(error_msg),
                             error_msg=error_msg,
                         )
                     except Exception:
@@ -1931,6 +1959,22 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
             except (ValueError, TypeError):
                 pass
 
+        # Pre-dispatch lesson check — same guard as the local execute_skill_tags path.
+        # Warn the model before the call fires so it can correct arguments or skip.
+        _cloud_lesson_prefix = ""
+        if "self_improvement" in skills:
+            try:
+                _cl_warn = skills["self_improvement"].check_lessons(skill_name, func_name)
+                if _cl_warn:
+                    _cloud_lesson_prefix = _cl_warn + "\n"
+                    execution_log.append({
+                        "skill": skill_name, "function": func_name,
+                        "status": "lesson_warning", "warning": _cl_warn,
+                    })
+                    print(f"📚 [cloud] Lesson fired: {_cl_warn[:100]}")
+            except Exception:
+                pass
+
         result = call_skill_improved(skill_name, func_name, **arguments)
 
         # Treat skill-level ok:False as an error even if no exception was raised
@@ -1943,7 +1987,7 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
             # they cause the context to balloon and the model to loop unnecessarily.
             if isinstance(inner, dict) and "base64" in inner:
                 inner = {k: v for k, v in inner.items() if k != "base64"}
-            content = str(inner)
+            content = _cloud_lesson_prefix + str(inner)
             log_entry = {
                 "skill":    skill_name,
                 "function": func_name,
@@ -1955,7 +1999,7 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
                 err = result.get("error", "Unknown error")
             else:
                 err = inner.get("error", str(inner))
-            content = f"Error in {skill_name}.{func_name}: {err}"
+            content = _cloud_lesson_prefix + f"Error in {skill_name}.{func_name}: {err}"
             log_entry = {
                 "skill":    skill_name,
                 "function": func_name,
@@ -1967,7 +2011,7 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
                 try:
                     skills["self_improvement"].record_mistake(
                         skill_name=f"{skill_name}.{func_name}",
-                        error_type="skill_error",
+                        error_type=_classify_skill_error(err),
                         error_msg=err,
                     )
                 except Exception:
@@ -2961,7 +3005,18 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 pass
         # Sort by timestamp descending, cap at 10 for local (tight ctx), 20 for cloud
         _lessons_cap = 10 if _is_local_model else 20
-        _deduped = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:_lessons_cap]
+        _sorted_all = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
+        # Reorder: lessons for skills matching the current message's keywords come first.
+        # Same cap, better signal — skills the user is about to use get their warnings up front.
+        _lessons_match, _lessons_rest = [], []
+        for _lx in _sorted_all:
+            _lx_skill = _lx.get("skill", "").split(".")[0]
+            _lx_kw = _HEAVY_SKILL_KEYWORDS.get(_lx_skill, set())
+            if _lx_kw and (_msg_words & _lx_kw):
+                _lessons_match.append(_lx)
+            else:
+                _lessons_rest.append(_lx)
+        _deduped = (_lessons_match + _lessons_rest)[:_lessons_cap]
         for _l in _deduped:
             _safe_fix = _sanitize_external_content(_l["fix_applied"][:150], source="lessons.jsonl")
             if _l.get("type") == "correction" and _l.get("bad_reply_preview"):
@@ -3022,16 +3077,19 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         try:
             _notes_skill = skills.get("notes")
             if _notes_skill and hasattr(_notes_skill, "get_context_for_prompt"):
-                # Lazy-load: only inject user model when the task is complex enough to
-                # benefit from it. Simple factual Q&A and short lookups don't need
-                # coding style, observed patterns, or past-rejection context.
+                # Inject user model on new sessions (first message) unconditionally —
+                # the agent must know user preferences before the first reply, not only
+                # when trigger words appear. On subsequent turns keep the lazy-load gate
+                # to avoid paying the cost on every short follow-up.
                 _USER_MODEL_TRIGGERS = {
                     "write", "build", "create", "implement", "fix", "debug", "code",
                     "draft", "compose", "plan", "design", "spec", "improve",
                     "refactor", "email", "schedule", "script", "skill",
                 }
+                _is_new_session = len(history) == 0
                 _needs_user_model = (
-                    len(req.message) > 40
+                    _is_new_session          # always at session start
+                    or len(req.message) > 40
                     or bool(_msg_words & _USER_MODEL_TRIGGERS)
                 )
                 if _needs_user_model:
@@ -3045,6 +3103,19 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             _dm_parts.append(f"Recent Journal (last {_journal_days} days):\n" + "\n".join(_journal_lines))
         if _user_model_block:
             _dm_parts.append("User Profile:\n" + _user_model_block)
+        # Surface the single most-recent open improvement idea when the message is
+        # improvement-related. One line only — no extra context window cost.
+        _IDEA_KEYWORDS = {"improve", "idea", "suggestion", "better", "enhance",
+                          "optimize", "proposal", "upgrade", "autoimprove"}
+        if _msg_words & _IDEA_KEYWORDS:
+            try:
+                _ai_skill = skills.get("autoimprove")
+                if _ai_skill and hasattr(_ai_skill, "get_latest_idea"):
+                    _latest_idea = _ai_skill.get_latest_idea()
+                    if _latest_idea:
+                        _dm_parts.append(f"💡 Most recent parked idea: {_latest_idea}")
+            except Exception:
+                pass
         _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
     except Exception:
         _daily_memory_block = "No journal entries yet."
