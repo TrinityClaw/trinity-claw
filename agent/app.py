@@ -3044,11 +3044,11 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
     # the first turn and return the cached string on every subsequent turn.
     # The "parked idea" block is dynamic per-message and appended separately.
     _is_new_session = len(history) == 0
+    from datetime import date as _date, timedelta as _timedelta
+    _today_str = _date.today().isoformat()
     if _is_new_session or session_id not in _session_daily_memory:
         _daily_memory_block = ""
         try:
-            from datetime import date as _date, timedelta as _timedelta
-            _today_str = _date.today().isoformat()
             _journal_days = 3 if _is_local_model else 7
             _cutoff_str = (_date.today() - _timedelta(days=_journal_days)).isoformat()
             _journal_entries = {}
