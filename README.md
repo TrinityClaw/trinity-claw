@@ -25,7 +25,6 @@ A self-modifying AI agent with persistent memory, dynamic skill creation, and in
 
 ## ⚠️ Security Notice
 
-> **Use at your own risk.**
 
 TrinityClaw is **secure by design** in its original form:
 - All skills run inside an isolated Docker container with no host access
