@@ -3148,6 +3148,26 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 print(f"⚠️  daily_review failed: {_dr_err}")
         threading.Thread(target=_bg_daily_review, daemon=True, name="daily-review").start()
 
+        # On new sessions: check if recurring failures warrant autoimprove — park result, never blocks
+        def _bg_should_improve():
+            try:
+                from skills.core import self_improvement as _si
+                result = _si.should_self_improve(threshold=3, window_days=7)
+                if result.get("improve"):
+                    _ai = skills.get("autoimprove")
+                    if _ai and hasattr(_ai, "park_idea"):
+                        top = result["patterns"][0]
+                        idea = (
+                            f"[auto] should_self_improve triggered: '{top['error_type']}' "
+                            f"occurred {top['count']}x in last 7 days — "
+                            f"run autoimprove.run_loop('{result['suggested_loop']}')"
+                        )
+                        _ai.park_idea(idea, source="should_self_improve")
+                    print(f"🔁 should_self_improve: {result['reason'][:120]}")
+            except Exception as _si_err:
+                print(f"⚠️  should_self_improve failed: {_si_err}")
+        threading.Thread(target=_bg_should_improve, daemon=True, name="should-improve").start()
+
     # If the user's message contains a URL, prepend a hard directive at the very top
     # of the system prompt so even a small local model sees it before anything else.
     import re as _re
