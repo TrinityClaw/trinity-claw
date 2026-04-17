@@ -235,7 +235,8 @@ def _human_interval(seconds: int) -> str:
 
 def _eta(next_run: datetime) -> str:
     """Return a human-readable ETA string for a future datetime (e.g. 'in 2h 15m')."""
-    diff = next_run - datetime.now()
+    now = datetime.now(next_run.tzinfo) if next_run.tzinfo else datetime.now()
+    diff = next_run - now
     secs = int(diff.total_seconds())
     if secs <= 0:
         return "overdue"
@@ -303,7 +304,9 @@ def _run():
                 to_fire = []
                 for name, t in tasks.items():
                     try:
-                        if now >= datetime.fromisoformat(t['next_run']):
+                        next_run_dt = datetime.fromisoformat(t['next_run'])
+                        _now = datetime.now(next_run_dt.tzinfo) if next_run_dt.tzinfo else now
+                        if _now >= next_run_dt:
                             to_fire.append((name, t['prompt'], t['type'],
                                             t.get('interval_seconds')))
                     except (ValueError, KeyError) as e:
