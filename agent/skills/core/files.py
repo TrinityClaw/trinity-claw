@@ -142,8 +142,15 @@ def sha256(path: str) -> str:
 
 # ── WRITE OPS ────────────────────────────────────────────────────────────────
 
-def write(path: str, content: str) -> str:
+def write(path: str = None, content: str = None, *, name: str = None) -> str:
     """Write content to a file (path relative to /app/memory/ if not absolute)"""
+    # Accept 'name' as alias for 'path' (LLM sometimes uses write(name=..., content=...))
+    if path is None and name is not None:
+        path = name
+    if not path:
+        return "Error: write() requires a 'path' argument"
+    if content is None:
+        return "Error: write() requires a 'content' argument"
     try:
         p = _write_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)

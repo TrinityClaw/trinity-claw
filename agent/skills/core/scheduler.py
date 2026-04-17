@@ -432,7 +432,7 @@ def schedule(name: str, when: str, prompt: str) -> str:
     )
 
 
-def schedule_recurring(name: str, every: str, prompt: str) -> str:
+def schedule_recurring(name: str, every: str = None, prompt: str = None, *, when: str = None) -> str:
     """
     Schedule a prompt to run REPEATEDLY on an interval.
 
@@ -440,6 +440,15 @@ def schedule_recurring(name: str, every: str, prompt: str) -> str:
     every  — how often: '30m', '2h', '1d', 'every 6 hours'
     prompt — what the agent should do each time
     """
+    # Accept 'when' as alias for 'every' (LLM sometimes confuses schedule() and schedule_recurring())
+    if every is None and when is not None:
+        every = when
+    missing = [arg for arg, val in [('every', every), ('prompt', prompt)] if not val]
+    if missing:
+        return (
+            f"❌ scheduler.schedule_recurring missing required argument(s): {', '.join(missing)}. "
+            f"Usage: schedule_recurring(name, every, prompt) — e.g. schedule_recurring('check_prices', '1h', 'Check DDR5 prices')"
+        )
     try:
         secs = _parse_interval(every)
     except ValueError as e:
