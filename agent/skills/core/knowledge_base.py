@@ -43,6 +43,7 @@ DOC = (
     "get_summary(filename)→retrieve the stored LLM summary for an ingested document; "
     "list_ingested()→show all indexed documents with chunk/word counts; "
     "delete_document(filename)→remove a document and its chunks from the index; "
+    "prune_stale(days=90, dry_run=True)→list (or remove) index entries not re-ingested within N days; dry_run=True just lists them, dry_run=False deletes from index and ChromaDB; "
     "status()→show collection stats and ChromaDB health."
 )
 
@@ -489,6 +490,85 @@ def schedule_nightly_kb(run_time: str = "2am") -> str:
         f"Drop files into /app/memory/knowledge/ and they'll be indexed automatically.\n"
         f"Check index: knowledge_base.list_ingested()"
     )
+
+
+def prune_stale(days: int = 90, dry_run: bool = True) -> str:
+    """
+    List (or remove) knowledge-base entries not re-ingested within N days.
+
+    dry_run=True (default): prints stale entries without touching anything.
+    dry_run=False: removes stale entries from the index and deletes their
+    chunks from ChromaDB so the next ingest_folder() re-ingests them fresh.
+
+    Args:
+        days:    Entries older than this many days are considered stale (default 90).
+        dry_run: When True, report only. When False, delete stale entries.
+
+    Returns:
+        Summary of stale entries found and actions taken.
+    """
+    from datetime import timedelta
+
+    index   = _load_index()
+    cutoff  = datetime.now() - timedelta(days=days)
+    stale   = []
+
+    for rel_path, info in index.items():
+        ts = info.get("ingested_at", "")
+        if not ts:
+            stale.append((rel_path, "no timestamp"))
+            continue
+        try:
+            ingested_at = datetime.fromisoformat(ts)
+            if ingested_at < cutoff:
+                age_days = (datetime.now() - ingested_at).days
+                stale.append((rel_path, f"{age_days} days old"))
+        except (ValueError, TypeError):
+            stale.append((rel_path, "unparseable timestamp"))
+
+    if not stale:
+        return f"✅ No stale entries — all documents re-ingested within the last {days} days."
+
+    lines = [
+        f"{'🔍 DRY RUN — ' if dry_run else '🗑️  REMOVING — '}"
+        f"{len(stale)} stale entr{'y' if len(stale) == 1 else 'ies'} "
+        f"(not re-ingested in >{days} days):\n"
+    ]
+    for rel_path, reason in stale:
+        lines.append(f"  • {rel_path}  [{reason}]")
+
+    if dry_run:
+        lines.append(
+            f"\nRe-run with dry_run=False to delete these entries and force re-ingestion."
+        )
+        return "\n".join(lines)
+
+    # Delete from ChromaDB and index
+    try:
+        col = _get_collection()
+    except RuntimeError as e:
+        return f"❌ ChromaDB unavailable — index not modified: {e}"
+
+    removed = 0
+    errors  = []
+    for rel_path, _ in stale:
+        try:
+            col.delete(where={"rel_path": rel_path})
+        except Exception as e:
+            errors.append(f"  ChromaDB delete failed for {rel_path}: {e}")
+        if rel_path in index:
+            del index[rel_path]
+            removed += 1
+
+    _save_index(index)
+
+    lines.append(f"\n✅ Removed {removed}/{len(stale)} stale entries from index and ChromaDB.")
+    lines.append("Call ingest_folder() to re-ingest them with fresh content.")
+    if errors:
+        lines.append("⚠️ ChromaDB errors (index was still updated):")
+        lines.extend(errors)
+
+    return "\n".join(lines)
 
 
 def status(*args) -> str:

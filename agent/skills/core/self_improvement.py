@@ -33,7 +33,12 @@ DOC = (
     "fix(skill_name, issue_type, line_number)→apply fix at line (use 'all' to fix every occurrence); always runs verify_skill() after — reports evidence before claiming success; "
     "verify_skill(skill_name)→syntax+compile+metadata checks then a model-based VERDICT: PASS/FAIL/PARTIAL with execution trace evidence — call before declaring any fix complete; "
     "daily_review(skill_name?)→scan skill(s), summarize lessons learned, surface recurring patterns; "
-    "record_mistake(skill, error_type, error_msg)→save lesson to lessons.jsonl; "
+    "record_mistake(skill, error_type, error_msg)→save lesson to lessons.jsonl and auto-index into ChromaDB; "
+    "search_lessons_semantic(query, n=5)→semantic ChromaDB search over past lessons — finds relevant failures without exact keyword match; "
+    "index_all_lessons()→bulk-index all lessons.jsonl entries into ChromaDB (run once after upgrade); "
+    "should_self_improve(threshold=3, window_days=7)→check if recurring failures in recent lessons warrant running autoimprove loops; "
+    "returns {improve: bool, reason: str, patterns: list, suggested_loop: str}; "
+    "call this at session start or after a task with errors to decide if autoimprove.run_loop() is warranted; "
     "report()→system-wide improvement summary with top recurring issues."
 )
 
@@ -176,7 +181,119 @@ def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied
     # recomputes counts from lessons.jsonl from scratch, so the new lesson is
     # reflected automatically on the next call. A manual += 1 here would write
     # a stale count to error_patterns.json that gets overwritten on next load.
+    if saved:
+        _index_lesson_in_chroma(lesson)  # best-effort — never raises
     return f"✅ Recorded lesson: {error_type} in {skill_name}" if saved else "⚠️ Failed to record lesson"
+
+# ── ChromaDB semantic indexing for lessons ─────────────────────────────────────
+
+_CHROMA_HOST        = os.getenv("CHROMA_HOST", "chroma")
+_LESSONS_COLLECTION = "lessons_semantic"
+
+
+def _get_lessons_collection():
+    """Return the ChromaDB lessons collection, or None if ChromaDB is unavailable."""
+    try:
+        import chromadb
+        client = chromadb.HttpClient(host=_CHROMA_HOST, port=8000)
+        return client.get_or_create_collection(name=_LESSONS_COLLECTION)
+    except Exception:
+        return None
+
+
+def _index_lesson_in_chroma(lesson: dict) -> None:
+    """Index a single lesson dict into ChromaDB — fire-and-forget, never raises.
+
+    Document text = 'skill error_type: error_message [fix: fix_applied]'
+    so semantic queries like 'web timeout error' or 'notes AttributeError'
+    can retrieve relevant past failures without keyword-exact matching.
+    """
+    try:
+        col = _get_lessons_collection()
+        if col is None:
+            return
+        doc_id   = lesson.get("hash", hashlib.md5(json.dumps(lesson, sort_keys=True).encode()).hexdigest()[:12])
+        skill    = lesson.get("skill", "unknown")
+        etype    = lesson.get("error_type", "error")
+        emsg     = lesson.get("error_message", "")[:200]
+        fix      = lesson.get("fix_applied", "")[:200]
+        doc_text = f"{skill} {etype}: {emsg}" + (f" [fix: {fix}]" if fix else "")
+        col.upsert(
+            documents=[doc_text],
+            ids=[doc_id],
+            metadatas=[{
+                "skill":      skill,
+                "error_type": etype,
+                "timestamp":  lesson.get("timestamp", ""),
+                "has_fix":    bool(fix),
+            }],
+        )
+    except Exception:
+        pass  # ChromaDB down → lessons still saved to JSONL, indexing is best-effort
+
+
+def search_lessons_semantic(query: str, n: int = 5) -> str:
+    """Semantic search over past lessons using ChromaDB embeddings.
+
+    More accurate than keyword matching — finds relevant failures even when
+    the exact skill name or error type isn't in the query.
+
+    Args:
+        query: Natural-language description of the error or scenario.
+        n:     Max results to return (default 5).
+
+    Returns:
+        Formatted list of matching lessons, or a message if none found.
+    """
+    col = _get_lessons_collection()
+    if col is None:
+        return "⚠️ ChromaDB not available — semantic lesson search unavailable."
+    try:
+        n = max(1, min(int(n), 20))
+        results = col.query(query_texts=[query], n_results=n)
+        docs      = results.get("documents",  [[]])[0]
+        metadatas = results.get("metadatas",  [[]])[0]
+        distances = results.get("distances",  [[]])[0]
+        if not docs:
+            return "📭 No matching lessons found."
+        lines = [f"🔍 Semantic lesson search: '{query}' — {len(docs)} result(s)"]
+        for doc, meta, dist in zip(docs, metadatas, distances):
+            relevance = max(0.0, 1.0 - dist)
+            lines.append(
+                f"\n  [{meta.get('skill','?')}] {meta.get('error_type','?')} "
+                f"({meta.get('timestamp','')[:10]}) — relevance {relevance:.0%}"
+            )
+            lines.append(f"  {doc[:200]}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"⚠️ Semantic search failed: {e}"
+
+
+def index_all_lessons() -> str:
+    """Index (or re-index) all lessons from lessons.jsonl into ChromaDB.
+
+    Safe to run repeatedly — uses upsert so existing entries are updated,
+    not duplicated. Run this once after upgrading to enable semantic search
+    on historical lessons.
+
+    Returns:
+        Summary of how many lessons were indexed.
+    """
+    col = _get_lessons_collection()
+    if col is None:
+        return "⚠️ ChromaDB not available."
+    lessons = _load_lessons()
+    if not lessons:
+        return "📭 No lessons to index."
+    indexed = 0
+    for lesson in lessons:
+        try:
+            _index_lesson_in_chroma(lesson)
+            indexed += 1
+        except Exception:
+            pass
+    return f"✅ Indexed {indexed}/{len(lessons)} lessons into ChromaDB '{_LESSONS_COLLECTION}'."
+
 
 def check_for_learned_fix(skill_name: str, error_type: str) -> Optional[str]:
     """Check if we've already learned a fix for this error type in this skill."""
@@ -1064,6 +1181,104 @@ def daily_review(skill_name: str = "") -> str:
     return "\n".join(lines)
 
 
+def should_self_improve(threshold: int = 3, window_days: int = 7) -> dict:
+    """Check if recurring failures in recent lessons warrant running autoimprove loops.
+
+    Scans lessons.jsonl for the last window_days days and counts occurrences per
+    error_type. If any type hits the threshold without a learned fix already in place,
+    self-improvement is recommended.
+
+    Call this at session start or after a task that produced errors.
+
+    Args:
+        threshold:   Minimum recurrence count to trigger a recommendation (default 3).
+        window_days: How many days of lesson history to consider (default 7).
+
+    Returns:
+        {
+            "improve":        bool,          # True if autoimprove is recommended
+            "reason":         str,           # Human-readable explanation
+            "patterns":       list[dict],    # [{error_type, count, has_fix, suggested_loop}]
+            "suggested_loop": str,           # autoimprove loop name to run first, or ""
+        }
+    """
+    from datetime import timedelta
+
+    cutoff  = datetime.now() - timedelta(days=window_days)
+    lessons = _load_lessons()
+
+    # Filter to the window
+    recent: List[Dict] = []
+    for lesson in lessons:
+        ts = lesson.get("timestamp", "")
+        if not ts:
+            continue
+        try:
+            if datetime.fromisoformat(ts) >= cutoff:
+                recent.append(lesson)
+        except (ValueError, TypeError):
+            continue
+
+    if not recent:
+        return {
+            "improve": False,
+            "reason": f"No lessons recorded in the last {window_days} days.",
+            "patterns": [],
+            "suggested_loop": "",
+        }
+
+    # Count per error_type
+    counts: Dict[str, int] = {}
+    for lesson in recent:
+        et = lesson.get("error_type") or lesson.get("type") or "unknown"
+        if et == "user_feedback":
+            continue
+        counts[et] = counts.get(et, 0) + 1
+
+    # Map auto-fixable types to their autoimprove loop
+    _LOOP_MAP = {
+        "bare_except":       "ast_audit",
+        "missing_timeout":   "ast_audit",
+        "missing_docstring": "ast_audit",
+    }
+    _DEFAULT_LOOP = "error_reduce"
+
+    patterns = []
+    for et, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+        if count < threshold:
+            continue
+        has_fix = bool(check_for_learned_fix("", et))  # check any skill
+        patterns.append({
+            "error_type":     et,
+            "count":          count,
+            "has_fix":        has_fix,
+            "suggested_loop": _LOOP_MAP.get(et, _DEFAULT_LOOP),
+        })
+
+    if not patterns:
+        return {
+            "improve": False,
+            "reason": (
+                f"No error type exceeded threshold={threshold} in the last {window_days} days "
+                f"({len(recent)} lessons scanned)."
+            ),
+            "patterns": [],
+            "suggested_loop": "",
+        }
+
+    top = patterns[0]
+    reason = (
+        f"'{top['error_type']}' has occurred {top['count']}× in the last {window_days} days "
+        f"(threshold={threshold}). Running autoimprove.run_loop('{top['suggested_loop']}') is recommended."
+    )
+    return {
+        "improve":        True,
+        "reason":         reason,
+        "patterns":       patterns,
+        "suggested_loop": top["suggested_loop"],
+    }
+
+
 def status() -> str:
     """Return skill status and capabilities."""
     lessons = _load_lessons()
@@ -1080,6 +1295,7 @@ def status() -> str:
         "  • fix(skill_name, issue_type, line_number)   - Auto-apply fix (use 'all' to fix every occurrence); always verifies after",
         "  • verify_skill(skill_name)                   - Syntax+compile+metadata check — call before claiming a fix is done",
         "  • daily_review(skill_name?)                  - Daily learning cycle: scan + surface recurring patterns",
+        "  • should_self_improve(threshold=3, window_days=7) - Check if recurring failures warrant autoimprove loops",
         "  • prevent(skill_name, error_type)            - Check for learned fixes",
         "  • report()                                   - System-wide improvement summary",
         "  • suggest_tests(skill_name)                  - Generate test cases",
@@ -1128,4 +1344,5 @@ __all__ = [
     "apply_patch",
     "get_skill_health_report",
     "analyze_skill_code",
+    "should_self_improve",
 ]
