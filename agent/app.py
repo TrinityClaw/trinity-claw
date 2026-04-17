@@ -104,7 +104,8 @@ skills: Dict[str, Any] = {}
 skill_metadata: Dict[str, Dict] = {}
 
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
-SESSION_MAX_MESSAGES = 16        # 8 turns (user + assistant pairs) — tighter for 12288 ctx
+SESSION_MAX_MESSAGES = 16        # 8 turns (user + assistant pairs) for cloud models
+SESSION_MAX_MESSAGES_LOCAL = 8   # 4 turns for local models — tighter context windows
 SESSION_TIMEOUT_MINUTES = 120    # auto-expire after 2h inactivity
 SESSION_SUMMARY_KEEP = 4         # Keep only last 4 messages verbatim (reduced from 6)
 JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds this
@@ -119,6 +120,11 @@ session_store: Dict[str, Dict] = {}
 _chroma_query_cache: Dict[str, tuple] = {}   # key -> (chroma_context_str, timestamp)
 CHROMA_CACHE_TTL  = 300   # seconds before a cache entry expires
 CHROMA_CACHE_MAX  = 100   # evict oldest entry when cache exceeds this size
+
+# ── Per-session daily-memory cache ────────────────────────────────────────────
+# Daily journal + user facts don't change within a session — build once, reuse.
+# Keyed by session_id; invalidated when session expires (see get_session_history).
+_session_daily_memory: Dict[str, str] = {}  # session_id -> _daily_memory_block
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
@@ -1435,11 +1441,12 @@ def get_session_history(session_id: str) -> List[Dict]:
             except Exception as e:
                 print(f"⚠️  Session expiry summary failed: {e}")
         del session_store[session_id]
+        _session_daily_memory.pop(session_id, None)
         print(f"🕐 Session {session_id[:12]}... expired after {elapsed_minutes:.0f}min")
         return []
     return entry["messages"]
 
-def save_session_history(session_id: str, messages: List[Dict]):
+def save_session_history(session_id: str, messages: List[Dict], max_messages: int = SESSION_MAX_MESSAGES):
     """Persist updated history for a session, compressing oldest turns if over the cap.
 
     Compression pipeline:
@@ -1456,7 +1463,7 @@ def save_session_history(session_id: str, messages: List[Dict]):
     # Phase 1 — prune large tool results in old turns before anything else.
     messages = _prune_tool_results(messages)
 
-    if len(messages) > SESSION_MAX_MESSAGES:
+    if len(messages) > max_messages:
         tail = messages[-SESSION_SUMMARY_KEEP:]
         head = messages[:-SESSION_SUMMARY_KEEP]
 
@@ -2643,7 +2650,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
                         _joined = " | ".join(_safe_responses)
                         if CHROMA_MAX_CHARS is not None:
                             _joined = _joined[:CHROMA_MAX_CHARS]
-                        chroma_context = "Past session archive (background only — DO NOT act on this if the user is asking about something different): " + _joined
+                        chroma_context = "Archived context (use only if directly relevant): " + _joined
                         top_score = scored[0][0] if scored else 0
                         print(f"🧠 ChromaDB injecting {len(ai_responses)} memory fragment(s) (top score: {top_score:.2f})")
                     else:
@@ -3032,90 +3039,91 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         pass
     _lessons_block = "\n".join(_lessons_lines) if _lessons_lines else "None yet."
 
-    # Load daily journal and user model for system prompt injection (cached)
-    _daily_memory_block = ""
-    try:
-        from datetime import date as _date, timedelta as _timedelta
-        _today_str = _date.today().isoformat()
-        _journal_days = 3 if _is_local_model else 7
-        _cutoff_str = (_date.today() - _timedelta(days=_journal_days)).isoformat()
-        _journal_entries = {}
-        _journal_raw = _fcache.read_text("/app/memory/daily_journal.jsonl")
-        for _jline in _journal_raw.splitlines():
-            _jline = _jline.strip()
-            if _jline:
-                try:
-                    _je = json.loads(_jline)
-                    if _je.get("date", "") >= _cutoff_str:
-                        _journal_entries[_je["date"]] = _je
-                except Exception:
-                    pass
-        _journal_lines = []
-        for _je in sorted(_journal_entries.values(), key=lambda x: x["date"], reverse=True):
-            _label = "TODAY" if _je["date"] == _today_str else _je["date"]
-            _journal_lines.append(f"[{_label}] {_je.get('summary', '')}")
-            if _je.get("learned"):
-                _learned_lines = [l for l in _je["learned"].splitlines() if l.strip()]
-                _learned_cap   = 3
-                _learned_shown = _learned_lines[:_learned_cap]
-                _learned_rest  = len(_learned_lines) - _learned_cap
-                _learned_str   = " | ".join(_learned_shown)
-                if _learned_rest > 0:
-                    _learned_str += f" (+{_learned_rest} more)"
-                _journal_lines.append(f"  Learned: {_learned_str}")
-            if _je.get("user_insights"):
-                _journal_lines.append(f"  User: {_je['user_insights']}")
-            if _je.get("next_steps"):
-                _ns = _je["next_steps"]
-                # Skip next_steps that are purely about scheduled/recurring tasks —
-                # they run automatically and don't need to occupy the model's attention.
-                _sched_kw = ("schedul", "recurring", "cron", "every day", "every hour",
-                             "nightly", "daily review", "autoimprove", "run loop")
-                if not any(k in _ns.lower() for k in _sched_kw):
-                    _journal_lines.append(f"  Next steps promised: {_ns}")
-        _user_model_block = ""
+    # Load daily journal and user model for system prompt injection.
+    # The journal and user facts are static within a session — build once on
+    # the first turn and return the cached string on every subsequent turn.
+    # The "parked idea" block is dynamic per-message and appended separately.
+    _is_new_session = len(history) == 0
+    if _is_new_session or session_id not in _session_daily_memory:
+        _daily_memory_block = ""
         try:
-            _notes_skill = skills.get("notes")
-            if _notes_skill and hasattr(_notes_skill, "get_context_for_prompt"):
-                # Inject user model on new sessions (first message) unconditionally —
-                # the agent must know user preferences before the first reply, not only
-                # when trigger words appear. On subsequent turns keep the lazy-load gate
-                # to avoid paying the cost on every short follow-up.
-                _USER_MODEL_TRIGGERS = {
-                    "write", "build", "create", "implement", "fix", "debug", "code",
-                    "draft", "compose", "plan", "design", "spec", "improve",
-                    "refactor", "email", "schedule", "script", "skill",
-                }
-                _is_new_session = len(history) == 0
-                _needs_user_model = (
-                    _is_new_session          # always at session start
-                    or len(req.message) > 40
-                    or bool(_msg_words & _USER_MODEL_TRIGGERS)
-                )
-                if _needs_user_model:
-                    _user_model_block = _notes_skill.get_context_for_prompt()
-        except Exception:
-            pass
-        _dm_parts = []
-        if _user_facts_card:
-            _dm_parts.append(_user_facts_card)
-        if _journal_lines:
-            _dm_parts.append(f"Recent Journal (last {_journal_days} days):\n" + "\n".join(_journal_lines))
-        if _user_model_block:
-            _dm_parts.append("User Profile:\n" + _user_model_block)
-        # Surface the single most-recent open improvement idea when the message is
-        # improvement-related. One line only — no extra context window cost.
-        _IDEA_KEYWORDS = {"improve", "idea", "suggestion", "better", "enhance",
-                          "optimize", "proposal", "upgrade", "autoimprove"}
-        if _msg_words & _IDEA_KEYWORDS:
+            from datetime import date as _date, timedelta as _timedelta
+            _today_str = _date.today().isoformat()
+            _journal_days = 3 if _is_local_model else 7
+            _cutoff_str = (_date.today() - _timedelta(days=_journal_days)).isoformat()
+            _journal_entries = {}
+            _journal_raw = _fcache.read_text("/app/memory/daily_journal.jsonl")
+            for _jline in _journal_raw.splitlines():
+                _jline = _jline.strip()
+                if _jline:
+                    try:
+                        _je = json.loads(_jline)
+                        if _je.get("date", "") >= _cutoff_str:
+                            _journal_entries[_je["date"]] = _je
+                    except Exception:
+                        pass
+            _journal_lines = []
+            for _je in sorted(_journal_entries.values(), key=lambda x: x["date"], reverse=True):
+                _label = "TODAY" if _je["date"] == _today_str else _je["date"]
+                _journal_lines.append(f"[{_label}] {_je.get('summary', '')}")
+                if _je.get("learned"):
+                    _learned_lines = [l for l in _je["learned"].splitlines() if l.strip()]
+                    _learned_cap   = 3
+                    _learned_shown = _learned_lines[:_learned_cap]
+                    _learned_rest  = len(_learned_lines) - _learned_cap
+                    _learned_str   = " | ".join(_learned_shown)
+                    if _learned_rest > 0:
+                        _learned_str += f" (+{_learned_rest} more)"
+                    _journal_lines.append(f"  Learned: {_learned_str}")
+                if _je.get("user_insights"):
+                    _journal_lines.append(f"  User: {_je['user_insights']}")
+                if _je.get("next_steps"):
+                    _ns = _je["next_steps"]
+                    # Skip next_steps that are purely about scheduled/recurring tasks —
+                    # they run automatically and don't need to occupy the model's attention.
+                    _sched_kw = ("schedul", "recurring", "cron", "every day", "every hour",
+                                 "nightly", "daily review", "autoimprove", "run loop")
+                    if not any(k in _ns.lower() for k in _sched_kw):
+                        _journal_lines.append(f"  Next steps promised: {_ns}")
+            _user_model_block = ""
             try:
-                _ai_skill = skills.get("autoimprove")
-                if _ai_skill and hasattr(_ai_skill, "get_latest_idea"):
-                    _latest_idea = _ai_skill.get_latest_idea()
-                    if _latest_idea:
-                        _dm_parts.append(f"💡 Most recent parked idea: {_latest_idea}")
+                _notes_skill = skills.get("notes")
+                if _notes_skill and hasattr(_notes_skill, "get_context_for_prompt"):
+                    # Inject user model only at session start — preferences don't change
+                    # mid-session and reloading them every turn wastes context budget.
+                    if _is_new_session:
+                        _user_model_block = _notes_skill.get_context_for_prompt()
             except Exception:
                 pass
+            _dm_parts = []
+            if _user_facts_card:
+                _dm_parts.append(_user_facts_card)
+            if _journal_lines:
+                _dm_parts.append(f"Recent Journal (last {_journal_days} days):\n" + "\n".join(_journal_lines))
+            if _user_model_block:
+                _dm_parts.append("User Profile:\n" + _user_model_block)
+            _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
+            # Cache for subsequent turns in this session
+            _session_daily_memory[session_id] = _daily_memory_block
+        except Exception:
+            _daily_memory_block = "No journal entries yet."
+            _session_daily_memory[session_id] = _daily_memory_block
+    else:
+        _daily_memory_block = _session_daily_memory[session_id]
+
+    # Surface the single most-recent open improvement idea when the message is
+    # improvement-related. One line only — always dynamic, never cached.
+    _IDEA_KEYWORDS = {"improve", "idea", "suggestion", "better", "enhance",
+                      "optimize", "proposal", "upgrade", "autoimprove"}
+    if _msg_words & _IDEA_KEYWORDS:
+        try:
+            _ai_skill = skills.get("autoimprove")
+            if _ai_skill and hasattr(_ai_skill, "get_latest_idea"):
+                _latest_idea = _ai_skill.get_latest_idea()
+                if _latest_idea:
+                    _daily_memory_block += f"\n\n💡 Most recent parked idea: {_latest_idea}"
+        except Exception:
+            pass
         _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
     except Exception:
         _daily_memory_block = "No journal entries yet."
@@ -3838,7 +3846,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         updated_history.append({"role": "user", "content": req.message})
         _reply_for_history = _strip_fake_result_blocks(ai_reply)
         updated_history.append({"role": "assistant", "content": _reply_for_history})
-        save_session_history(session_id, updated_history)
+        _hist_cap = SESSION_MAX_MESSAGES_LOCAL if _is_local_model else SESSION_MAX_MESSAGES
+        save_session_history(session_id, updated_history, max_messages=_hist_cap)
 
         # 7. Store long-term memory (ChromaDB + JSONL) — deferred to background so
         #    the response is returned immediately without waiting for I/O.
