@@ -3124,9 +3124,6 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     _daily_memory_block += f"\n\n💡 Most recent parked idea: {_latest_idea}"
         except Exception:
             pass
-        _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
-    except Exception:
-        _daily_memory_block = "No journal entries yet."
 
     # On new sessions (first message): run daily_review in background — never blocks the response
     _skill_health_section = ""
