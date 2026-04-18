@@ -28,17 +28,19 @@ SKILL_TIMEOUT = 300  # 5-minute timeout — checking 10+ sites needs room
 
 DOC = (
     "Competitive intelligence: monitor competitor websites for changes in pricing, messaging, "
-    "and content. add_site(url, name, selectors, priority, js_rendered) — add to watchlist. "
+    "and content. add_site(url, name, selectors, priority, js_rendered, verify_ssl, user_agent) — add to watchlist. "
+    "NOTE: js_rendered=true stores the flag but does NOT perform real JS rendering — static HTML "
+    "fetch only; for JS content use web.browser_goto(url) + web.browser_text() manually. "
     "remove_site(url) — remove from watchlist. list_watchlist() — show all monitored sites. "
     "check_site(url) — check a single site for changes right now. "
     "run_check() — check ALL watchlist sites and return a structured change report ready for "
     "strategic analysis. get_alerts(days) — show recent change history. "
-    "clear_alerts() — prune old alerts. schedule_daily(hour) — auto-run every day at target hour."
+    "clear_alerts() — prune old alerts. schedule_daily(hour, interval_hours) — auto-run on a recurring schedule."
 )
 
 # ── Storage paths ─────────────────────────────────────────────────────────────
 
-_BASE          = Path("/app/memory/competitive_intel")
+_BASE          = Path(os.environ.get("TRINITY_MEMORY", "/app/memory")) / "competitive_intel"
 _WATCHLIST_FILE = _BASE / "watchlist.json"
 _SNAPSHOTS_FILE = _BASE / "snapshots.json"
 _ALERTS_FILE    = _BASE / "alerts.json"
@@ -88,6 +90,7 @@ def _ensure_dirs() -> None:
 
 
 def _load_json(path: Path, default: Any) -> Any:
+    """Load JSON from path, returning default on missing file or parse error."""
     _ensure_dirs()
     if path.exists():
         try:
@@ -98,12 +101,14 @@ def _load_json(path: Path, default: Any) -> Any:
 
 
 def _save_json(path: Path, data: Any) -> None:
+    """Write data as indented JSON to path, creating parent dirs as needed."""
     _ensure_dirs()
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 # ── URL helpers ───────────────────────────────────────────────────────────────
 
 def _normalize_url(url: str) -> str:
+    """Strip whitespace/trailing slash and prepend https:// if scheme is missing."""
     url = url.strip().rstrip("/")
     if url and not url.startswith(("http://", "https://")):
         url = "https://" + url
@@ -111,6 +116,7 @@ def _normalize_url(url: str) -> str:
 
 
 def _get_domain(url: str) -> str:
+    """Extract the netloc (host) from a URL for rate-limiting keying."""
     try:
         return urlparse(url).netloc or url
     except Exception:
@@ -130,7 +136,8 @@ def _wait_for_domain(domain: str) -> None:
 
 # ── HTTP session ──────────────────────────────────────────────────────────────
 
-def _make_session() -> "requests.Session":
+def _make_session(verify_ssl: bool = True, user_agent: str = "") -> "requests.Session":
+    """Build a requests.Session with retry logic, browser-like headers, and optional SSL/UA overrides."""
     session = requests.Session()
     try:
         retry = Retry(
@@ -149,8 +156,9 @@ def _make_session() -> "requests.Session":
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    session.verify = verify_ssl
     session.headers.update({
-        "User-Agent": random.choice(_USER_AGENTS),
+        "User-Agent": user_agent.strip() if user_agent.strip() else random.choice(_USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate, br",
@@ -204,6 +212,7 @@ def _extract_content(html_text: str, selectors: Optional[List[str]] = None) -> s
 # ── Hashing and noise detection ───────────────────────────────────────────────
 
 def _content_hash(content: str) -> str:
+    """Return a SHA-256 hex digest of whitespace-normalised, lowercased content."""
     normalized = re.sub(r"\s+", " ", content).strip().lower()
     return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
 
@@ -233,6 +242,7 @@ def _similarity_ratio(a: str, b: str) -> float:
 
 
 def _excerpt(content: str) -> str:
+    """Return the first EXCERPT_LEN chars of whitespace-normalised content, with ellipsis if truncated."""
     text = re.sub(r"\s+", " ", content).strip()
     return text[:EXCERPT_LEN] + ("..." if len(text) > EXCERPT_LEN else "")
 
@@ -297,20 +307,22 @@ def _send_telegram_alert(message: str) -> bool:
 
 # ── Page fetcher ──────────────────────────────────────────────────────────────
 
-def _fetch_page(url: str, session: "Optional[requests.Session]" = None) -> tuple:
+def _fetch_page(url: str, session: "Optional[requests.Session]" = None,
+                verify_ssl: bool = True, user_agent: str = "") -> tuple:
     """
     Fetch a page with per-domain rate limiting and retry.
     Returns (html_text, error_message). error_message is "" on success.
 
     Pass a shared session to reuse connections across multiple calls (e.g. in
-    run_check). When session=None a fresh one-shot session is created.
+    run_check). When session=None a fresh one-shot session is created using
+    verify_ssl and user_agent from the watchlist entry.
     """
     if not HAS_REQUESTS:
         return "", "requests library not installed"
     domain = _get_domain(url)
     _wait_for_domain(domain)
     if session is None:
-        session = _make_session()
+        session = _make_session(verify_ssl=verify_ssl, user_agent=user_agent)
     try:
         resp = session.get(url, timeout=(10, 30), allow_redirects=True)
         if resp.status_code == 200:
@@ -324,7 +336,8 @@ def _fetch_page(url: str, session: "Optional[requests.Session]" = None) -> tuple
 # ══════════════════════════════════════════════════════════════════════════════
 
 def add_site(url: str, name: str, selectors: str = "",
-             priority: str = "medium", js_rendered: str = "false") -> str:
+             priority: str = "medium", js_rendered: str = "false",
+             verify_ssl: str = "true", user_agent: str = "") -> str:
     """
     Add a website to the competitive intelligence watchlist.
 
@@ -333,7 +346,9 @@ def add_site(url: str, name: str, selectors: str = "",
         name: Human-readable label (e.g., Competitor1 Pricing)
         selectors: CSS selectors to scope monitoring, comma-separated or JSON array (optional)
         priority: Alert priority — high, medium, or low (default: medium)
-        js_rendered: Set to true if the site loads content via JavaScript
+        js_rendered: Flag that site uses JS (static fetch only — see note in response)
+        verify_ssl: Set to false to skip SSL certificate verification (e.g. internal/dev sites)
+        user_agent: Custom User-Agent string for this site; defaults to a random browser UA
 
     Returns:
         Confirmation message with watchlist count
@@ -346,25 +361,30 @@ def add_site(url: str, name: str, selectors: str = "",
     if priority not in ("high", "medium", "low"):
         priority = "medium"
 
-    js = str(js_rendered).strip().lower() in ("true", "yes", "1")
+    js  = str(js_rendered).strip().lower() in ("true", "yes", "1")
+    ssl = str(verify_ssl).strip().lower() not in ("false", "no", "0")
     parsed_selectors = _parse_selectors(selectors)
 
     watchlist = _load_json(_WATCHLIST_FILE, {})
     watchlist[url] = {
-        "name": name.strip() or url,
-        "selectors": parsed_selectors,
-        "priority": priority,
+        "name":        name.strip() or url,
+        "selectors":   parsed_selectors,
+        "priority":    priority,
         "js_rendered": js,
-        "added_at": datetime.now().isoformat(),
+        "verify_ssl":  ssl,
+        "user_agent":  user_agent.strip(),
+        "added_at":    datetime.now().isoformat(),
     }
     _save_json(_WATCHLIST_FILE, watchlist)
 
     sel_info = f"\n   Selectors: {parsed_selectors}" if parsed_selectors else ""
-    js_info  = "\n   Note: JS-rendered — static fetch only (for full JS support use web.browser_text)" if js else ""
+    ssl_info = "\n   ⚠️  SSL verification disabled." if not ssl else ""
+    ua_info  = f"\n   User-Agent: {user_agent.strip()}" if user_agent.strip() else ""
+    js_info  = "\n   Note: JS-rendered flag stored, but JS rendering is NOT implemented — static fetch only.\n   For JS content, use web.browser_goto(url) then web.browser_text() manually." if js else ""
     return (
         f"✅ Added to watchlist: {name}\n"
         f"   URL: {url}\n"
-        f"   Priority: {priority}{sel_info}{js_info}\n"
+        f"   Priority: {priority}{sel_info}{ssl_info}{ua_info}{js_info}\n"
         f"   Total sites monitored: {len(watchlist)}"
     )
 
@@ -476,11 +496,13 @@ def check_site(url: str) -> str:
         "name": url, "selectors": [], "priority": "medium", "js_rendered": False
     })
 
-    name      = entry.get("name", url)
-    selectors = entry.get("selectors", [])
-    js        = entry.get("js_rendered", False)
+    name       = entry.get("name", url)
+    selectors  = entry.get("selectors", [])
+    js         = entry.get("js_rendered", False)
+    verify_ssl = entry.get("verify_ssl", True)
+    user_agent = entry.get("user_agent", "")
 
-    page_html, error = _fetch_page(url)
+    page_html, error = _fetch_page(url, verify_ssl=verify_ssl, user_agent=user_agent)
     if error:
         return f"❌ Could not fetch {name}: {error}"
 
@@ -497,7 +519,7 @@ def check_site(url: str) -> str:
     snapshots = _load_json(_SNAPSHOTS_FILE, {})
     prev      = snapshots.get(url, {})
     prev_hash     = prev.get("hash", "")
-    prev_sample   = prev.get("sample", prev.get("excerpt", ""))
+    prev_sample   = prev.get("sample", "")   # "" → similarity=0 → skip noise gate for old snapshots
     reported_hash = prev.get("reported_hash", "")
 
     # Build updated snapshot — hash/excerpt/sample always reflect latest content
@@ -595,13 +617,23 @@ def run_check() -> str:
     shared_session = _make_session() if HAS_REQUESTS else None
 
     for url, entry in sorted_entries:
-        name      = entry.get("name", url)
-        selectors = entry.get("selectors", [])
-        js        = entry.get("js_rendered", False)
-        priority  = entry.get("priority", "medium")
+        name       = entry.get("name", url)
+        selectors  = entry.get("selectors", [])
+        js         = entry.get("js_rendered", False)
+        priority   = entry.get("priority", "medium")
+        verify_ssl = entry.get("verify_ssl", True)
+        user_agent = entry.get("user_agent", "")
+
+        # Use a dedicated session when the site has custom SSL/UA settings;
+        # otherwise reuse the shared session for connection efficiency.
+        site_session = (
+            _make_session(verify_ssl=verify_ssl, user_agent=user_agent)
+            if (not verify_ssl or user_agent)
+            else shared_session
+        )
 
         try:
-            page_html, error = _fetch_page(url, session=shared_session)
+            page_html, error = _fetch_page(url, session=site_session)
 
             if error:
                 results_errors.append({"name": name, "url": url, "error": error})
@@ -622,7 +654,7 @@ def run_check() -> str:
             prev          = snapshots.get(url, {})
             prev_hash     = prev.get("hash", "")
             prev_excerpt  = prev.get("excerpt", "")
-            prev_sample   = prev.get("sample", prev_excerpt)
+            prev_sample   = prev.get("sample", "")   # "" → similarity=0 → skip noise gate for old snapshots
             reported_hash = prev.get("reported_hash", "")
 
             # Always update snapshot to latest content
@@ -755,7 +787,7 @@ def run_check() -> str:
     return "\n".join(lines)
 
 
-def get_alerts(days: str = "7") -> str:
+def get_alerts(days: int = 7) -> str:
     """
     Show competitive intelligence alerts from the past N days.
 
@@ -829,23 +861,31 @@ def clear_alerts() -> str:
     return f"✅ Cleared {removed} old alert(s). {len(kept)} recent alert(s) retained (last 30 days).{snap_note}"
 
 
-def schedule_daily(hour: str = "8") -> str:
+def schedule_daily(hour: str = "8", interval_hours: str = "24") -> str:
     """
-    Schedule the competitive intelligence check to run automatically every day.
+    Schedule the competitive intelligence check to run automatically on a recurring interval.
     Returns a warning (not an overwrite) if the task is already scheduled.
 
     Args:
-        hour: Hour of day to first run (0-23, default: 8 for 8am). Repeats every 24h from there.
+        hour: Hour of day for the first run (0-23, default: 8 for 8am).
+        interval_hours: How often to repeat in hours (default: 24). Use 6 or 12 for more frequent checks.
 
     Returns:
-        Confirmation with next scheduled run time
+        Confirmation with next scheduled run time and interval
     """
     try:
         h = max(0, min(23, int(str(hour).strip())))
     except (ValueError, TypeError):
         h = 8
 
-    tasks_file = Path("/app/memory/scheduled_tasks.json")
+    try:
+        interval_h = max(1, int(str(interval_hours).strip()))
+    except (ValueError, TypeError):
+        interval_h = 24
+
+    interval_seconds = interval_h * 3600
+
+    tasks_file = Path(os.environ.get("TRINITY_MEMORY", "/app/memory")) / "scheduled_tasks.json"
 
     existing_tasks = {}
     if tasks_file.exists():
@@ -858,22 +898,17 @@ def schedule_daily(hour: str = "8") -> str:
     now      = datetime.now()
     next_run = now.replace(hour=h, minute=0, second=0, microsecond=0)
     if next_run <= now:
-        next_run += timedelta(days=1)
+        next_run += timedelta(hours=interval_h)
 
-    prompt = (
-        "Run the daily competitive intelligence check: call competitive_intel.run_check() "
-        "to check all watchlist sites for changes. If changes are detected, for each one: "
-        "1) Categorize as pricing / product / messaging / leadership / content / other. "
-        "2) Assess: threat, opportunity, or noise? "
-        "3) Recommend 1-2 actionable next steps. "
-        "Keep the summary executive-ready and concise."
-    )
+    # Prompt is intentionally minimal — just trigger the data collection.
+    # Any strategic analysis should be requested explicitly by the user.
+    prompt = "Run competitive_intel.run_check() and report the results."
 
     task = {
         "type":             "recurring",
         "prompt":           prompt,
         "next_run":         next_run.isoformat(),
-        "interval_seconds": 86400,
+        "interval_seconds": interval_seconds,
         "created":          now.isoformat(),
         "last_run":         None,
         "run_count":        0,
@@ -918,10 +953,11 @@ def schedule_daily(hour: str = "8") -> str:
         tmp.write_text(json.dumps(existing_tasks, indent=2), encoding="utf-8")
         tmp.replace(tasks_file)
 
+    interval_label = f"every {interval_h}h" if interval_h != 24 else "every 24h"
     return (
-        f"✅ Competitive intelligence check scheduled daily\n"
+        f"✅ Competitive intelligence check scheduled\n"
         f"   First run: {next_run.strftime('%Y-%m-%d %H:%M')}\n"
-        f"   Repeats every 24h\n"
+        f"   Repeats: {interval_label}\n"
         f"   Task name: competitive_intel_daily\n"
         f"   To cancel: scheduler.remove('competitive_intel_daily')\n"
         f"   (Uses scheduler.schedule_recurring internally — no direct file writes.)"
