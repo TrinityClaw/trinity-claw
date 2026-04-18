@@ -33,6 +33,8 @@ __all__ = [
 _TASKS_FILE    = Path("/app/memory/scheduled_tasks.json")
 _ACTIVITY_LOG  = Path("/app/memory/activity_log.jsonl")
 _lock = threading.Lock()
+_start_lock = threading.Lock()   # guards _ensure_running check+set atomicity
+_firing_tasks: set = set()       # names of tasks currently being dispatched
 _running = False
 _thread = None
 
@@ -42,10 +44,12 @@ _LOG_KEEP_LINES = 8_000              # keep this many lines after rotation
 
 
 def _rotate_activity_log():
-    """Trim the activity log to the last _LOG_KEEP_LINES lines (best-effort)."""
+    """Trim the activity log to the last _LOG_KEEP_LINES lines; backs up the evicted lines first."""
     try:
         lines = _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines(keepends=True)
         if len(lines) > _LOG_KEEP_LINES:
+            backup = _ACTIVITY_LOG.with_suffix(".bak")
+            backup.write_text("".join(lines[:-_LOG_KEEP_LINES]), encoding="utf-8")
             _ACTIVITY_LOG.write_text("".join(lines[-_LOG_KEEP_LINES:]), encoding="utf-8")
     except Exception:
         pass
@@ -176,7 +180,7 @@ def _parse_when(when_str: str) -> datetime:
         dparser = None  # optional dependency; skip fallback
     if dparser is not None:
         try:
-            return dparser.parse(when_str, default=now)
+            return dparser.parse(when_str, default=now).replace(tzinfo=None)
         except Exception:
             pass
 
@@ -250,8 +254,9 @@ def _eta(next_run: datetime) -> str:
 # ── Agent Dispatch ────────────────────────────────────────────────────────────
 
 _AGENT_URL      = os.getenv("TRINITY_AGENT_URL", "http://127.0.0.1:8001/chat")
-_DISPATCH_RETRIES = 2   # retry on connection errors only (not timeouts/HTTP errors)
+_DISPATCH_RETRIES = 2
 _DISPATCH_RETRY_DELAY = 5  # seconds between retries
+_TRANSIENT_HTTP_CODES = {429, 502, 503, 504}
 
 
 def _dispatch(prompt: str, task_name: str) -> str:
@@ -273,12 +278,16 @@ def _dispatch(prompt: str, task_name: str) -> str:
                 _AGENT_URL,
                 json={"message": execution_prompt, "session_id": f"sched_{task_name}"},
                 headers=headers,
-                timeout=1800,
+                timeout=(10, 1800),  # (connect_timeout, read_timeout)
             )
             if resp.ok:
                 data = resp.json()
                 return data.get("response", str(data))[:300]
-            # HTTP errors are authoritative — don't retry
+            if resp.status_code in _TRANSIENT_HTTP_CODES:
+                last_err = f"HTTP {resp.status_code}: {resp.text[:100]}"
+                if attempt < _DISPATCH_RETRIES:
+                    time.sleep(_DISPATCH_RETRY_DELAY)
+                continue
             return f"HTTP {resp.status_code}: {resp.text[:200]}"
         except requests.ConnectionError as e:
             last_err = str(e)
@@ -303,12 +312,15 @@ def _run():
                 tasks = _load()
                 to_fire = []
                 for name, t in tasks.items():
+                    if name in _firing_tasks:
+                        continue  # already dispatching — skip to prevent double-fire
                     try:
                         next_run_dt = datetime.fromisoformat(t['next_run'])
                         _now = datetime.now(next_run_dt.tzinfo) if next_run_dt.tzinfo else now
                         if _now >= next_run_dt:
                             to_fire.append((name, t['prompt'], t['type'],
                                             t.get('interval_seconds')))
+                            _firing_tasks.add(name)
                     except (ValueError, KeyError) as e:
                         print(f"[scheduler] skipping malformed task '{name}': {e}")
 
@@ -324,6 +336,9 @@ def _run():
                         result = _dispatch(prompt, name)
                     except Exception as e:
                         result = f"❌ dispatch exception: {e}"
+                    finally:
+                        with _lock:
+                            _firing_tasks.discard(name)
                     print(f"[scheduler] {name} → {result[:80]}")
                     return (name, prompt, kind, interval_secs, fired_at, result)
 
@@ -342,7 +357,7 @@ def _run():
                             continue  # task was removed while we were dispatching
                         t = tasks[name]
                         t['last_run']    = fired_at.isoformat()
-                        t['last_result'] = result[:200]
+                        t['last_result'] = result[:300]
                         t['run_count']   = t.get('run_count', 0) + 1
                         _append_activity(f"scheduler:{name}", prompt[:80], result)
                         if kind == 'once':
@@ -365,10 +380,11 @@ def _run():
 def _ensure_running():
     """Start the background scheduler thread if it is not already running."""
     global _running, _thread
-    if not _running:
-        _running = True
-        _thread = threading.Thread(target=_run, daemon=True, name="scheduler")
-        _thread.start()
+    with _start_lock:
+        if not _running:
+            _running = True
+            _thread = threading.Thread(target=_run, daemon=True, name="scheduler")
+            _thread.start()
 
 
 # Auto-start when skill is imported
@@ -379,11 +395,13 @@ def stop():
     """Stop the background scheduler thread (for clean shutdown or tests)."""
     global _running
     _running = False
+    if _thread is not None:
+        _thread.join(timeout=35)  # wait up to one loop tick + buffer
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def schedule(name: str, when: str, prompt: str) -> str:
+def schedule(name: str, when: str = None, prompt: str = None, *, every: str = None) -> str:
     """
     Schedule a prompt to run ONCE at a specific time.
 
@@ -392,6 +410,9 @@ def schedule(name: str, when: str, prompt: str) -> str:
              'next friday at 9am', '2026-03-01 10:00'
     prompt — what the agent should do at that time
     """
+    # Accept 'every' as alias for 'when' (LLM sometimes passes every= to schedule() by mistake)
+    if when is None and every is not None:
+        when = every
     if not all([name, when, prompt]):
         missing = [arg for arg, val in [('name', name), ('when', when), ('prompt', prompt)] if not val]
         return f"❌ scheduler.schedule missing required argument(s): {', '.join(missing)}. Usage: schedule(name, when, prompt)"
@@ -582,25 +603,31 @@ def status() -> str:
     )
 
 
+def _read_activity_log_entries() -> list:
+    """Parse all valid JSON lines from the activity log. Returns [] if missing."""
+    if not _ACTIVITY_LOG.exists():
+        return []
+    entries = []
+    for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    return entries
+
+
 def get_activity_log(hours: int = 24) -> str:
     """Show what the agent did in the last N hours (scheduled + manual tasks).
     Reads from /app/memory/activity_log.jsonl. Default: last 24 hours."""
     try:
-        if not _ACTIVITY_LOG.exists():
+        all_entries = _read_activity_log_entries()
+        if not all_entries:
             return "📭 No activity logged yet."
-        cutoff = datetime.now() - timedelta(hours=int(hours))
-        entries = []
-        for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                e = json.loads(line)
-                ts = datetime.fromisoformat(e["ts"])
-                if ts >= cutoff:
-                    entries.append(e)
-            except Exception:
-                continue
+        cutoff = datetime.now() - timedelta(hours=hours)
+        entries = [e for e in all_entries if datetime.fromisoformat(e["ts"]) >= cutoff]
         if not entries:
             return f"📭 No activity in the last {hours}h."
         lines = [f"📋 Activity log — last {hours}h ({len(entries)} entries):"]
@@ -618,21 +645,11 @@ def get_task_report(name: str, limit: int = 50) -> str:
     """Show the full result history for a specific task by name.
     Scans the activity log for all entries matching this task. limit=50 by default."""
     try:
-        if not _ACTIVITY_LOG.exists():
+        all_entries = _read_activity_log_entries()
+        if not all_entries:
             return "📭 No activity logged yet."
         prefix = f"scheduler:{name}"
-        entries = []
-        for line in _ACTIVITY_LOG.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                e = json.loads(line)
-                if e.get("source") == prefix:
-                    entries.append(e)
-            except Exception:
-                continue
-        entries = entries[-int(limit):]
+        entries = [e for e in all_entries if e.get("source") == prefix][-limit:]
         if not entries:
             return f"📭 No activity found for task '{name}'."
         ok_count   = sum(1 for e in entries if e.get("ok"))
@@ -658,11 +675,12 @@ def help_schedule() -> str:
         "  name:   unique task ID (e.g., 'daily_backup')\n"
         "  when:   natural language time ('in 2h', 'tomorrow at 9am', 'next monday')\n"
         "  prompt: what the agent should execute\n"
-        "Example: schedule('report', 'every monday at 8am', 'Generate weekly metrics')\n\n"
+        "Example: schedule_recurring('report', 'every monday at 8am', 'Generate weekly metrics')\n\n"
         "Other functions: schedule_recurring(name, every, prompt), list_tasks(), "
         "get_task(name), edit_task_prompt(name, new_prompt), remove(name), "
-        "clear(), status(), parse_preview(when), get_activity_log(hours=24), "
-        "get_task_report(name, limit=50)"
+        "clear(), status(), stop(), "
+        "parse_preview(when) — preview what a time expression resolves to, "
+        "get_activity_log(hours=24), get_task_report(name, limit=50)"
     )
 
 
