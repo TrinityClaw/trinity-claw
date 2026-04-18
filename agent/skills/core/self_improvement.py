@@ -386,7 +386,10 @@ class CodeAnalyzer(ast.NodeVisitor):
                 "suggestion": self.patterns.get("no_type_hints", {}).get("fix")
             })
         self.generic_visit(node)
-    
+
+    # Async functions get the same checks as sync functions
+    visit_AsyncFunctionDef = visit_FunctionDef
+
     def visit_Call(self, node: ast.Call) -> None:
         """Flag network requests without timeouts and SQL injection risks."""
         if isinstance(node.func, ast.Attribute):
@@ -404,7 +407,14 @@ class CodeAnalyzer(ast.NodeVisitor):
         
         if isinstance(node.func, ast.Attribute) and node.func.attr == 'execute':
             for arg in node.args:
-                if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Mod):
+                is_percent_format = isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Mod)
+                is_fstring = isinstance(arg, ast.JoinedStr)
+                is_format_call = (
+                    isinstance(arg, ast.Call)
+                    and isinstance(arg.func, ast.Attribute)
+                    and arg.func.attr == 'format'
+                )
+                if is_percent_format or is_fstring or is_format_call:
                     self.issues.append({
                         "type": "sql_injection_risk",
                         "line": node.lineno,
@@ -412,6 +422,31 @@ class CodeAnalyzer(ast.NodeVisitor):
                         "message": "String formatting in SQL query may allow injection",
                         "suggestion": self.patterns.get("sql_injection_risk", {}).get("fix")
                     })
+
+        # Dangerous built-in calls
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in ('eval', 'exec'):
+            self.issues.append({
+                "type": "dangerous_call",
+                "line": node.lineno,
+                "severity": "critical",
+                "message": f"Use of '{func.id}()' is dangerous and should be avoided in skills",
+                "suggestion": f"Remove {func.id}() — use explicit logic instead"
+            })
+        elif (
+            isinstance(func, ast.Attribute)
+            and func.attr == 'system'
+            and isinstance(func.value, ast.Name)
+            and func.value.id == 'os'
+        ):
+            self.issues.append({
+                "type": "dangerous_call",
+                "line": node.lineno,
+                "severity": "critical",
+                "message": "os.system() executes shell commands and is a security risk",
+                "suggestion": "Use subprocess.run() with a list of arguments instead"
+            })
+
         self.generic_visit(node)
     
     # Paths that are intentional Docker/container architecture — not bugs
@@ -438,7 +473,7 @@ class CodeAnalyzer(ast.NodeVisitor):
             self.generic_visit(node)
             return
 
-        is_windows_abs = value.startswith('C:\\') or value.startswith('C:/')
+        is_windows_abs = len(value) >= 3 and value[0].isalpha() and value[1:3] in (':\\', ':/')
         is_non_docker_abs = value.startswith('/') and not value.startswith(self._DOCKER_PATH_PREFIXES)
 
         if not (is_windows_abs or is_non_docker_abs):
