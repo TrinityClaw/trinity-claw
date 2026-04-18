@@ -36,7 +36,7 @@ DOC = (
     "search→measure coverage→refine query→repeat until convergence (≥72% term coverage) or cap; "
     "depth='deep' runs 4 iterations with 4 sources each vs quick's 2×2; "
     "coverage metric = 0.4×source_yield + 0.6×query_term_coverage; "
-    "run_experiment(skill_name, issue_type)→one autoresearch cycle on a dynamic skill; "
+    "run_experiment(skill_name, issue_type, dry_run=False)→one autoresearch cycle on a dynamic skill; dry_run=True audits only — reports what would change without patching or logging; "
     "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining|discover_patterns; "
     "run_all(max_experiments=5, max_runtime_seconds=25)→all loops in sequence; direct calls capped at 25s (dispatcher limit) — use schedule_nightly() for full overnight runs with no cap; pass max_runtime_seconds=None only from a scheduled context; "
     "discover_patterns loop→scan lessons.jsonl for error types NOT in error_patterns.json → use LLM to analyze and classify each → park proposals via park_idea(); fills the blind spot where error_reduce ignores unknown failure modes; "
@@ -44,7 +44,8 @@ DOC = (
     "pattern_mining loop→scan session_logs.jsonl for recurring task_type patterns → park skill proposals via park_idea(); review with list_ideas(); "
     "suggest_core(skill_name=None, max_skills=30)→audit core skills, save proposed patches to memory; skill_name targets one skill (e.g. 'browser_session'); "
     "list_suggestions(status='pending', skill_name=None)→show pending|applied|failed|all core suggestions; skill_name filters to one skill; "
-    "apply_suggestion(skill_name, issue_type)→apply one approved suggestion to a core skill; "
+    "apply_suggestion(skill_name, issue_type)→apply one approved suggestion to a core skill; stores original code for rollback; "
+    "unapply_suggestion(skill_name, issue_type)→revert a previously applied core suggestion — restores pre-patch code stored at apply time; "
     "schedule_nightly(run_time='2am')→put on autopilot; "
     "report(days=7)→improvement history; "
     "status()→config and skills in scope; "
@@ -961,16 +962,16 @@ def _run_smoke_test(skill_name: str, ce) -> tuple:
 
 # ── Core experiment runner (DYNAMIC skills only) ──────────────────────────────
 
-def run_experiment(skill_name: str, issue_type: str) -> str:
+def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> str:
     """
     One autoresearch-style experiment on a DYNAMIC skill.
 
     Flow:
       1. Snapshot current code
       2. Baseline AST audit — confirm issue exists and get health score
-      3. Apply all occurrences of issue_type
-      4. Re-audit — confirm health score improved
-      5. Runtime smoke test
+      3. Apply all occurrences of issue_type        [skipped if dry_run=True]
+      4. Re-audit — confirm health score improved   [skipped if dry_run=True]
+      5. Runtime smoke test                         [skipped if dry_run=True]
       6. PASS  → keep improved file,  log IMPROVED
          FAIL  → restore snapshot,    log REVERTED
          NO-OP → restore snapshot,    log NO_CHANGE
@@ -978,9 +979,12 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
     Args:
         skill_name:  Dynamic skill stem (e.g. 'seo_analyzer')
         issue_type:  One of: bare_except, missing_timeout
+        dry_run:     If True, run steps 1-2 only and report what would change
+                     without writing any files or logging.
 
     Returns:
         One-line outcome: IMPROVED | REVERTED | NO_CHANGE
+        In dry_run mode: DRY_RUN: <what would happen>
 
     Raises:
         ValueError:   issue_type is not in AUTO_FIXABLE (hard safety boundary —
@@ -1023,6 +1027,19 @@ def run_experiment(skill_name: str, issue_type: str) -> str:
 
     if not target_issues:
         return f"NO_CHANGE: no '{issue_type}' in {skill_name} (score={before_score})"
+
+    if dry_run:
+        issue_summary = ", ".join(
+            f"line {i.get('line', '?')}: {i.get('message', issue_type)}"
+            for i in target_issues[:3]
+        )
+        more = f" (+{len(target_issues)-3} more)" if len(target_issues) > 3 else ""
+        return (
+            f"DRY_RUN: {skill_name} has {len(target_issues)} '{issue_type}' issue(s) "
+            f"(health={before_score}) — would attempt fix.\n"
+            f"  {issue_summary}{more}\n"
+            f"  Run without dry_run=True to apply."
+        )
 
     # Regression check: if the previous logged outcome for this skill+issue was IMPROVED,
     # the fix didn't hold — flag it so the false-positive rate stays visible in report().
@@ -1148,12 +1165,14 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
         return "⚠️ No core skills found at /app/skills/core/"
 
     existing   = _load_suggestions()
-    # Index pending suggestions by key so we skip duplicates
-    pending_keys = {
-        _suggestion_key(s["skill"], s["issue_type"])
-        for s in existing
+    # Map pending key → index in existing, so we can update priority data in place
+    # instead of silently skipping a suggestion that has grown more severe since it was filed.
+    pending_by_key: Dict[str, int] = {
+        _suggestion_key(s["skill"], s["issue_type"]): i
+        for i, s in enumerate(existing)
         if s.get("status") == "pending"
     }
+    priority_updates = 0
 
     new_suggestions = []
     skipped_clean   = 0
@@ -1179,12 +1198,19 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
                 continue
 
             key = _suggestion_key(skill_name, issue_type)
-            if key in pending_keys:
+            first_issue = matching[0]
+            if key in pending_by_key:
+                # Already pending — update priority fields if the skill has deteriorated
+                idx = pending_by_key[key]
+                if analysis["health_score"] < existing[idx].get("health_score", 100):
+                    existing[idx]["health_score"] = analysis["health_score"]
+                    existing[idx]["severity"]     = first_issue.get("severity", "medium")
+                    existing[idx]["occurrences"]  = len(matching)
+                    priority_updates += 1
                 skipped_dup += 1
                 continue
 
             # Generate patch for the first occurrence as a preview
-            first_issue = matching[0]
             patch = si.generate_patch(skill_name, issue_type, first_issue["line"])
 
             suggestion = {
@@ -1201,28 +1227,30 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
                 "safe_to_apply": patch.get("safe_to_apply", False),
             }
             new_suggestions.append(suggestion)
-            pending_keys.add(key)
+            pending_by_key[key] = -1  # sentinel: added this run, no existing entry to update
 
         if not any(
             i["type"] in SUGGEST_TYPES for i in analysis["issues"]
         ):
             skipped_clean += 1
 
-    if new_suggestions:
+    if new_suggestions or priority_updates:
         all_suggestions = existing + new_suggestions
         _save_suggestions(all_suggestions)
-        _log({
-            "timestamp": datetime.now().isoformat(),
-            "loop":      "suggest_core",
-            "outcome":   "SUGGESTED",
-            "new_count": len(new_suggestions),
-            "scanned":   scanned,
-        })
+        if new_suggestions:
+            _log({
+                "timestamp": datetime.now().isoformat(),
+                "loop":      "suggest_core",
+                "outcome":   "SUGGESTED",
+                "new_count": len(new_suggestions),
+                "scanned":   scanned,
+            })
 
     lines = [
         f"🔍 suggest_core — scanned {scanned} core skills",
         f"  New suggestions saved : {len(new_suggestions)}",
-        f"  Already pending       : {skipped_dup}",
+        f"  Already pending       : {skipped_dup}"
+        + (f" ({priority_updates} priority-updated)" if priority_updates else ""),
         f"  Clean (no issues)     : {skipped_clean}",
     ]
 
@@ -1377,6 +1405,19 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
         return f"❌ Cannot read {skill_name}.py — {e}"
 
     backup_path = skill_path.with_suffix(".py.bak")
+    # A pre-existing .bak means a previous apply_suggestion() crashed between backup and
+    # cleanup. Restore the skill to the pre-crash state before retrying.
+    if backup_path.exists():
+        try:
+            stale_original = backup_path.read_text(encoding="utf-8")
+            skill_path.write_text(stale_original, encoding="utf-8")
+            backup_path.unlink(missing_ok=True)
+            original_code = stale_original
+        except Exception as e:
+            return (
+                f"❌ Found stale backup {backup_path.name} from a previous crashed run "
+                f"but could not restore it — {e}. Inspect manually before retrying."
+            )
     try:
         backup_path.write_text(original_code, encoding="utf-8")
     except Exception as e:
@@ -1431,8 +1472,9 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     # Success
     backup_path.unlink(missing_ok=True)
     issues_fixed = match.get("occurrences", "?")
-    suggestions[match_idx]["status"]     = "applied"
-    suggestions[match_idx]["applied_at"] = timestamp
+    suggestions[match_idx]["status"]        = "applied"
+    suggestions[match_idx]["applied_at"]    = timestamp
+    suggestions[match_idx]["original_code"] = original_code  # stored for unapply_suggestion()
     _save_suggestions(suggestions)
     _log({
         "timestamp":    timestamp,
@@ -1468,6 +1510,70 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
         f"score {before_score}→{after_score}, {issues_fixed} occurrence(s) fixed\n"
         f"Core skill updated at: {skill_path}{suffix}"
     )
+
+
+def unapply_suggestion(skill_name: str, issue_type: str) -> str:
+    """
+    Revert a previously applied core skill suggestion.
+
+    Restores the pre-patch code that was captured inside the suggestion record
+    when apply_suggestion() ran.  Suggestions applied before this rollback
+    support was added will not have stored code and cannot be auto-reverted.
+
+    Args:
+        skill_name:  Core skill stem (e.g. 'browser_session')
+        issue_type:  Issue type that was applied (e.g. 'bare_except')
+
+    Returns:
+        Result string: reverted | not found | no rollback data
+    """
+    suggestions = _load_suggestions()
+    key = _suggestion_key(skill_name, issue_type)
+    match: Optional[Dict] = None
+    match_idx = -1
+    for i, s in enumerate(suggestions):
+        if _suggestion_key(s["skill"], s["issue_type"]) == key and s.get("status") == "applied":
+            match = s
+            match_idx = i
+            break
+
+    if match is None:
+        applied = [
+            f"{s['skill']} [{s['issue_type']}]"
+            for s in suggestions if s.get("status") == "applied"
+        ]
+        return (
+            f"❌ No applied suggestion found for {skill_name} [{issue_type}].\n"
+            f"Applied suggestions: {applied or 'none'}"
+        )
+
+    original_code = match.get("original_code")
+    if not original_code:
+        return (
+            f"❌ No original_code stored for {skill_name} [{issue_type}] — "
+            "suggestion was applied before rollback support was added. "
+            "Restore manually from git or a backup."
+        )
+
+    skill_path = SKILLS_CORE_DIR / f"{skill_name}.py"
+    try:
+        skill_path.write_text(original_code, encoding="utf-8")
+    except Exception as e:
+        return f"❌ Could not write restored code to {skill_path}: {e}"
+
+    timestamp = datetime.now().isoformat()
+    suggestions[match_idx]["status"]      = "reverted"
+    suggestions[match_idx]["reverted_at"] = timestamp
+    _save_suggestions(suggestions)
+    _log({
+        "timestamp":  timestamp,
+        "skill":      skill_name,
+        "issue_type": issue_type,
+        "outcome":    "REVERTED",
+        "track":      "core",
+        "reason":     "unapply_suggestion() — manual rollback",
+    })
+    return f"✅ Reverted {skill_name} [{issue_type}] — original code restored to {skill_path}"
 
 
 # ── Lesson proposals (non-auto-fixable patterns) ──────────────────────────────
@@ -2231,7 +2337,12 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
         loop_start_t  = time.time()
 
         results.append(f"\n{divider}\n🔬 {loop_name}")
-        results.append(run_loop(loop_name, max_experiments))
+        try:
+            loop_result = run_loop(loop_name, max_experiments)
+        except Exception as loop_exc:
+            loop_result = f"❌ {loop_name} raised {type(loop_exc).__name__}: {loop_exc}"
+            sys.stderr.write(f"[autoimprove] run_all: {loop_name} failed — {loop_exc}\n")
+        results.append(loop_result)
 
         loop_timing.append({
             "loop":     loop_name,
@@ -2501,6 +2612,14 @@ def loop_roi(runs: int = 10) -> str:
 
     recent = run_summaries[-runs:]
 
+    if len(recent) < MAD_MIN_SAMPLES:
+        sample_warn = (
+            f"\n⚠️  Only {len(recent)} run(s) recorded — ROI estimates are unreliable "
+            f"until at least {MAD_MIN_SAMPLES} runs have completed.\n"
+        )
+    else:
+        sample_warn = ""
+
     # Aggregate per-loop stats across all runs
     loop_stats: Dict[str, Dict] = {}
     for run_entry in recent:
@@ -2515,6 +2634,10 @@ def loop_roi(runs: int = 10) -> str:
 
     if not loop_stats:
         return "📭 No per-loop data in the stored run_all() entries — run again to populate."
+
+    # discover_patterns has different semantics (proposals/qualifying, not experiments)
+    # — pull it out so it doesn't pollute the experiment-loop sort.
+    dp_stats = loop_stats.pop("discover_patterns", None)
 
     sorted_loops = sorted(
         loop_stats.items(),
@@ -2534,25 +2657,33 @@ def loop_roi(runs: int = 10) -> str:
         avg_time = s["elapsed"] / max(1, s["runs"])
         roi_str  = f"{avg_roi:.0%}" if s["total"] > 0 else "—"
         flag     = " ⚠️" if s["total"] > 0 and avg_roi == 0.0 else ""
-        # discover_patterns tracks proposals/qualifying, not experiments — mark
-        # with (*) so the numbers aren't compared directly to experiment loops.
-        if name == "discover_patterns":
-            lines.append(
-                f"  {name+'(*)' :<22} {roi_str:>8}  {s['improved']:>9}  {s['total']:>7}  {avg_time:>7.1f}s{flag}"
-            )
+        lines.append(
+            f"  {name:<22} {roi_str:>8}  {s['improved']:>9}  {s['total']:>7}  {avg_time:>7.1f}s{flag}"
+        )
+
+    # discover_patterns row — uses discovery rate (proposed/qualifying), not experiment ROI
+    if dp_stats is not None:
+        dp_time = dp_stats["elapsed"] / max(1, dp_stats["runs"])
+        if dp_stats["total"] > 0:
+            disc_rate = dp_stats["improved"] / dp_stats["total"]
+            disc_str  = f"{disc_rate:.0%}"
+            dp_flag   = " ⚠️" if disc_rate == 0.0 else ""
         else:
-            lines.append(
-                f"  {name:<22} {roi_str:>8}  {s['improved']:>9}  {s['total']:>7}  {avg_time:>7.1f}s{flag}"
-            )
+            disc_str = "—"
+            dp_flag  = ""
+        lines += [
+            f"  {'-'*22} {'-'*8}  {'-'*9}  {'-'*7}  {'-'*9}",
+            f"  {'discover_patterns(*)' :<22} {disc_str:>8}  "
+            f"{dp_stats['improved']:>9}  {dp_stats['total']:>7}  {dp_time:>7.1f}s{dp_flag}",
+        ]
 
     lines += [
         f"  {'='*58}",
         "⚠️  = zero improvements across all sampled runs",
         "    → consider running: autoimprove.run_loop('<name>') to spot-check",
         "    → or skip that loop in a custom run_all call",
-        "(*) discover_patterns: Improved = patterns proposed; Total = patterns qualifying threshold",
-        "    ROI is proposals/qualifying — not comparable to experiment-based loop ROI above.",
-        f"\nData from {len(recent)} of {len(run_summaries)} total recorded run_all() runs.",
+        "(*) discover_patterns: Proposed / Qualifying — discovery rate, not experiment ROI.",
+        f"\nData from {len(recent)} of {len(run_summaries)} total recorded run_all() runs.{sample_warn}",
     ]
     return "\n".join(lines)
 
@@ -2642,20 +2773,21 @@ def design(task: str) -> str:
 
     # Scan what skills already exist (core + dynamic)
     core_skills, dynamic_skills = [], []
+    scan_errors: List[str] = []
     try:
         core_skills = [
             f[:-3] for f in os.listdir(str(SKILLS_CORE_DIR))
             if f.endswith(".py") and not f.startswith("_")
         ]
-    except Exception:
-        pass
+    except Exception as e:
+        scan_errors.append(f"core ({SKILLS_CORE_DIR}): {e}")
     try:
         dynamic_skills = [
             f[:-3] for f in os.listdir(str(SKILLS_DYNAMIC_DIR))
             if f.endswith(".py") and not f.startswith("_")
         ]
-    except Exception:
-        pass
+    except Exception as e:
+        scan_errors.append(f"dynamic ({SKILLS_DYNAMIC_DIR}): {e}")
 
     all_skills = sorted(set(core_skills + dynamic_skills))
 
@@ -2669,6 +2801,11 @@ def design(task: str) -> str:
         "",
         "### Existing Coverage",
     ]
+    if scan_errors:
+        for err in scan_errors:
+            lines.append(f"⚠️  Could not scan skills directory — {err}")
+        lines.append("   Skill overlap check may be incomplete.")
+        lines.append("")
     if related:
         lines.append(f"Potentially related skills: {', '.join(related)}")
         lines.append("→ Check if one of these can be extended before creating a new skill.")
@@ -2877,6 +3014,7 @@ __all__ = [
     "suggest_core",
     "list_suggestions",
     "apply_suggestion",
+    "unapply_suggestion",
     "lessons_to_proposals",
     "list_proposals",
     "park_idea",
