@@ -65,7 +65,6 @@ _SUPPORTED = {
     "pdf", "docx", "doc", "xlsx", "xls", "csv",
     "txt", "md", "markdown", "json", "jsonl",
     "yaml", "yml", "log", "xml", "html", "htm",
-    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif",
 }
 
 # ── ChromaDB ───────────────────────────────────────────────────────────────────
@@ -188,8 +187,8 @@ def _ingest_one(path: Path, col, index: dict) -> str:
     if rel_path in index:
         try:
             col.delete(where={"rel_path": rel_path})
-        except Exception:
-            pass
+        except Exception as e:
+            return f"  ❌ {rel_path} — ChromaDB delete of old chunks failed, aborting re-ingest: {e}"
 
     text = _extract_text(path)
     if "[" in text[:20] and "error" in text.lower():
@@ -214,11 +213,7 @@ def _ingest_one(path: Path, col, index: dict) -> str:
     summary = _summarize_text(text, path.name)
     if summary:
         sum_id = f"{safe_id}__summary"
-        try:
-            col.delete(ids=[sum_id])
-        except Exception:
-            pass
-        col.add(
+        col.upsert(
             ids       =[sum_id],
             documents =[summary],
             metadatas =[{
@@ -402,21 +397,26 @@ def delete_document(*args) -> str:
     if not args:
         return "❌ Usage: delete_document(filename)"
 
-    filename = Path(str(args[0]).strip()).name  # strip any path prefix
+    given    = str(args[0]).strip()
     index    = _load_index()
 
-    if filename not in index:
-        return f"❌ '{filename}' not in index. Use list_ingested() to see what's indexed."
+    # Index keys are rel_paths (e.g. "subdir/report.pdf"); support lookup by
+    # exact rel_path or by bare filename for convenience.
+    rel_path = given if given in index else next(
+        (k for k in index if Path(k).name == Path(given).name), None
+    )
+    if rel_path is None:
+        return f"❌ '{given}' not in index. Use list_ingested() to see what's indexed."
 
     try:
         col = _get_collection()
-        col.delete(where={"filename": filename})
+        col.delete(where={"rel_path": rel_path})
     except Exception as e:
         return f"❌ ChromaDB delete error: {e}"
 
-    del index[filename]
+    del index[rel_path]
     _save_index(index)
-    return f"✅ Removed '{filename}' from the business knowledge base."
+    return f"✅ Removed '{rel_path}' from the business knowledge base."
 
 
 def get_summary(*args) -> str:
@@ -556,6 +556,7 @@ def prune_stale(days: int = 90, dry_run: bool = True) -> str:
             col.delete(where={"rel_path": rel_path})
         except Exception as e:
             errors.append(f"  ChromaDB delete failed for {rel_path}: {e}")
+            continue  # don't remove from index if ChromaDB delete failed
         if rel_path in index:
             del index[rel_path]
             removed += 1
