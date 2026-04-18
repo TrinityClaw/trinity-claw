@@ -1,5 +1,4 @@
 import re
-import json
 import html
 import time
 import random
@@ -8,10 +7,24 @@ import asyncio
 import base64
 import threading
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime
 from urllib.parse import urlparse, urljoin
 
 SKILL_TIMEOUT = 90  # seconds — browser ops need room beyond the default 30s
+
+__all__ = [
+    "fetch", "get", "get_html", "head", "read", "extract_text",
+    "scrape", "extract_elements", "scrape_links", "scrape_images", "scrape_table",
+    "search",
+    "find_text", "grep", "download", "find_and_download_image",
+    "extract_meta", "status", "parse_feed", "find_emails",
+    "browser_launch", "browser_goto", "browser_screenshot", "browser_text", "browser_html",
+    "browser_click", "browser_type", "browser_fill", "browser_select", "browser_evaluate",
+    "browser_wait", "browser_new_tab", "browser_close_tab", "browser_back", "browser_forward",
+    "browser_refresh",
+    "browser_scroll", "browser_hover", "browser_press", "browser_links", "browser_inputs",
+    "browser_close", "browser_status",
+]
 
 NAME = "web"
 SHORT_DOC = "Web search, fetch URLs, download files, find/download images, extract emails; full browser automation via Playwright."
@@ -77,39 +90,40 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36",
 ]
 
-_last_request_time = None
+_last_request_time: Dict[str, Any] = {}
 _min_delay = 2.0
 _max_delay = 5.0
-_consecutive_errors = 0
+_consecutive_errors: Dict[str, int] = {}
 _max_backoff = 20  # Must stay under SKILL_TIMEOUT_SECONDS (default 30s)
 
 def _get_random_user_agent() -> str:
     """Return a random browser User-Agent string to reduce fingerprinting."""
     return random.choice(USER_AGENTS)
 
-def _apply_rate_limit():
-    """Sleep as needed to honour per-request rate limiting with exponential back-off on errors."""
+def _apply_rate_limit(engine: str = "default"):
+    """Sleep as needed to honour per-engine rate limiting with exponential back-off on errors."""
     global _last_request_time, _consecutive_errors
-    if _last_request_time is not None:
-        base_delay = min(_min_delay * (1.5 ** _consecutive_errors), _max_backoff)
+    last = _last_request_time.get(engine)
+    errors = _consecutive_errors.get(engine, 0)
+    if last is not None:
+        base_delay = min(_min_delay * (1.5 ** errors), _max_backoff)
         jitter = random.uniform(0, _max_delay)
         total_delay = base_delay + jitter
-        elapsed = (datetime.now() - _last_request_time).total_seconds()
+        elapsed = (datetime.now() - last).total_seconds()
         if elapsed < total_delay:
-            sleep_time = total_delay - elapsed
-            time.sleep(sleep_time)
-    _last_request_time = datetime.now()
+            time.sleep(total_delay - elapsed)
+    _last_request_time[engine] = datetime.now()
 
-def _record_success():
-    """Reset the consecutive-error counter after a successful request."""
+def _record_success(engine: str = "default"):
+    """Reset the per-engine consecutive-error counter after a successful request."""
     global _consecutive_errors
-    if _consecutive_errors > 0:
-        _consecutive_errors = 0
+    if _consecutive_errors.get(engine, 0) > 0:
+        _consecutive_errors[engine] = 0
 
-def _record_error():
-    """Increment the consecutive-error counter to increase back-off delay."""
+def _record_error(engine: str = "default"):
+    """Increment the per-engine consecutive-error counter to increase back-off delay."""
     global _consecutive_errors
-    _consecutive_errors += 1
+    _consecutive_errors[engine] = _consecutive_errors.get(engine, 0) + 1
 
 _session = None
 
@@ -153,7 +167,11 @@ def _bw_run(coro, timeout: int = 30) -> Any:
         )
     loop = _bw_ensure_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=timeout)
+    try:
+        return future.result(timeout=timeout)
+    except Exception:
+        future.cancel()
+        raise
 
 
 def _get_session():
@@ -222,9 +240,9 @@ def fetch(url: str, timeout: int = 30) -> str:
             return f"❌ Invalid URL: {url}"
     
     try:
-        _apply_rate_limit()
+        _apply_rate_limit("http")
         session = _get_session()
-        
+
         headers = {
             'User-Agent': _get_random_user_agent(),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -233,15 +251,15 @@ def fetch(url: str, timeout: int = 30) -> str:
             'DNT': '1',
             'Connection': 'keep-alive',
         }
-        
+
         response = session.get(url, headers=headers, timeout=timeout)
-        
+
         if response.status_code == 429:
-            _record_error()
+            _record_error("http")
             return "❌ Rate limited (429). Try again later."
-        
+
         response.raise_for_status()
-        _record_success()
+        _record_success("http")
         return response.content.decode(response.apparent_encoding or "utf-8", errors="replace")
         
     except requests.exceptions.Timeout:
@@ -272,7 +290,7 @@ def head(url: str) -> str:
             return f"❌ Invalid URL: {url}"
     
     try:
-        _apply_rate_limit()
+        _apply_rate_limit("http")
         session = _get_session()
         response = session.head(url, timeout=10, allow_redirects=True)
         
@@ -308,7 +326,8 @@ def extract_text(html_content: str) -> str:
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         return '\n'.join(chunk for chunk in chunks if chunk)
     else:
-        text = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<!--.*?-->', '', html_content, flags=re.DOTALL)
+        text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<[^>]+>', ' ', text)
         text = html.unescape(text)
@@ -350,6 +369,19 @@ def extract_elements(html_content: str = "", selector: str = "body", url: str = 
     else:
         return "❌ BeautifulSoup not installed"
 
+def _canonical_url(url: str) -> str:
+    """Return a normalised URL for deduplication: lowercased netloc, www. stripped, fragment dropped."""
+    try:
+        p = urlparse(url)
+        netloc = p.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        path = p.path.rstrip("/") or "/"
+        return f"{p.scheme}://{netloc}{path}"
+    except Exception:
+        return url
+
+
 def scrape_links(url: str, absolute: bool = True, limit: int = 50) -> str:
     """
     Extract all links from a page. Returns a numbered list of text + URL pairs.
@@ -385,32 +417,37 @@ def scrape_links(url: str, absolute: bool = True, limit: int = 50) -> str:
     # BeautifulSoup version - BETTER
     soup = BeautifulSoup(content, 'html.parser')
     links = []
-    
+    seen_canonical: set = set()
+
     for a in soup.find_all('a', href=True):
         href = a['href'].strip()
         text = a.get_text(strip=True)[:50]
-        
-        # FIX: Better filtering
+
         if not href:
             continue
         if href.startswith(('javascript:', '#', 'mailto:', 'tel:', 'data:')):
             continue
         if 'javascript:void(0)' in href:
             continue
-        
-        # Convert to absolute URL if needed
+
         if absolute:
             href = urljoin(url, href)
-        
-        # Remove fragments (#)
+
         href = href.split('#')[0]
-        
-        if href:  # Add only if not empty
-            links.append({
-                'url': href,
-                'text': text,
-                'title': a.get('title', '')
-            })
+
+        if not href:
+            continue
+
+        canonical = _canonical_url(href)
+        if canonical in seen_canonical:
+            continue
+        seen_canonical.add(canonical)
+
+        links.append({
+            'url': href,
+            'text': text,
+            'title': a.get('title', '')
+        })
     
     if not links:
         return "No links found on page"
@@ -523,8 +560,8 @@ def scrape_table(url: str, table_index: int = 0) -> str:
 _TIME_SENSITIVE_KEYWORDS = [
     "weather", "temperature", "forecast", "rain", "humidity", "wind",
     "current", "now", "today", "tonight", "live", "latest", "breaking",
-    "stock", "price", "market", "score", "game", "match", "result",
-    "news", "update", "happening",
+    "stock", "market", "score", "game", "match", "result",
+    "news", "happening",
 ]
 
 def _is_time_sensitive(query: str) -> bool:
@@ -635,10 +672,10 @@ def _search_tavily(query: str, n: int) -> str:
         if response.status_code == 401:
             return "❌ Tavily: Invalid API key"
         if response.status_code == 429:
-            _record_error()
+            _record_error("tavily")
             return "❌ Tavily: Rate limit reached"
         response.raise_for_status()
-        _record_success()
+        _record_success("tavily")
 
         data = response.json()
         results = [f"🔍 Tavily: {query}\n"]
@@ -668,7 +705,7 @@ def _search_tavily(query: str, n: int) -> str:
 def _search_duckduckgo(query: str, n: int) -> str:
     """Internal: DuckDuckGo search (HTML scraping)"""
     try:
-        _apply_rate_limit()
+        _apply_rate_limit("duckduckgo")
         # DuckDuckGo HTML endpoint
         url = "https://html.duckduckgo.com/html/"
         
@@ -688,11 +725,11 @@ def _search_duckduckgo(query: str, n: int) -> str:
         )
         
         if response.status_code == 429:
-            _record_error()
+            _record_error("duckduckgo")
             return "❌ DuckDuckGo rate limit. Please try again in 60 seconds."
-        
+
         response.raise_for_status()
-        _record_success()
+        _record_success("duckduckgo")
         
         if HAS_BS4:
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -756,7 +793,7 @@ def _search_duckduckgo(query: str, n: int) -> str:
 def _search_bing(query: str, n: int) -> str:
     """Internal: Bing search (fallback)"""
     try:
-        _apply_rate_limit()
+        _apply_rate_limit("bing")
         url = "https://www.bing.com/search"
         headers = {
             'User-Agent': _get_random_user_agent(),
@@ -857,7 +894,10 @@ def download(url: str, filename: str = "") -> str:
         if not filename:
             filename = url.split('/')[-1] or "downloaded_file"
             filename = filename.split('?')[0]
-        
+        filename = os.path.basename(filename).replace('\x00', '')
+        if not filename or filename.startswith('.'):
+            filename = "downloaded_file"
+
         filepath = f"/app/memory/{filename}"
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
@@ -918,6 +958,7 @@ def find_and_download_image(query: str, save_as: str = "") -> str:
 
     for candidate in wp_candidates:
         try:
+            _apply_rate_limit("wikipedia")
             # First: search Wikipedia for the best article title
             search_url = (
                 "https://en.wikipedia.org/w/api.php?action=query&list=search"
@@ -1194,6 +1235,14 @@ async def _bw_async_go_forward(timeout: int = 5000) -> Dict:
     return {"ok": True, "url": _bw_page.url, "title": await _bw_page.title()}
 
 
+async def _bw_async_refresh(wait_until: str = "domcontentloaded") -> Dict:
+    """Reload the current page."""
+    if _bw_page is None:
+        return {"ok": False, "error": "No page open."}
+    await _bw_page.reload(wait_until=wait_until)
+    return {"ok": True, "url": _bw_page.url, "title": await _bw_page.title()}
+
+
 async def _bw_async_scroll(x: int = 0, y: int = 500) -> Dict:
     """Scroll the current page by (x, y) pixels using window.scrollBy."""
     if _bw_page is None:
@@ -1429,6 +1478,11 @@ def browser_forward(timeout: int = 5000) -> Dict:
     return _bw_run(_bw_async_go_forward(timeout=timeout))
 
 
+def browser_refresh(wait_until: str = "domcontentloaded") -> Dict:
+    """Reload the current page. Equivalent to pressing F5."""
+    return _bw_run(_bw_async_refresh(wait_until=wait_until))
+
+
 def browser_scroll(x: int = 0, y: int = 500) -> Dict:
     """
     Scroll the page by (x, y) pixels.
@@ -1516,21 +1570,23 @@ def parse_feed(url: str, limit: int = 10) -> str:
 
         root = ET.fromstring(resp.content)
 
-        # Detect RSS vs Atom
-        is_atom = root.tag == "{http://www.w3.org/2005/Atom}feed" or "Atom" in root.tag
+        # Detect RSS vs Atom — extract namespace URI and local name safely
+        _tag = root.tag
+        _ns  = _tag[1:_tag.index('}')] if _tag.startswith('{') and '}' in _tag else ''
+        _local = _tag.split('}')[-1]
+        is_atom = _local == "feed" and "atom" in _ns.lower()
+        _pfx = f"{{{_ns}}}" if _ns else ""
 
         items = []
 
         if is_atom:
-            feed_title = root.findtext("{http://www.w3.org/2005/Atom}title") or url
-            entries = root.findall("{http://www.w3.org/2005/Atom}entry")[:limit]
+            feed_title = root.findtext(f"{_pfx}title") or url
+            entries = root.findall(f"{_pfx}entry")[:limit]
             for e in entries:
-                title   = e.findtext("{http://www.w3.org/2005/Atom}title") or "(no title)"
-                summary = e.findtext("{http://www.w3.org/2005/Atom}summary") or \
-                          e.findtext("{http://www.w3.org/2005/Atom}content") or ""
-                pub     = e.findtext("{http://www.w3.org/2005/Atom}updated") or \
-                          e.findtext("{http://www.w3.org/2005/Atom}published") or ""
-                link_el = e.find("{http://www.w3.org/2005/Atom}link")
+                title   = e.findtext(f"{_pfx}title") or "(no title)"
+                summary = e.findtext(f"{_pfx}summary") or e.findtext(f"{_pfx}content") or ""
+                pub     = e.findtext(f"{_pfx}updated") or e.findtext(f"{_pfx}published") or ""
+                link_el = e.find(f"{_pfx}link")
                 link    = link_el.get("href", "") if link_el is not None else ""
                 items.append((title.strip(), summary.strip()[:300], pub[:16], link))
         else:
