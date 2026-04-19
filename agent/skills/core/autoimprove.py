@@ -1686,9 +1686,10 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
     }
 
     new_proposals = []
-    skipped_fixable = 0
-    skipped_low     = 0
-    skipped_dup     = 0
+    skipped_fixable   = 0
+    skipped_low       = 0
+    skipped_dup       = 0
+    skipped_llm_noise = 0
 
     for error_type, meta in patterns.items():
         count = meta.get("count", 0)
@@ -1704,6 +1705,26 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
             continue
 
         examples = lessons_by_type.get(error_type, [])[:3]
+
+        # LLM significance pass: only run for borderline patterns (threshold ≤ count < 2×threshold).
+        # High-count patterns (≥ 2×threshold) are unconditionally significant.
+        if count < threshold * 2:
+            _sig_prompt = (
+                f"You are reviewing an AI agent error pattern for significance.\n\n"
+                f"Error type  : {error_type}\n"
+                f"Occurrences : {count}\n"
+                f"Severity    : {meta.get('severity', 'unknown')}\n"
+                f"Suggested fix: {meta.get('fix', 'none')}\n"
+                f"Example messages:\n" +
+                "\n".join(f"  - {m}" for m in examples) +
+                "\n\nIs this pattern worth a human review proposal, or is it likely noise / a one-off?\n"
+                "Reply with exactly one word: YES or NO."
+            )
+            _verdict = _call_llm_simple(_sig_prompt, max_tokens=8).strip().upper()
+            # Treat empty response (LLM unavailable) as YES to preserve old behaviour
+            if _verdict.startswith("NO"):
+                skipped_llm_noise += 1
+                continue
 
         proposal = {
             "timestamp":       datetime.now().isoformat(),
@@ -1763,6 +1784,7 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
         f"   Already pending      : {skipped_dup}",
         f"   Below threshold      : {skipped_low}",
         f"   Skipped (auto-fixable): {skipped_fixable}",
+        f"   Filtered (LLM: noise): {skipped_llm_noise}",
     ]
 
     if new_proposals:
