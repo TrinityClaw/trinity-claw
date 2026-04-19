@@ -49,7 +49,7 @@ DOC = (
     "wait_for(selector, tab_index?, timeout_ms?)→wait for CSS selector to appear; "
     "new_tab(url?)→open a new tab; "
     "close_tab(tab_index?)→close a tab by index (use list_tabs() to see indexes first); "
-    "evaluate(js_code, tab_index?)→run JavaScript; "
+
 
     "=== SINGLE-CALL HELPERS (use these for specific platforms) === "
     "tweet(text)→POST A TWEET in one step. USE THIS for Twitter — never chain manually; "
@@ -1875,6 +1875,7 @@ def click_accessible(role: str, name: str = "", tab_index: int = 0, exact: bool 
             ) or name
         except Exception:
             actual_label = name
+        locator.scroll_into_view_if_needed()
         locator.click()
         # Wait for any dialog/iframe triggered by the click to render
         page.wait_for_timeout(700)
@@ -1995,6 +1996,7 @@ def click_ref(ref: str, tab_index: int = 0) -> str:
         locator = frame.locator(f'[data-tc-ref="{ref}"]')
         try:
             locator.wait_for(state="visible", timeout=3000)
+            locator.scroll_into_view_if_needed()
             locator.click()
         except Exception:
             # data-tc-ref tag expired (DOM re-rendered) — fall back to role+name search.
