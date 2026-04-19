@@ -448,6 +448,44 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
 
     func = getattr(module, function_name)
 
+    # Type-coerce args/kwargs based on the function's annotations so the skill-tag
+    # path (execute_skill_tags → parse_skill_args) behaves like the native tool-call
+    # path (_execute_tool_calls), which already does this coercion. Without it, every
+    # argument from parse_skill_args arrives as a string, causing TypeErrors when a
+    # skill expects int/bool/float (e.g. run_loop("10") instead of run_loop(10)).
+    try:
+        import inspect as _ci
+        _sig = _ci.signature(func)
+        _CMAP = {
+            bool:  lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("true", "1", "yes"),
+            int:   lambda v: v if isinstance(v, int) else int(v),
+            float: lambda v: v if isinstance(v, float) else float(v),
+        }
+        _params = list(_sig.parameters.values())
+        # Coerce positional args
+        _coerced_args = list(args)
+        for _i, _val in enumerate(_coerced_args):
+            if _i < len(_params) and _params[_i].annotation is not _ci.Parameter.empty:
+                _cfn = _CMAP.get(_params[_i].annotation)
+                if _cfn:
+                    try:
+                        _coerced_args[_i] = _cfn(_val)
+                    except (ValueError, TypeError):
+                        pass
+        args = tuple(_coerced_args)
+        # Coerce keyword args
+        for _kname, _kval in list(kwargs.items()):
+            _kparam = _sig.parameters.get(_kname)
+            if _kparam and _kparam.annotation is not _ci.Parameter.empty:
+                _cfn = _CMAP.get(_kparam.annotation)
+                if _cfn:
+                    try:
+                        kwargs[_kname] = _cfn(_kval)
+                    except (ValueError, TypeError):
+                        pass
+    except (ValueError, TypeError):
+        pass  # introspection failed — call with original args
+
     # Log the call
     print(f"🔧 Executing: {skill_name}.{function_name}(args={args}, kwargs={kwargs})")
 
