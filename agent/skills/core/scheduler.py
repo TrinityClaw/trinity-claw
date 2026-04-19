@@ -369,7 +369,9 @@ def _run():
                             # dispatch exceeded the interval.
                             prev_next = datetime.fromisoformat(t['next_run'])
                             ideal = prev_next + timedelta(seconds=interval_secs)
-                            t['next_run'] = max(ideal, datetime.now()).isoformat()
+                            # Use tz-aware now if ideal is tz-aware to avoid TypeError
+                            now_cmp = datetime.now(ideal.tzinfo) if ideal.tzinfo else datetime.now()
+                            t['next_run'] = max(ideal, now_cmp).isoformat()
                     _save(tasks)
         except Exception as e:
             print(f"[scheduler] loop error: {e}")
