@@ -103,6 +103,20 @@ def verify_api_key(api_key: str = Security(_api_key_header)) -> str:
 skills: Dict[str, Any] = {}
 skill_metadata: Dict[str, Dict] = {}
 
+# Full tools schema built once at startup; filtered per-request for token efficiency
+_TOOLS_SCHEMA_CACHE: List[Dict] = []
+
+# Skills only injected into the tools schema when the message matches these keywords.
+# Everything NOT listed here is treated as always-on (lightweight/utility skills).
+_SKILL_DOMAIN_MAP: Dict[str, frozenset] = {
+    "gmail_reader":    frozenset({"email", "gmail", "mail", "inbox", "send", "draft", "reply", "unread", "compose", "attachment", "emails"}),
+    "google_calendar": frozenset({"calendar", "meeting", "schedule", "event", "appointment", "slot", "availability", "book", "rsvp", "reminder"}),
+    "google_drive":    frozenset({"drive", "gdrive", "document", "doc", "spreadsheet", "sheet", "folder", "upload", "gdoc", "gsheet", "docs"}),
+    "browser_session": frozenset({"browse", "browser", "click", "screenshot", "scrape", "navigate", "url", "website", "page", "login", "fill", "form", "headless", "selenium", "playwright", "web page"}),
+    "web_builder":     frozenset({"html", "css", "scaffold", "landing", "frontend", "webpage", "website", "web app", "template", "serve", "deploy site"}),
+    "autoimprove":     frozenset({"autoimprove", "auto-improve", "audit code", "refactor", "pattern mining", "improvement loop"}),
+}
+
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
 SESSION_MAX_MESSAGES = 16        # 8 turns (user + assistant pairs) for cloud models
 SESSION_MAX_MESSAGES_LOCAL = 8   # 4 turns for local models — tighter context windows
@@ -290,8 +304,10 @@ def load_skills_improved():
 
 def reload_skills():
     """Reload all skills with full cache clearing."""
-    global skills
+    global skills, _TOOLS_SCHEMA_CACHE
     skills = load_skills_improved()
+    _TOOLS_SCHEMA_CACHE = _build_tools_schema()
+    print(f"✅ Tools schema cache rebuilt ({len(_TOOLS_SCHEMA_CACHE)} tool entries)")
     return f"Reloaded {len(skills)} skills"
 
 
@@ -370,6 +386,47 @@ def _build_tools_schema() -> list:
     return tools
 
 
+def _build_tools_schema_for_request(message: str, used_skills: Optional[set] = None) -> List[Dict]:
+    """
+    Return a per-request filtered tools schema from _TOOLS_SCHEMA_CACHE.
+
+    Core strategy:
+    - Skills NOT listed in _SKILL_DOMAIN_MAP are always included (lightweight/utility).
+    - Skills IN _SKILL_DOMAIN_MAP are only included when the message contains matching
+      keywords OR the skill was already called earlier in this request.
+    - Falls back to the full cache if the cache is empty (first request before startup
+      cache is built, or after a failed reload).
+    """
+    if not _TOOLS_SCHEMA_CACHE:
+        return _build_tools_schema()
+
+    msg_words = set(message.lower().split())
+    heavy_skills = set(_SKILL_DOMAIN_MAP.keys())
+
+    # Which heavy skills are relevant to this message?
+    relevant_heavy: set = set()
+    for skill_name, keywords in _SKILL_DOMAIN_MAP.items():
+        if keywords & msg_words:
+            relevant_heavy.add(skill_name)
+
+    # Also include every skill that was already used in this request's agentic loop
+    if used_skills:
+        relevant_heavy.update(used_skills)
+
+    filtered = [
+        t for t in _TOOLS_SCHEMA_CACHE
+        if t["function"]["name"].split("__")[0] not in heavy_skills
+        or t["function"]["name"].split("__")[0] in relevant_heavy
+    ]
+
+    _total = len(_TOOLS_SCHEMA_CACHE)
+    _kept  = len(filtered)
+    if _kept < _total:
+        print(f"🔍 Skill preview: {_kept}/{_total} tool entries (saved ~{(_total - _kept) * 80} tokens)")
+
+    return filtered
+
+
 def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs):
     """
     Improved skill calling with better error handling and logging.
@@ -422,7 +479,9 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
 # Load all skills on startup
 print("\n🎯 Loading TrinityClaw Skills...")
 skills = load_skills_improved()
-print(f"✅ Loaded {len(skills)} skill(s)\n")
+print(f"✅ Loaded {len(skills)} skill(s)")
+_TOOLS_SCHEMA_CACHE = _build_tools_schema()
+print(f"✅ Tools schema cached ({len(_TOOLS_SCHEMA_CACHE)} tool entries)\n")
 
 # Load system prompt template once at startup (re-read if file changes via _fcache at request time)
 _SYSTEM_PROMPT_TEMPLATE = _string.Template(
@@ -951,6 +1010,16 @@ def save_to_jsonl(user_message: str, ai_reply: str, metadata: Optional[Dict] = N
         }
         with open(MEMORY_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        # Index into FTS5 for episodic recall via notes.search_logs()
+        try:
+            _notes_mod = skills.get("notes")
+            if _notes_mod and hasattr(_notes_mod, "fts_index_entry"):
+                _notes_mod.fts_index_entry(
+                    entry["id"], entry.get("session_id") or "",
+                    entry["timestamp"], user_message, ai_reply,
+                )
+        except Exception:
+            pass
         # Compact if the file has grown large (by size) or line count is high.
         # Both checks are O(1)/cheap and must agree with the guard inside compact_jsonl().
         try:
@@ -3366,7 +3435,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         # 5. Agentic loop: Reason → Act → Observe → Reason …
         # Cloud mode uses native function calling (structured tool_calls).
         # Local/Ollama mode falls back to the legacy XML skill-tag system.
-        tools = _build_tools_schema()  # used by both cloud (native) and local (Ollama) tool calling
+        #
+        # Skill preview: start with a message-filtered schema to save tokens.
+        # After each iteration, any newly-called skills are added so the LLM
+        # can always call a skill it has already used (multi-step safety net).
+        _used_skills_this_req: set = set()
+        tools = _build_tools_schema_for_request(req.message)
 
         _continuation_pushes = 0        # cloud: how many "stop describing, act!" pushes sent so far
         _local_continuation_pushes = 0  # local: same, for Ollama/tag path
@@ -3421,6 +3495,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         else f"[❌ {l['skill']}.{l.get('function','')} Error: {l.get('error','')}]"
                         for l in execution_log
                     )
+                    # Expand schema to include any newly-called skills
+                    for _tc in tool_calls:
+                        _tc_skill = (_tc.get("function", {}).get("name") or "").split("__")[0]
+                        if _tc_skill:
+                            _used_skills_this_req.add(_tc_skill)
+                    tools = _build_tools_schema_for_request(req.message, used_skills=_used_skills_this_req)
                     continue
 
                 # ── Fallback: XML tag-based path (non-agentic Ollama models) ──
@@ -3780,6 +3860,14 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 })
                 # Append one tool result message per call
                 messages.extend(tool_result_messages)
+
+                # Expand preview schema with any newly-called skills so they remain
+                # callable on subsequent iterations without a full schema rebuild.
+                for _tc in tool_calls:
+                    _tc_skill = (_tc.get("function", {}).get("name") or "").split("__")[0]
+                    if _tc_skill:
+                        _used_skills_this_req.add(_tc_skill)
+                tools = _build_tools_schema_for_request(req.message, used_skills=_used_skills_this_req)
 
                 # Dead-end detection: track consecutive all-error iterations
                 _all_failed_this_iter = bool(execution_log) and all(
