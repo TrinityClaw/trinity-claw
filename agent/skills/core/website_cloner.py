@@ -666,7 +666,7 @@ def _color_vars(vars_dict: dict) -> dict:
     )
     color_val = re.compile(
         r"^(#[0-9a-fA-F]{3,8}|rgb[a]?\([^)]+\)|hsl[a]?\([^)]+\)"
-        r"|oklch\([^)]+\)|oklab\([^)]+\)|color\([^)]+\))$"
+        r"|oklch\([^)]+\)|oklab\([^)]+\)|color\([^)]+\)|var\(--[^)]+\))$"
     )
     return {
         k: v
@@ -1164,7 +1164,7 @@ def extract_tokens(url: str) -> str:
     if css_urls:
         def _fetch_css(u: str) -> str:
             try:
-                text, _ = _fetch(u, timeout=10, is_css=True)
+                text, _ = _fetch(u, timeout=min(SKILL_TIMEOUT, 15), is_css=True)
                 return text or ""
             except Exception:
                 return ""
@@ -1460,6 +1460,13 @@ def clone(url: str, project_name: str = "", fidelity: str = "full") -> str:
         lines.append(f"\n🎯  Interaction rules ({total} total — {', '.join(cats)}):")
         for rule in interaction_rules.get("hover", [])[:4]:
             lines.append(f"     hover: {rule.get('sel', '')[:70]}")
+
+    # Warn if nothing was extracted — likely a JS-rendered SPA with no browser available
+    if not secs and not nav_links_live and not tokens.get("_meta", {}).get("browser_used"):
+        lines.append(
+            "⚠️  No sections or nav links detected. The page may be JavaScript-rendered (React/Vue/Next.js). "
+            "Start Chrome and retry — browser_session will capture the rendered DOM."
+        )
 
     lines.append("")
     lines.append("🚨 DO NOT STOP. Follow web_clone.md Phase 3 NOW:")
