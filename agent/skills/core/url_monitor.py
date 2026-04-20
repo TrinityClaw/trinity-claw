@@ -1,38 +1,37 @@
 import asyncio
-import json
+import hashlib
 import logging
+import re
 import sqlite3
 import time
-import hashlib
-import aiohttp
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
-import os
-import re
-from urllib.parse import urlparse, urljoin
-import xml.etree.ElementTree as ET
-from pathlib import Path
+from typing import Dict, List, Optional
+
+import aiohttp
+
 NAME = "url_monitor"
 SHORT_DOC = "Monitor URLs for uptime, content changes, and Twitter automation state."
 DOC = (
     "Monitor URLs for changes and health status. "
-    "Functions: add_url(url, friendly_name?, frequency_minutes?, tags?, alert_on_changes?) — tags can be list or plain string; "
+    "Functions: add_url(url, friendly_name?, frequency_minutes?, tags?, alert_on_changes?, verify_ssl?) — tags can be list or plain string; "
     "list_urls()→formatted status of all monitored URLs (preferred over get_status_summary/get_url_history/get_recent_changes); "
     "remove_url(url), check_url_now(url), check_all_urls(). "
     "Twitter state helpers for stateful automation (deduplication across scheduler runs): "
     "tw_is_seen(key)→bool — has this tweet_id/username already been liked/followed?; "
     "tw_mark_seen(key, value?)→mark as processed; "
     "tw_last_tweet_time()→ISO timestamp of last posted tweet, empty if never; "
-    "tw_log_tweet()→record that a tweet was just posted (call right after browser_session.tweet())."
+    "tw_log_tweet()→record that a tweet was just posted (call right after browser_session.tweet()); "
+    "tw_prune(max_age_days?)→remove old twitter_state entries older than N days (default 90)."
 )
 __all__ = [
     "NAME", "DOC",
     "add_url", "remove_url", "check_url_now", "check_all_urls",
     "list_urls", "get_status_summary", "get_url_history", "get_recent_changes",
-    "tw_is_seen", "tw_mark_seen", "tw_last_tweet_time", "tw_log_tweet",
+    "tw_is_seen", "tw_mark_seen", "tw_last_tweet_time", "tw_log_tweet", "tw_prune",
 ]
+
 
 @dataclass
 class UrlStatus:
@@ -45,20 +44,19 @@ class UrlStatus:
     response_time: float
     error: Optional[str] = None
 
+
 class UrlMonitor:
     """Advanced URL monitoring system with change detection and response tracking."""
-    
+
     def __init__(self, db_path: str = "/app/memory/url_monitor.db"):
-        """Initialize the URL monitor with a SQLite database at db_path."""
         self.db_path = db_path
         self.setup_database()
         self.setup_logging()
-        
+
     def setup_database(self):
-        """Initialize SQLite database for URL monitoring."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS url_checks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +71,7 @@ class UrlMonitor:
                 change_detected BOOLEAN DEFAULT FALSE
             )
         ''')
-        
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS url_metadata (
                 url TEXT PRIMARY KEY,
@@ -84,10 +82,17 @@ class UrlMonitor:
                 created_at TEXT,
                 last_check TEXT,
                 next_check TEXT,
-                is_active BOOLEAN DEFAULT TRUE
+                is_active BOOLEAN DEFAULT TRUE,
+                verify_ssl BOOLEAN DEFAULT TRUE
             )
         ''')
-        
+
+        # Migration: add verify_ssl for existing databases
+        try:
+            cursor.execute('ALTER TABLE url_metadata ADD COLUMN verify_ssl BOOLEAN DEFAULT TRUE')
+        except sqlite3.OperationalError:
+            pass
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS url_changes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,11 +113,16 @@ class UrlMonitor:
             )
         ''')
 
+        # Index for efficient per-URL latest-check lookups (fix #4)
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_url_checks_url_time
+            ON url_checks(url, check_time DESC)
+        ''')
+
         conn.commit()
         conn.close()
-    
+
     def setup_logging(self):
-        """Setup logging for URL monitor."""
         log_path = "/app/memory/url_monitor.log"
         logging.basicConfig(
             filename=log_path,
@@ -120,79 +130,91 @@ class UrlMonitor:
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
         self.logger = logging.getLogger('UrlMonitor')
-    
+
     def add_url(self, url: str, friendly_name: str = "", frequency_minutes: int = 60,
-                tags: List[str] = None, alert_on_changes: bool = True, frequency: int = None) -> Dict:
-        """Add a new URL to monitor."""
+                tags: List[str] = None, alert_on_changes: bool = True,
+                frequency: int = None, verify_ssl: bool = True) -> Dict:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # Accept 'frequency' as alias for 'frequency_minutes'
         if frequency is not None:
             frequency_minutes = frequency
 
-        # Robustly parse to int — extract first number, default 60 on failure
         try:
             frequency_minutes = int(frequency_minutes)
         except (ValueError, TypeError):
             m = re.search(r'\d+', str(frequency_minutes))
             frequency_minutes = int(m.group()) if m else 60
 
-        tags_str = ",".join(tags) if tags else ""
+        # Strip and drop empty/whitespace-only tags (fix #7)
+        cleaned_tags = [t.strip() for t in (tags or []) if t and t.strip()]
+        tags_str = ",".join(cleaned_tags)
 
         try:
             cursor.execute('''
                 INSERT OR REPLACE INTO url_metadata
                 (url, friendly_name, check_frequency_minutes, alert_on_changes,
-                 tags, created_at, last_check, next_check, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tags, created_at, last_check, next_check, is_active, verify_ssl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (url, friendly_name, frequency_minutes, alert_on_changes,
                   tags_str, datetime.now().isoformat(), None,
-                  (datetime.now() + timedelta(minutes=frequency_minutes)).isoformat(), True))
-            
+                  (datetime.now() + timedelta(minutes=frequency_minutes)).isoformat(),
+                  True, verify_ssl))
             conn.commit()
             conn.close()
             return {"success": True, "message": f"Successfully added {url}"}
-            
         except Exception as e:
             conn.close()
             return {"success": False, "error": str(e)}
-    
-    async def check_url(self, url: str) -> UrlStatus:
-        """Check a single URL and returl all status information."""
-        headers = {
-            'User-Agent': 'TrinityClaw-UrlMonitor/1.0'
-        }
-        
+
+    async def _fetch(self, session: aiohttp.ClientSession, url: str,
+                     headers: dict, ssl_ctx) -> tuple:
+        """Execute one GET; returns (status_code, headers_dict, content_bytes)."""
+        async with session.get(url, headers=headers, ssl=ssl_ctx) as response:
+            content = await response.read()
+            return response.status, dict(response.headers), content
+
+    async def check_url(self, url: str, verify_ssl: bool = True) -> UrlStatus:
+        """Check a single URL and return all status information."""
+        headers = {'User-Agent': 'TrinityClaw-UrlMonitor/1.0'}
+        ssl_ctx = None if verify_ssl else False  # fix #13
         start_time = time.time()
-        
+
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-                async with session.get(url, headers=headers) as response:
-                    content = await response.read()
-                    content_hash = hashlib.sha256(content).hexdigest()
-                    
-                    last_modified = None
-                    if 'Last-Modified' in response.headers:
-                        try:
-                            last_modified = parsedate_to_datetime(response.headers['Last-Modified'])
-                        except Exception as e:
-                            last_modified = datetime.now()
-                    
-                    response_time = time.time() - start_time
-                    
-                    return UrlStatus(
-                        url=url,
-                        status_code=response.status,
-                        content_hash=content_hash,
-                        content_length=len(content),
-                        last_modified=last_modified or datetime.now(),
-                        check_time=datetime.now(),
-                        response_time=response_time
+                status_code, resp_headers, content = await self._fetch(
+                    session, url, headers, ssl_ctx
+                )
+
+                # Retry once on 429, honouring Retry-After (fix #12)
+                if status_code == 429:
+                    retry_after = min(int(resp_headers.get('Retry-After', '10')), 60)
+                    self.logger.info(f"429 on {url}, retrying after {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    status_code, resp_headers, content = await self._fetch(
+                        session, url, headers, ssl_ctx
                     )
-                    
+
+                content_hash = hashlib.sha256(content).hexdigest()
+
+                last_modified = None
+                if 'Last-Modified' in resp_headers:
+                    try:
+                        last_modified = parsedate_to_datetime(resp_headers['Last-Modified'])
+                    except Exception:
+                        last_modified = datetime.now()
+
+                return UrlStatus(
+                    url=url,
+                    status_code=status_code,
+                    content_hash=content_hash,
+                    content_length=len(content),
+                    last_modified=last_modified or datetime.now(),
+                    check_time=datetime.now(),
+                    response_time=time.time() - start_time,
+                )
+
         except Exception as e:
-            response_time = time.time() - start_time
             return UrlStatus(
                 url=url,
                 status_code=0,
@@ -200,271 +222,278 @@ class UrlMonitor:
                 content_length=0,
                 last_modified=datetime.now(),
                 check_time=datetime.now(),
-                response_time=response_time,
-                error=str(e)
+                response_time=time.time() - start_time,
+                error=str(e),
             )
-    
-    def save_check_result(self, status: UrlStatus):
-        """Save check result to database."""
+
+    def save_check_result(self, status: UrlStatus) -> bool:
+        """Save check result to database. Returns True if a change was detected."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        # Check for changes
-        cursor.execute('''
-            SELECT content_hash FROM url_checks 
-            WHERE url = ? ORDER BY check_time DESC LIMIT 1
-        ''', (status.url,))
-        
+
+        # Read this URL's configured frequency so next_check is correct (fix #1)
+        cursor.execute(
+            'SELECT check_frequency_minutes, alert_on_changes, friendly_name FROM url_metadata WHERE url = ?',
+            (status.url,)
+        )
+        meta = cursor.fetchone()
+        freq_minutes = meta[0] if meta else 60
+        alert_on_changes = meta[1] if meta else False
+        friendly_name = (meta[2] if meta else None) or status.url
+
+        # Detect content changes
+        cursor.execute(
+            'SELECT content_hash, content_length FROM url_checks WHERE url = ? ORDER BY check_time DESC LIMIT 1',
+            (status.url,)
+        )
         last_result = cursor.fetchone()
         change_detected = False
-        
+
         if last_result:
-            old_hash = last_result[0]
+            old_hash, old_length = last_result
             if status.content_hash and old_hash != status.content_hash:
                 change_detected = True
-                
+                # Populate changes_summary with a human-readable diff summary (fix #14)
+                length_delta = status.content_length - (old_length or 0)
+                changes_summary = (
+                    f"Content changed; length delta: {length_delta:+d} bytes "
+                    f"({old_length or 0} → {status.content_length})"
+                )
                 cursor.execute('''
-                    INSERT INTO url_changes (url, old_hash, new_hash, change_type, detected_at)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (status.url, old_hash, status.content_hash, "content_changed", 
-                      datetime.now().isoformat()))
-        
+                    INSERT INTO url_changes (url, old_hash, new_hash, change_type, detected_at, changes_summary)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (status.url, old_hash, status.content_hash, "content_changed",
+                      datetime.now().isoformat(), changes_summary))
+
+                # Honour alert_on_changes flag (fix #11)
+                if alert_on_changes:
+                    self.logger.warning(
+                        f"ALERT change detected on {friendly_name}: {changes_summary}"
+                    )
+
         cursor.execute('''
-            INSERT INTO url_checks 
-            (url, status_code, content_hash, content_length, last_modified, 
+            INSERT INTO url_checks
+            (url, status_code, content_hash, content_length, last_modified,
              check_time, response_time, error, change_detected)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (status.url, status.status_code, status.content_hash, status.content_length,
               status.last_modified.isoformat(), status.check_time.isoformat(),
               status.response_time, status.error, change_detected))
-        
+
+        # Use the URL's own frequency for next_check (fix #1)
         cursor.execute('''
-            UPDATE url_metadata 
-            SET last_check = ?, next_check = ?
-            WHERE url = ?
-        ''', (status.check_time.isoformat(),
-              (datetime.now() + timedelta(minutes=60)).isoformat(),
-              status.url))
-        
+            UPDATE url_metadata SET last_check = ?, next_check = ? WHERE url = ?
+        ''', (
+            status.check_time.isoformat(),
+            (datetime.now() + timedelta(minutes=freq_minutes)).isoformat(),
+            status.url,
+        ))
+
         conn.commit()
         conn.close()
-        
         return change_detected
-    
+
     async def check_all_urls(self) -> List[Dict]:
-        """Monitor all active URLs."""
+        """Monitor all active URLs concurrently."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
         cursor.execute('''
-            SELECT url, friendly_name FROM url_metadata 
+            SELECT url, friendly_name, verify_ssl FROM url_metadata
             WHERE is_active = 1 AND next_check <= ?
         ''', (datetime.now().isoformat(),))
-        
         urls = cursor.fetchall()
         conn.close()
-        
+
+        if not urls:
+            return []
+
+        # Check all URLs concurrently instead of sequentially (fix #6)
+        statuses = await asyncio.gather(
+            *[self.check_url(url, verify_ssl=bool(verify_ssl)) for url, _, verify_ssl in urls]
+        )
+
         results = []
-        for url, name in urls:
-            status = await self.check_url(url)
+        for (url, name, _), status in zip(urls, statuses):
             change_detected = self.save_check_result(status)
-            
             results.append({
                 "url": url,
                 "name": name,
                 "status_code": status.status_code,
                 "response_time": status.response_time,
                 "change_detected": change_detected,
-                "error": status.error
+                "error": status.error,
             })
-        
         return results
-    
+
     def get_url_history(self, url: str, limit: int = 10) -> List[Dict]:
         """Get monitoring history for a specific URL."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
         try:
             limit = int(limit)
         except (TypeError, ValueError):
             limit = 10
 
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row  # access by column name, not position (fix #8)
+        cursor = conn.cursor()
+
         cursor.execute('''
-            SELECT * FROM url_checks
+            SELECT id, url, status_code, content_hash, content_length, last_modified,
+                   check_time, response_time, error, change_detected
+            FROM url_checks
             WHERE url = ?
             ORDER BY check_time DESC LIMIT ?
         ''', (url, limit))
-        
+
         rows = cursor.fetchall()
         conn.close()
-        
-        history = []
-        for row in rows:
-            history.append({
-                "id": row[0],
-                "url": row[1],
-                "status_code": row[2],
-                "content_hash": row[3],
-                "content_length": row[4],
-                "last_modified": row[5],
-                "check_time": row[6],
-                "response_time": row[7],
-                "error": row[8],
-                "change_detected": row[9]
-            })
-        
-        return history
-    
+        return [dict(row) for row in rows]
+
     def get_status_summary(self) -> Dict:
         """Get comprehensive status summary."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        # Total active URLs
+
         cursor.execute('SELECT COUNT(*) FROM url_metadata WHERE is_active = 1')
         total_urls = cursor.fetchone()[0]
-        
-        # Recent checks (last 24 hours)
+
         cursor.execute('''
-            SELECT COUNT(*) FROM url_checks 
+            SELECT COUNT(*) FROM url_checks
             WHERE check_time > datetime('now', '-1 day') AND status_code < 400
         ''')
         recent_success = cursor.fetchone()[0]
-        
-        # Recent failures
+
+        # Fixed: parens ensure OR doesn't escape the 24-hour time window (fix #2)
         cursor.execute('''
-            SELECT COUNT(*) FROM url_checks 
-            WHERE check_time > datetime('now', '-1 day') AND status_code >= 400 OR error IS NOT NULL
+            SELECT COUNT(*) FROM url_checks
+            WHERE check_time > datetime('now', '-1 day')
+              AND (status_code >= 400 OR error IS NOT NULL)
         ''')
         recent_failures = cursor.fetchone()[0]
-        
-        # Recent changes
+
         cursor.execute('''
-            SELECT COUNT(*) FROM url_changes 
+            SELECT COUNT(*) FROM url_changes
             WHERE detected_at > datetime('now', '-1 day')
         ''')
         recent_changes = cursor.fetchone()[0]
-        
-        # Average response time
+
         cursor.execute('''
-            SELECT AVG(response_time) FROM url_checks 
+            SELECT AVG(response_time) FROM url_checks
             WHERE check_time > datetime('now', '-1 day')
         ''')
-        avg_response_time = cursor.fetchone()[0]
-        
-        # Get latest checks for each URL
+        avg_response_time = cursor.fetchone()[0] or 0.0  # fix #16
+
+        # MAX(id) as tiebreaker prevents duplicate rows when timestamps collide (fix #3)
         cursor.execute('''
-            SELECT url_checks.url, url_checks.status_code, url_checks.check_time, url_checks.error
+            SELECT url_checks.url, url_checks.status_code,
+                   url_checks.check_time, url_checks.error
             FROM url_checks
-            JOIN (
-                SELECT url AS check_url, MAX(check_time) AS latest FROM url_checks
+            WHERE url_checks.id IN (
+                SELECT MAX(id) FROM url_checks
                 WHERE check_time > datetime('now', '-1 day')
                 GROUP BY url
-            ) latest_checks
-              ON url_checks.url = latest_checks.check_url
-             AND url_checks.check_time = latest_checks.latest
+            )
         ''')
-        
         latest_checks = cursor.fetchall()
         conn.close()
-        
+
         return {
             "total_monitored": total_urls,
             "recent_success": recent_success,
             "recent_failures": recent_failures,
             "recent_changes": recent_changes,
             "avg_response_time": avg_response_time,
-            "latest_checks": [{"url": row[0], "status": row[1], "checked": row[2], "error": row[3]} 
-                             for row in latest_checks]
+            "latest_checks": [
+                {"url": row[0], "status": row[1], "checked": row[2], "error": row[3]}
+                for row in latest_checks
+            ],
         }
-    
+
     def get_recent_changes(self, limit: int = 10) -> List[Dict]:
         """Get recent URL changes."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
         try:
             limit = int(limit)
         except (TypeError, ValueError):
             limit = 10
 
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
         cursor.execute('''
-            SELECT * FROM url_changes
+            SELECT id, url, old_hash, new_hash, change_type, detected_at, changes_summary
+            FROM url_changes
             ORDER BY detected_at DESC LIMIT ?
         ''', (limit,))
-        
-        changes = cursor.fetchall()
+
+        rows = cursor.fetchall()
         conn.close()
-        
-        return [{
-            "url": change[1],
-            "old_hash": change[2],
-            "new_hash": change[3],
-            "change_type": change[4],
-            "detected_at": change[5]
-        } for change in changes]
-    
+        return [dict(row) for row in rows]
+
     def remove_url(self, url: str) -> Dict:
         """Remove a URL from monitoring."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
         cursor.execute('UPDATE url_metadata SET is_active = 0 WHERE url = ?', (url,))
-        
         conn.commit()
         conn.close()
-        
         return {"success": True, "message": f"Removed {url} from monitoring"}
+
 
 # Create global instance
 url_monitor_instance = UrlMonitor()
 
-# Skill interface functions
+
+# ── Skill interface functions ─────────────────────────────────────────────────
+
 def add_url(url: str, friendly_name: str = "", frequency_minutes: int = 60,
-           tags=None, alert_on_changes: bool = True, frequency=None) -> Dict:
+            tags=None, alert_on_changes: bool = True,
+            frequency=None, verify_ssl: bool = True) -> Dict:
     """Add a new URL to monitor."""
-    # Accept tags as a plain string ("DDR5") or list (["DDR5"])
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
-    return url_monitor_instance.add_url(url, friendly_name, frequency_minutes,
-                                        tags, alert_on_changes, frequency=frequency)
+    return url_monitor_instance.add_url(
+        url, friendly_name, frequency_minutes, tags, alert_on_changes,
+        frequency=frequency, verify_ssl=verify_ssl,
+    )
+
 
 def get_status_summary() -> Dict:
-    """Get comprehensive monitoring status."""
     try:
         return url_monitor_instance.get_status_summary()
     except Exception as e:
         return {"error": str(e)}
 
+
 def get_url_history(url: str, limit: int = 10) -> List[Dict]:
-    """Get history for a specific URL."""
     try:
         return url_monitor_instance.get_url_history(url, int(limit))
     except Exception as e:
         return [{"error": str(e)}]
 
+
 def get_recent_changes(limit: int = 10) -> List[Dict]:
-    """Get recent changes across all monitored URLs."""
     try:
         return url_monitor_instance.get_recent_changes(int(limit))
     except Exception as e:
         return [{"error": str(e)}]
+
 
 def list_urls() -> str:
     """List all monitored URLs with their latest status. Preferred over get_status_summary."""
     try:
         conn = sqlite3.connect(url_monitor_instance.db_path)
         cursor = conn.cursor()
+        # CTE avoids correlated per-row subquery; index on (url, check_time) makes it fast (fix #4)
         cursor.execute('''
+            WITH latest AS (
+                SELECT url, MAX(id) AS max_id FROM url_checks GROUP BY url
+            )
             SELECT m.url, m.friendly_name, m.tags, m.check_frequency_minutes,
                    m.last_check, m.is_active,
                    c.status_code, c.response_time, c.error
             FROM url_metadata m
-            LEFT JOIN url_checks c ON c.id = (
-                SELECT id FROM url_checks WHERE url = m.url
-                ORDER BY check_time DESC LIMIT 1
-            )
+            LEFT JOIN latest l ON l.url = m.url
+            LEFT JOIN url_checks c ON c.id = l.max_id
             ORDER BY m.created_at DESC
         ''')
         rows = cursor.fetchall()
@@ -496,18 +525,17 @@ def list_urls() -> str:
     except Exception as e:
         return f"❌ list_urls error: {e}"
 
+
 async def check_all_urls() -> List[Dict]:
-    """Check all active URLs."""
     return await url_monitor_instance.check_all_urls()
 
+
 def remove_url(url: str) -> Dict:
-    """Remove a URL from monitoring."""
     return url_monitor_instance.remove_url(url)
 
-def check_url_now(url: str) -> Dict:
-    """Check a single URL immediately (async wrapper)."""
-    import asyncio
 
+def check_url_now(url: str) -> Dict:
+    """Check a single URL immediately."""
     async def _check():
         status = await url_monitor_instance.check_url(url)
         return {
@@ -516,13 +544,13 @@ def check_url_now(url: str) -> Dict:
             "response_time": status.response_time,
             "content_length": status.content_length,
             "content_hash": status.content_hash,
-            "error": status.error
+            "error": status.error,
         }
 
     return asyncio.run(_check())
 
 
-# ── Twitter State Helpers ──────────────────────────────────────────────────────
+# ── Twitter State Helpers ─────────────────────────────────────────────────────
 # Lightweight SQLite key/value store for deduplication in scheduler-driven
 # Twitter automation. Stored in url_monitor.db (twitter_state table).
 
@@ -554,7 +582,7 @@ def tw_mark_seen(key: str, value: str = "done") -> str:
     key   — same key you checked with tw_is_seen()
     value — optional label describing what was done (e.g. "liked", "followed")
 
-    Returns ✅ confirmation.
+    Returns confirmation string.
     """
     conn = sqlite3.connect(_TW_DB)
     c = conn.cursor()
@@ -588,16 +616,40 @@ def tw_log_tweet() -> str:
     """Record that a tweet was just posted. Call immediately after browser_session.tweet().
 
     Saves the current timestamp so tw_last_tweet_time() can enforce tweet frequency.
-    Returns ✅ confirmation with the logged timestamp.
+    Returns confirmation string, or an error message if the write failed (fix #10).
     """
     now = datetime.now().isoformat()
-    conn = sqlite3.connect(_TW_DB)
-    c = conn.cursor()
-    c.execute(
-        "INSERT OR REPLACE INTO twitter_state (key, value, logged_at) VALUES (?, ?, ?)",
-        ("last_tweet_time", now, now),
-    )
-    conn.commit()
-    conn.close()
-    return f"✅ Tweet logged at {now}"
+    try:
+        conn = sqlite3.connect(_TW_DB)
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO twitter_state (key, value, logged_at) VALUES (?, ?, ?)",
+            ("last_tweet_time", now, now),
+        )
+        conn.commit()
+        conn.close()
+        return f"✅ Tweet logged at {now}"
+    except Exception as e:
+        return f"❌ ERROR: failed to log tweet timestamp: {e}"
 
+
+def tw_prune(max_age_days: int = 90) -> str:
+    """Remove twitter_state entries older than max_age_days (default: 90).
+
+    Call periodically to prevent unbounded table growth (fix #9).
+    The 'last_tweet_time' sentinel key is never pruned.
+    """
+    cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+    try:
+        conn = sqlite3.connect(_TW_DB)
+        c = conn.cursor()
+        c.execute(
+            "DELETE FROM twitter_state WHERE key != 'last_tweet_time' AND logged_at < ?",
+            (cutoff,),
+        )
+        deleted = c.rowcount
+        conn.commit()
+        conn.close()
+        return f"✅ Pruned {deleted} twitter_state entries older than {max_age_days} days."
+    except Exception as e:
+        return f"❌ ERROR: tw_prune failed: {e}"
