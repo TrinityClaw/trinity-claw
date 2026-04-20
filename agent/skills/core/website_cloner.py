@@ -14,7 +14,7 @@ Pipeline:
   6. Serve for live preview
 """
 
-import datetime
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -64,11 +64,13 @@ _USER_AGENTS = [
 
 # Private/internal network prefixes — blocked to prevent SSRF
 _BLOCKED_PREFIXES = (
-    "localhost", "127.", "0.0.0.", "::1", "169.254.",
+    "localhost", "127.", "0.0.0.", "169.254.",
     "10.", "172.16.", "172.17.", "172.18.", "172.19.",
     "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
     "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
     "172.30.", "172.31.", "192.168.",
+    # IPv6: loopback, IPv4-mapped, link-local, ULA, multicast
+    "::1", "::ffff:", "fe80:", "fc00:", "fd", "ff0",
 )
 
 # ── Browser-session helpers ───────────────────────────────────────────────────
@@ -314,7 +316,8 @@ JSON.stringify((function() {
       headingStyle:    headingStyle,
       bodyStyle:       bodyStyle,
       ctaStyle:        ctaStyle,
-      interactionType: interactionType
+      interactionType: interactionType,
+      gap:             cs.gap || cs.rowGap || ''
     });
   }
 
@@ -353,25 +356,66 @@ JSON.stringify((function() {
 
 _HOVER_STATES_JS = """
 JSON.stringify((function() {
-  // Read :hover CSS rules directly from stylesheets — more reliable than simulating mouseenter.
-  var rules = [];
+  function parseRule(rule) {
+    if (!rule.cssText) return null;
+    var sel = rule.selectorText || '';
+    var css = rule.cssText;
+    if (!/(background|color|border|transform|opacity|box-shadow|filter|clip|display|visibility)/.test(css)) return null;
+    return { sel: sel.slice(0, 120), css: css.slice(0, 400) };
+  }
+
+  var rules = { hover: [], focus: [], active: [], scroll: [], reduced: [] };
+
   try {
     for (var si = 0; si < document.styleSheets.length; si++) {
       try {
         var cssRules = document.styleSheets[si].cssRules || [];
         for (var ri = 0; ri < cssRules.length; ri++) {
           var rule = cssRules[ri];
-          if (rule.selectorText && rule.selectorText.indexOf(':hover') !== -1) {
-            var text = rule.cssText || '';
-            if (/background|color|border|transform|opacity|box-shadow/.test(text)) {
-              rules.push({ sel: rule.selectorText.slice(0, 100), css: text.slice(0, 300) });
+
+          // Pseudo-class rules
+          if (rule.selectorText) {
+            if (rule.selectorText.indexOf(':hover') !== -1) {
+              var rh = parseRule(rule); if (rh) rules.hover.push(rh);
+            }
+            if (rule.selectorText.indexOf(':focus') !== -1) {
+              var rf = parseRule(rule); if (rf) rules.focus.push(rf);
+            }
+            if (rule.selectorText.indexOf(':active') !== -1) {
+              var ra = parseRule(rule); if (ra) rules.active.push(ra);
+            }
+          }
+
+          // Scroll-driven animations (CSS Animation Timeline)
+          if (rule.style && (rule.style['animation-timeline'] || rule.style['scroll-timeline'])) {
+            var rs = parseRule(rule); if (rs) rules.scroll.push(rs);
+          }
+
+          // @media (prefers-reduced-motion)
+          if (rule.media && rule.media.mediaText && rule.media.mediaText.indexOf('prefers-reduced-motion') !== -1) {
+            if (rule.cssRules) {
+              for (var k = 0; k < rule.cssRules.length; k++) {
+                var rm = parseRule(rule.cssRules[k]); if (rm) rules.reduced.push(rm);
+              }
             }
           }
         }
       } catch(e) {}  // cross-origin sheets throw SecurityError
     }
   } catch(e) {}
-  return rules.slice(0, 30);
+
+  // Deduplicate + cap per category
+  for (var key in rules) {
+    var seen = {};
+    rules[key] = rules[key].filter(function(r) {
+      var k = r.sel + r.css;
+      if (seen[k]) return false;
+      seen[k] = true;
+      return true;
+    }).slice(0, 25);
+  }
+
+  return rules;
 })())
 """
 
@@ -529,27 +573,27 @@ def _browser_extract(url: str) -> "dict | None":
         except Exception:
             pass
 
-        # Hover CSS rules (third JS pass — reads :hover from all stylesheets)
-        hover_rules: list = []
+        # Interaction CSS rules (third JS pass — reads :hover/:focus/:active/scroll/reduced-motion)
+        interaction_rules: dict = {}
         try:
-            hover_result = mod._evaluate(_HOVER_STATES_JS)
-            if "✅" in hover_result and "\n" in hover_result:
-                raw_h = hover_result.split("\n", 1)[1].strip()
-                if raw_h:
-                    hover_rules = json.loads(raw_h)
+            interaction_result = mod._evaluate(_HOVER_STATES_JS)
+            if "✅" in interaction_result and "\n" in interaction_result:
+                raw_i = interaction_result.split("\n", 1)[1].strip()
+                if raw_i:
+                    interaction_rules = json.loads(raw_i)
         except Exception:
             pass
 
         return {
-            "computed_vars":   _computed_to_vars(computed),
-            "screenshot_path": screenshot_path,
+            "computed_vars":     _computed_to_vars(computed),
+            "screenshot_path":   screenshot_path,
             "h1_text":   (computed.get("h1Text")  or "").strip(),
             "title":     (computed.get("title")    or "").strip(),
             "meta_desc": (computed.get("metaDesc") or "").strip(),
             "img_srcs":  computed.get("imgSrcs",  []),
             "bg_images": computed.get("bgImages", []),
-            "structure": structure,   # section layouts, nav links, palette
-            "hover_rules": hover_rules,  # :hover CSS rules for buttons/links
+            "structure": structure,          # section layouts, nav links, palette
+            "interaction_rules": interaction_rules,  # :hover/:focus/:active/scroll CSS rules
         }
 
     except Exception:
@@ -642,10 +686,22 @@ def _extract_fonts(css: str) -> dict:
         (r"--body-font[^:]*:\s*([^;]+);", "body_font"),
         (r"--heading-font[^:]*:\s*([^;]+);", "heading_font"),
     ]:
-        m = re.search(selector, css, re.DOTALL)
+        m = re.search(selector, css, re.DOTALL | re.IGNORECASE)
         if m and key not in fonts:
             fonts[key] = m.group(1).strip()
     return fonts
+
+
+def _extract_breakpoints(css: str) -> list:
+    """Extract @media min/max-width breakpoint values from CSS."""
+    points = []
+    for m in re.finditer(
+        r"@media[^{]*\b(min|max)-width\s*:\s*([\d.]+)(px|em|rem)", css, re.IGNORECASE
+    ):
+        entry = {"type": m.group(1).lower(), "value": m.group(2), "unit": m.group(3)}
+        if entry not in points:
+            points.append(entry)
+    return points[:12]
 
 
 def _parse_html_bs4(html: str, base_url: str) -> dict:
@@ -918,6 +974,7 @@ def _build_tokens(parsed: dict, all_css: str, url: str) -> dict:
             "heading_font": fonts.get("heading_font", ""),
             "body_font": fonts.get("body_font", ""),
             "color_vars": _color_vars(vars_dict),
+            "breakpoints": _extract_breakpoints(all_css),
         },
         "web_builder_patch": {
             "root_block": root_block,
@@ -953,33 +1010,10 @@ def _read_project_css(wb, project: str) -> str:
     return raw[idx + 2:] if idx >= 0 else raw
 
 
-# ── Structure-based HTML generation ──────────────────────────────────────────
-# These functions build a custom index.html from the extracted structure data
-# so that clone() produces a page that actually mirrors the source layout
-# instead of always scaffolding the same fixed professional template.
-
-def _el_style_attr(style_dict: "dict | None", *extra_props: str) -> str:
-    """
-    Build an inline style= attribute string from a per-section element style dict
-    (headingStyle, ctaStyle, etc.) plus any additional CSS property strings.
-
-    >>> _el_style_attr({"color": "#fff", "fontSize": "48px"})
-    ' style="color:#fff;font-size:48px"'
-    """
-    parts = []
-    if style_dict:
-        if style_dict.get("color"):
-            parts.append(f"color:{style_dict['color']}")
-        if style_dict.get("bg"):
-            parts.append(f"background-color:{style_dict['bg']}")
-        if style_dict.get("borderRadius"):
-            parts.append(f"border-radius:{style_dict['borderRadius']}")
-        if style_dict.get("fontSize"):
-            parts.append(f"font-size:{style_dict['fontSize']}")
-        if style_dict.get("fontFamily"):
-            parts.append(f"font-family:{style_dict['fontFamily']}")
-    parts.extend(p for p in extra_props if p)
-    return f' style="{";".join(parts)}"' if parts else ""
+# ── Structure-based CSS generation ───────────────────────────────────────────
+# Generates per-section color overrides from extracted structure data and
+# writes them to style.css so each section's background, heading, and CTA
+# colors match the source site rather than the default template colors.
 
 def _slug(text: str) -> str:
     """Convert text to a lowercase URL slug."""
@@ -1007,175 +1041,6 @@ def _classify_section(sec: dict, position: int) -> str:
     return "generic"
 
 
-def _section_html(sec: dict, position: int) -> str:
-    """
-    Generate HTML for one section using the professional template's CSS class names
-    so the existing style.css styles it correctly without extra CSS.
-    Per-section headingStyle/ctaStyle (from _STRUCTURAL_JS) are applied as inline
-    styles so colors actually match the source site rather than just global tokens.
-    """
-    stype      = _classify_section(sec, position)
-    heading    = sec.get("heading", "").strip()
-    subtext    = sec.get("subtext", "").strip()
-    cta_text   = sec.get("ctaText", "").strip()
-    cols       = max(sec.get("cols", 0), 1)
-    bg         = sec.get("bg", "")
-    has_bg_img = sec.get("hasBgImg", False)
-    sec_id     = sec.get("id", "") or _slug(heading or stype)
-    style_attr = f' style="background-color:{bg}"' if bg else ""
-    # Per-section element style attributes (from _STRUCTURAL_JS per-component extraction)
-    h_style    = _el_style_attr(sec.get("headingStyle"))
-    body_style = _el_style_attr(sec.get("bodyStyle"))
-    cta_style  = _el_style_attr(sec.get("ctaStyle"))
-    interaction = sec.get("interactionType", "static")
-    interact_attr = f' data-interaction="{interaction}"' if interaction != "static" else ""
-
-    if stype == "hero":
-        h1  = heading or "Your Headline Goes Here"
-        sub = subtext or "A compelling one-liner that tells visitors what you offer and why they should care."
-        btn = cta_text or "Get Started"
-        bg_cls = " hero--bg-img" if has_bg_img else ""
-        return (
-            f'  <section class="hero{bg_cls}" id="{sec_id}"{style_attr}{interact_attr}>\n'
-            f'    <div class="hero__content">\n'
-            f'      <h1 class="hero__title"{h_style}>{h1}</h1>\n'
-            f'      <p class="hero__sub"{body_style}>{sub}</p>\n'
-            f'      <div class="hero__btns">\n'
-            f'        <a href="#contact" class="btn btn--accent"{cta_style}>{btn}</a>\n'
-            f'        <a href="#about" class="btn btn--outline">Learn More</a>\n'
-            f'      </div>\n'
-            f'    </div>\n'
-            f'  </section>'
-        )
-
-    if stype == "about":
-        h2   = heading or "About Us"
-        body = subtext or "Tell your story here. Explain who you are, what you stand for, and why clients choose you."
-        btn  = cta_text or "Learn More"
-        return (
-            f'  <section class="about section" id="{sec_id}"{style_attr}{interact_attr}>\n'
-            f'    <div class="container">\n'
-            f'      <div class="about__grid">\n'
-            f'        <div class="about__media"><img src="about.jpg" alt="{h2}"></div>\n'
-            f'        <div class="about__text">\n'
-            f'          <h2{h_style}>{h2}</h2>\n'
-            f'          <p{body_style}>{body}</p>\n'
-            f'          <a href="#" class="btn btn--dark"{cta_style}>{btn}</a>\n'
-            f'        </div>\n'
-            f'      </div>\n'
-            f'    </div>\n'
-            f'  </section>'
-        )
-
-    if stype == "features":
-        col_count = min(cols, 4)
-        h2  = heading or "Our Services"
-        sub = subtext or "Describe your offering clearly. What problems do you solve for clients?"
-        icons = ["◆", "★", "●", "▲"]
-        cards = "\n        ".join(
-            f'<div class="card">\n'
-            f'          <div class="card__icon">{icons[j % 4]}</div>\n'
-            f'          <h3>{"Feature " + str(j + 1)}</h3>\n'
-            f'          <p>{"Key benefit or feature description for this offering." if j > 0 else sub[:120]}</p>\n'
-            f'        </div>'
-            for j in range(col_count)
-        )
-        col_style = f' style="grid-template-columns:repeat({col_count},1fr)"' if col_count != 3 else ""
-        return (
-            f'  <section class="services section section--alt" id="{sec_id}"{style_attr}{interact_attr}>\n'
-            f'    <div class="container">\n'
-            f'      <div class="section-header">\n'
-            f'        <h2{h_style}>{h2}</h2>\n'
-            f'        <p class="section-sub"{body_style}>{sub[:160]}</p>\n'
-            f'      </div>\n'
-            f'      <div class="cards"{col_style}>\n'
-            f'        {cards}\n'
-            f'      </div>\n'
-            f'    </div>\n'
-            f'  </section>'
-        )
-
-    if stype == "stats":
-        nums = re.findall(r"\b\d[\d,\.%kxK]*\+?\b", heading + " " + subtext)
-        defaults = [("10+", "Years Experience"), ("500+", "Happy Clients"), ("98%", "Satisfaction Rate"), ("24/7", "Support")]
-        stat_items = "\n        ".join(
-            f'<div class="stat">\n'
-            f'          <span class="stat__n">{nums[j] if j < len(nums) else dnum}</span>\n'
-            f'          <span class="stat__l">{dlabel}</span>\n'
-            f'        </div>'
-            for j, (dnum, dlabel) in enumerate(defaults[:4])
-        )
-        h_line = f'\n      <h2{h_style} style="text-align:center;margin-bottom:2rem">{heading}</h2>' if heading else ""
-        return (
-            f'  <section class="stats" id="{sec_id}"{style_attr}{interact_attr}>\n'
-            f'    <div class="container">{h_line}\n'
-            f'      <div class="stats__row">\n'
-            f'        {stat_items}\n'
-            f'      </div>\n'
-            f'    </div>\n'
-            f'  </section>'
-        )
-
-    if stype == "testimonials":
-        h2 = heading or "What Our Clients Say"
-        return (
-            f'  <section class="testimonials section" id="{sec_id}"{style_attr}{interact_attr}>\n'
-            f'    <div class="container">\n'
-            f'      <div class="section-header"><h2{h_style}>{h2}</h2></div>\n'
-            f'      <div class="reviews">\n'
-            f'        <div class="review">\n'
-            f'          <p class="review__text">"Add your first client testimonial here. Authentic quotes build trust."</p>\n'
-            f'          <p class="review__name">Client Name</p>\n'
-            f'          <p class="review__role">Title, Company</p>\n'
-            f'        </div>\n'
-            f'        <div class="review">\n'
-            f'          <p class="review__text">"Include specific results — numbers and outcomes resonate with visitors."</p>\n'
-            f'          <p class="review__name">Client Name</p>\n'
-            f'          <p class="review__role">Title, Company</p>\n'
-            f'        </div>\n'
-            f'        <div class="review">\n'
-            f'          <p class="review__text">"Social proof is one of the most powerful conversion tools."</p>\n'
-            f'          <p class="review__name">Client Name</p>\n'
-            f'          <p class="review__role">Title, Company</p>\n'
-            f'        </div>\n'
-            f'      </div>\n'
-            f'    </div>\n'
-            f'  </section>'
-        )
-
-    if stype == "cta":
-        h2   = heading or "Ready to Get Started?"
-        body = subtext or "Take the next step. Contact us today and let's talk about how we can help."
-        btn  = cta_text or "Contact Us"
-        return (
-            f'  <section class="cta" id="{sec_id}"{style_attr}{interact_attr}>\n'
-            f'    <div class="container">\n'
-            f'      <div class="cta__inner">\n'
-            f'        <h2{h_style}>{h2}</h2>\n'
-            f'        <p{body_style}>{body}</p>\n'
-            f'        <div class="cta__btns">\n'
-            f'          <a href="mailto:hello@example.com" class="btn btn--accent"{cta_style}>{btn}</a>\n'
-            f'          <a href="tel:+11234567890" class="btn btn--outline">Call Us</a>\n'
-            f'        </div>\n'
-            f'      </div>\n'
-            f'    </div>\n'
-            f'  </section>'
-        )
-
-    # generic
-    h2   = heading or "Section"
-    body = subtext or "Content goes here."
-    btn_html = f'\n      <a href="#" class="btn btn--dark"{cta_style}>{cta_text}</a>' if cta_text else ""
-    return (
-        f'  <section class="section" id="{sec_id}"{style_attr}{interact_attr}>\n'
-        f'    <div class="container">\n'
-        f'      <h2{h_style}>{h2}</h2>\n'
-        f'      <p{body_style}>{body}</p>{btn_html}\n'
-        f'    </div>\n'
-        f'  </section>'
-    )
-
-
 def _generate_section_css(structure: dict) -> str:
     """
     Generate per-section CSS rules from structure data using the same section-dedup
@@ -1197,11 +1062,11 @@ def _generate_section_css(structure: dict) -> str:
     for raw_i, sec in enumerate(sections[:14]):
         stype = _classify_section(sec, raw_i)
         if type_counts.get(stype, 0) >= limits.get(stype, 2):
-            continue  # same skip logic as _build_clone_html
+            continue
         type_counts[stype] = type_counts.get(stype, 0) + 1
 
         heading = (sec.get("heading") or "").strip()
-        sec_id  = sec.get("id", "") or _slug(heading or stype)   # matches _section_html
+        sec_id  = sec.get("id", "") or _slug(heading or stype)
         if not sec_id:
             continue
 
@@ -1230,99 +1095,13 @@ def _generate_section_css(structure: dict) -> str:
                 parts.append(f"color:{cta_style['color']}")
             if cta_style.get("borderRadius"):
                 parts.append(f"border-radius:{cta_style['borderRadius']}")
-            rules.append(f"#{sec_id} .btn {{ {'; '.join(parts)}; }}")
+            rules.append(f"#{sec_id} [class*=btn], #{sec_id} [class*=button], #{sec_id} [class*=cta] {{ {'; '.join(parts)}; }}")
 
     if not rules:
         return ""
     return (
         "\n/* ── Per-section color overrides (auto-extracted from source) ── */\n"
         + "\n".join(rules)
-    )
-
-
-def _build_clone_html(structure: dict, tokens: dict, project_name: str) -> str:
-    """
-    Build a complete index.html that mirrors the source site's section structure.
-    Uses the professional template's CSS class names so the existing style.css applies.
-    Each section type maps to a known CSS class, column counts drive grid layout.
-    """
-    nav_links = (
-        structure.get("navLinks", [])
-        or tokens.get("nav_links", [])
-        or ["Home", "About", "Services", "Contact"]
-    )
-    sections   = structure.get("sections", [])
-    brand      = (
-        tokens.get("nav_brand", "")
-        or _clean_brand(tokens.get("site_name", "") or project_name)
-    )
-    title      = tokens.get("site_name", project_name)
-    font_import = tokens.get("web_builder_patch", {}).get("font_import", "")
-    year       = datetime.datetime.now().year
-
-    nav_li = "\n        ".join(
-        f'<li><a href="#{_slug(lnk)}">{lnk}</a></li>' for lnk in nav_links[:7]
-    )
-    footer_li = "\n        ".join(
-        f'<li><a href="#{_slug(lnk)}">{lnk}</a></li>' for lnk in nav_links[:6]
-    )
-
-    # Build section HTML — honour source order, cap duplicates per type
-    section_parts = []
-    type_counts: dict = {}
-    limits = {"hero": 1, "about": 1, "features": 2, "stats": 1, "testimonials": 1, "cta": 1, "generic": 3}
-
-    if sections:
-        for raw_i, sec in enumerate(sections[:14]):
-            stype = _classify_section(sec, raw_i)
-            if type_counts.get(stype, 0) < limits.get(stype, 2):
-                # pass rendered position so hero detection works after dedup
-                section_parts.append(_section_html(sec, len(section_parts)))
-                type_counts[stype] = type_counts.get(stype, 0) + 1
-    else:
-        # Minimal fallback when nothing was extracted
-        section_parts = [
-            _section_html({"heading": brand, "subtext": tokens.get("meta_description", ""), "hasBgImg": False}, 0),
-            _section_html({"heading": "About Us", "cols": 0}, 1),
-            _section_html({"heading": "Our Services", "cols": 3}, 2),
-        ]
-
-    font_line  = f"  {font_import}\n" if font_import else ""
-    sections_html = "\n\n".join(section_parts)
-
-    return (
-        f"<!DOCTYPE html>\n"
-        f"<html lang=\"en\">\n"
-        f"<head>\n"
-        f"  <meta charset=\"UTF-8\">\n"
-        f"  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
-        f"  <title>{title[:80]}</title>\n"
-        f"{font_line}"
-        f"  <link rel=\"stylesheet\" href=\"style.css\">\n"
-        f"</head>\n"
-        f"<body>\n"
-        f"  <nav class=\"nav\">\n"
-        f"    <div class=\"nav__inner container\">\n"
-        f"      <a class=\"nav__brand\" href=\"#\">{brand[:60]}</a>\n"
-        f"      <ul class=\"nav__links\">\n"
-        f"        {nav_li}\n"
-        f"      </ul>\n"
-        f"      <a href=\"#contact\" class=\"btn btn--dark nav__cta\">Contact</a>\n"
-        f"    </div>\n"
-        f"  </nav>\n\n"
-        f"{sections_html}\n\n"
-        f"  <footer class=\"footer\">\n"
-        f"    <div class=\"container footer__row\">\n"
-        f"      <span class=\"footer__brand\">{brand[:60]}</span>\n"
-        f"      <ul class=\"footer__links\">\n"
-        f"        {footer_li}\n"
-        f"      </ul>\n"
-        f"      <p class=\"footer__copy\">&copy; {year} {brand[:60]}. All rights reserved.</p>\n"
-        f"    </div>\n"
-        f"  </footer>\n"
-        f"  <script src=\"script.js\"></script>\n"
-        f"</body>\n"
-        f"</html>"
     )
 
 
@@ -1366,7 +1145,7 @@ def extract_tokens(url: str) -> str:
     final_url = url
     _http_error = None
     try:
-        html, final_url = _fetch(url)
+        html, final_url = _fetch(url, timeout=SKILL_TIMEOUT)
     except Exception as e:
         _http_error = str(e)
         # Don't bail yet — browser_session navigates real Chrome and bypasses
@@ -1378,18 +1157,23 @@ def extract_tokens(url: str) -> str:
     else:
         parsed = _parse_html_regex(html, final_url)
 
-    # Collect CSS: inline styles first, then up to 4 linked CSS files
+    # Collect CSS: inline styles first, then up to 4 linked CSS files (fetched in parallel)
     all_css = parsed.get("inline_css", "")
     fetched_css = 0
-    for css_url in parsed.get("linked_css_urls", [])[:4]:
-        try:
-            css_text, _ = _fetch(css_url, timeout=10, is_css=True)
-            if css_text:
-                all_css += "\n" + css_text
+    css_urls = parsed.get("linked_css_urls", [])[:4]
+    if css_urls:
+        def _fetch_css(u: str) -> str:
+            try:
+                text, _ = _fetch(u, timeout=10, is_css=True)
+                return text or ""
+            except Exception:
+                return ""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            css_results = list(pool.map(_fetch_css, css_urls))
+        for text in css_results:
+            if text:
+                all_css += "\n" + text
                 fetched_css += 1
-            time.sleep(0.25)  # polite rate-limiting
-        except Exception:
-            pass
 
     tokens = _build_tokens(parsed, all_css, final_url)
 
@@ -1431,10 +1215,10 @@ def extract_tokens(url: str) -> str:
         if img_srcs or bg_images:
             tokens["assets"] = {"img_srcs": img_srcs, "bg_images": bg_images}
 
-        # Hover CSS rules — useful for patching button/link :hover in style.css
-        hover_rules = browser_data.get("hover_rules", [])
-        if hover_rules:
-            tokens["hover_rules"] = hover_rules
+        # Interaction CSS rules — hover/focus/active/scroll/reduced-motion per category
+        interaction_rules = browser_data.get("interaction_rules", {})
+        if interaction_rules:
+            tokens["interaction_rules"] = interaction_rules
 
         # Structural layout data (section topologies, nav links, palette)
         structure = browser_data.get("structure", {})
@@ -1498,8 +1282,8 @@ def clone(url: str, project_name: str = "", fidelity: str = "full") -> str:
         url:          Page URL to clone. Scheme auto-added if missing.
         project_name: Slug for the new project (auto-derived from domain if omitted).
         fidelity:     'tokens' — extract and print tokens JSON only, no project built.
-                      'light'  — same as full (distinction removed, kept for compatibility).
-                      'full'   — scaffold blank + write :root CSS + serve (DEFAULT).
+                      'full'   — scaffold blank + write :root CSS + per-section overrides + serve (DEFAULT).
+                      'light'  — alias for 'full', kept for backwards compatibility.
 
     Returns:
         Status report with patches applied, warnings, and live preview URL.
@@ -1594,6 +1378,14 @@ def clone(url: str, project_name: str = "", fidelity: str = "full") -> str:
     css_parts.append(".container { max-width: 1140px; margin: 0 auto; padding: 0 2rem; }")
     wb.write_file(project_name, "style.css", "\n".join(css_parts))
 
+    # ── Step 5b: append per-section color overrides ──────────────────────────
+    if structure:
+        section_css = _generate_section_css(structure)
+        if section_css:
+            existing = _read_project_css(wb, project_name)
+            wb.write_file(project_name, "style.css", existing + section_css)
+            patches_ok.append(f"per-section overrides ({len(structure.get('sections', []))} sections)")
+
     # ── Step 6: serve ────────────────────────────────────────────────────────
     serve_result = wb.serve(project_name)
     _url_m = re.search(r"https?://[^\s]+", serve_result)
@@ -1652,6 +1444,22 @@ def clone(url: str, project_name: str = "", fidelity: str = "full") -> str:
                 if interact != "static": parts.append(f"[{interact}]")
                 sec_id = sec.get("id", "") or _slug(heading or str(raw_i))
                 lines.append(f"     {raw_i+1}. #{sec_id}  {' | '.join(parts)}")
+
+    # ── Background images ─────────────────────────────────────────────────────
+    bg_images = tokens.get("assets", {}).get("bg_images", [])
+    if bg_images:
+        lines.append(f"\n🖼  Background images ({len(bg_images)}) — reference for Phase 3:")
+        for img_url in bg_images[:5]:
+            lines.append(f"     {img_url[:120]}")
+
+    # ── Interaction / hover rules ─────────────────────────────────────────────
+    interaction_rules = tokens.get("interaction_rules", {})
+    if interaction_rules:
+        total = sum(len(v) for v in interaction_rules.values())
+        cats  = [k for k, v in interaction_rules.items() if v]
+        lines.append(f"\n🎯  Interaction rules ({total} total — {', '.join(cats)}):")
+        for rule in interaction_rules.get("hover", [])[:4]:
+            lines.append(f"     hover: {rule.get('sel', '')[:70]}")
 
     lines.append("")
     lines.append("🚨 DO NOT STOP. Follow web_clone.md Phase 3 NOW:")
