@@ -165,15 +165,16 @@ def _load_error_patterns() -> Dict:
 
     return patterns
 
-def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied: str = "") -> str:
+def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied: str = "", skill_path: str = "") -> str:
     """Record a mistake + fix for future learning."""
     lesson = {
         "timestamp": datetime.now().isoformat(),
         "skill": skill_name,
+        "skill_path": skill_path,
         "error_type": error_type,
         "error_message": error_msg[:200],
         "fix_applied": fix_applied,
-        "hash": hashlib.md5(f"{skill_name}:{error_type}:{error_msg[:100]}".encode()).hexdigest()[:12]
+        "hash": hashlib.md5(f"{skill_name}:{error_type}:{error_msg[:100]}".encode()).hexdigest()
     }
     
     saved = _save_lesson(lesson)
@@ -295,31 +296,38 @@ def index_all_lessons() -> str:
     return f"✅ Indexed {indexed}/{len(lessons)} lessons into ChromaDB '{_LESSONS_COLLECTION}'."
 
 
-def check_for_learned_fix(skill_name: str, error_type: str) -> Optional[str]:
-    """Check if we've already learned a fix for this error type in this skill."""
+def check_for_learned_fix(skill_name: str, error_type: str, skill_path: str = "") -> Optional[str]:
+    """Check if we've already learned a fix for this error type in this skill.
+    If skill_path is given, prefer lessons recorded for that exact path to avoid
+    cross-contamination when two skills share the same name across core/dynamic."""
     lessons = _load_lessons()
+    fallback = None
     for lesson in reversed(lessons):  # most recent fix wins
-        if lesson.get("skill") == skill_name and lesson.get("error_type") == error_type:
+        if lesson.get("skill") != skill_name or lesson.get("error_type") != error_type:
+            continue
+        if skill_path and lesson.get("skill_path") == skill_path:
             return lesson.get("fix_applied")
-    return None
+        if fallback is None:
+            fallback = lesson.get("fix_applied")
+    return fallback
 
 
 def check_lessons(skill_name: str, func_name: str) -> Optional[str]:
-    """Pre-dispatch check: return a warning string if this skill.function has
-    failed before, so the caller can surface the lesson before executing.
+    """Pre-dispatch check: return a warning string if this skill has failed before,
+    so the caller can surface the lesson before executing.
     Returns None if no prior failures exist (the common, happy path).
 
     Called by app.py before executing each skill tag — zero tool-call overhead."""
-    key = f"{skill_name}.{func_name}"
+    label = f"{skill_name}.{func_name}"
     lessons = _load_lessons()
-    matches = [l for l in lessons if l.get("skill") == key]
+    matches = [l for l in lessons if l.get("skill") == skill_name]
     if not matches:
         return None
     # Most recent failure wins
     last = matches[-1]
     error_type = last.get("error_type", "error")
     fix        = last.get("fix_applied", "").strip()
-    msg = f"⚠️ [lesson] {key} has failed before ({error_type})"
+    msg = f"⚠️ [lesson] {label} has failed before ({error_type})"
     if fix:
         msg += f" — known fix: {fix[:120]}"
     return msg
@@ -708,11 +716,19 @@ def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
             pass
         return {"error": f"Could not write to {skill_name}.py: {e}"}
 
+    # Clean up backup now that the write succeeded
+    if backup_path and backup_path.exists():
+        try:
+            backup_path.unlink()
+        except OSError:
+            pass
+
     record_mistake(
         skill_name=skill_name,
         error_type=patch["issue_type"],
         error_msg=patch.get("original", ""),
-        fix_applied=patch.get("proposed_fix", "")
+        fix_applied=patch.get("proposed_fix", ""),
+        skill_path=str(path),
     )
 
     return {
@@ -799,7 +815,7 @@ def suggest_tests(skill_name: str) -> str:
     
     # FIX: Extract variable to avoid backslash in f-string
     test_file_hint = f"test_{skill_name}.py"
-    tests.append(f"\n💡 Pro tip: Save tests in /app/skills/tests/{test_file_hint}")
+    tests.append(f"\n💡 Pro tip: Save tests in {SKILLS_DIR}/{test_file_hint}")
     
     return "\n".join(tests)
 
@@ -884,7 +900,12 @@ def _verdict_check(skill_name: str, source: str) -> str:
     - FAIL = would raise on the happy path
     - PASS = traced execution returns expected result
     """
-    source_preview = source[:8000] + ("\n... [truncated]" if len(source) > 8000 else "")
+    if len(source) > 8000:
+        cut = source.rfind('\n', 0, 8000)
+        cut = cut if cut != -1 else 8000
+        source_preview = source[:cut] + "\n... [truncated]"
+    else:
+        source_preview = source
     prompt = f"""You are a strict verification agent for Python skill modules.
 
 TASK: Verify that skill '{skill_name}' is functionally correct.
