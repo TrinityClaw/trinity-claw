@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import shutil
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,10 @@ _WRITE_ROOTS = (Path("/app/memory"), Path("/app/skills/dynamic"))
 # Files that must never be readable via the skill (credentials / tokens)
 _BLOCKED_READ_NAMES = frozenset({".env"})
 _BLOCKED_READ_SUFFIXES = frozenset({"_token.json", "_credentials.json"})
+_IMAGE_EXTENSIONS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
+    ".svg", ".bmp", ".tiff", ".tif", ".ico",
+})
 
 
 def _is_sensitive(p: Path) -> bool:
@@ -93,7 +98,7 @@ def list_images(path: str = "/app/memory") -> str:
         for f in sorted(p.iterdir()):
             if f.is_file():
                 mime, _ = mimetypes.guess_type(f.name)
-                if mime and mime.startswith("image/"):
+                if (mime and mime.startswith("image/")) or f.suffix.lower() in _IMAGE_EXTENSIONS:
                     images.append(f"  {f.name}  ({f.stat().st_size / 1024 / 1024:.2f} MB)")
         return "\n".join(images) if images else "No image files found."
     except Exception as e:
@@ -151,10 +156,19 @@ def write(path: str = None, content: str = None, *, name: str = None) -> str:
         return "Error: write() requires a 'path' argument"
     if content is None:
         return "Error: write() requires a 'content' argument"
+    if content == "":
+        return "Error: write() requires non-empty content"
     try:
         p = _write_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        with tempfile.NamedTemporaryFile("w", dir=p.parent, encoding="utf-8", delete=False, suffix=".tmp") as tf:
+            tf.write(content)
+            tmp = Path(tf.name)
+        try:
+            tmp.replace(p)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         return f"✅ Wrote {p} ({p.stat().st_size} bytes)"
     except Exception as e:
         return f"Error: {e}"
@@ -184,7 +198,8 @@ def patch(path: str, old_text: str, new_text: str) -> str:
             return f"File not found: {path}"
         content = p.read_text(encoding="utf-8")
         if old_text not in content:
-            return f"❌ Text not found in {path}:\n  '{old_text[:80]}'"
+            snippet = old_text[:40] + ("..." if len(old_text) > 40 else "")
+            return f"❌ Text not found in {path}:\n  '{snippet}'"
         updated = content.replace(old_text, new_text, 1)
         p.write_text(updated, encoding="utf-8")
         return f"✅ Patched {path} — replaced {len(old_text)} chars with {len(new_text)} chars"
@@ -205,7 +220,8 @@ def patch_all(path: str, old_text: str, new_text: str) -> str:
         content = p.read_text(encoding="utf-8")
         count = content.count(old_text)
         if count == 0:
-            return f"❌ Text not found in {path}:\n  '{old_text[:80]}'"
+            snippet = old_text[:40] + ("..." if len(old_text) > 40 else "")
+            return f"❌ Text not found in {path}:\n  '{snippet}'"
         updated = content.replace(old_text, new_text)
         p.write_text(updated, encoding="utf-8")
         return f"✅ Patched {path} — replaced {count} occurrence(s)"
@@ -270,12 +286,18 @@ def tree(path: str = "/app") -> str:
         if len(type_counts) > 8:
             type_lines += f"\n  ... and {len(type_counts) - 8} more extensions"
 
+        largest_path = Path(largest[0])
+        largest_display = (
+            f"(name redacted) ({largest[1]} bytes)"
+            if _is_sensitive(largest_path)
+            else f"{largest[0]} ({largest[1]} bytes)"
+        )
         return (
             f"📂 {p}\n"
             f"  Files: {total_files}  Dirs: {total_dirs}  "
             f"Size: {total_size / 1024 / 1024:.2f} MB\n\n"
             f"File types:\n{type_lines}\n\n"
-            f"Largest: {largest[0]} ({largest[1]} bytes)"
+            f"Largest: {largest_display}"
         )
     except Exception as e:
         return f"Error: {e}"
@@ -419,25 +441,34 @@ def find_duplicates(path: str) -> str:
         if not p.exists():
             return f"Not found: {path}"
 
+        _MAX_HASH_SIZE = 100 * 1024 * 1024  # skip files over 100 MB
         hashes: dict = {}
+        skipped = 0
         for item in p.rglob("*"):
             if item.is_file():
                 try:
-                    h = hashlib.md5(item.read_bytes()).hexdigest()
+                    if item.stat().st_size > _MAX_HASH_SIZE:
+                        skipped += 1
+                        continue
+                    h = hashlib.sha256(item.read_bytes()).hexdigest()
                     hashes.setdefault(h, []).append(str(item))
                 except Exception as e:
                     logger.warning(f"Could not hash {item}: {e}")
+                    skipped += 1
                     continue
 
         dupes = {h: files for h, files in hashes.items() if len(files) > 1}
+        result_lines = []
         if not dupes:
-            return "✅ No duplicate files found"
-
-        lines = [f"Found {len(dupes)} set(s) of duplicates:\n"]
-        for h, files in dupes.items():
-            lines.append(f"  {h[:8]}...")
-            for f in files:
-                lines.append(f"    {f}")
-        return "\n".join(lines)
+            result_lines.append("✅ No duplicate files found")
+        else:
+            result_lines.append(f"Found {len(dupes)} set(s) of duplicates:\n")
+            for h, files in dupes.items():
+                result_lines.append(f"  {h[:8]}...")
+                for f in files:
+                    result_lines.append(f"    {f}")
+        if skipped:
+            result_lines.append(f"\n  ({skipped} file(s) skipped — unreadable or over 100 MB)")
+        return "\n".join(result_lines)
     except Exception as e:
         return f"Error: {e}"
