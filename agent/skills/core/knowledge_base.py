@@ -217,7 +217,7 @@ def _ingest_one(path: Path, col, index: dict) -> str:
             ids       =[sum_id],
             documents =[summary],
             metadatas =[{
-                "filename":    filename,
+                "filename":    path.name,
                 "project":     project,
                 "rel_path":    rel_path,
                 "chunk_index": -1,
@@ -371,12 +371,13 @@ def list_ingested(*args) -> str:
     lines = [f"📚 Business knowledge base — {len(index)} document(s):\n"]
     for filename, info in sorted(index.items()):
         ingested = info.get("ingested_at", "unknown")[:19].replace("T", " ")
-        chunks   = info.get("chunks", "?")
-        words    = info.get("words",  "?")
+        chunks    = info.get("chunks", "?")
+        words     = info.get("words",  "?")
+        words_str = f"{words:,}" if isinstance(words, int) else str(words)
         has_summary = "· ✓ summary" if info.get("summary") else ""
         lines.append(
             f"  • {filename}\n"
-            f"    {chunks} chunks · {words:,} words · indexed {ingested} {has_summary}"
+            f"    {chunks} chunks · {words_str} words · indexed {ingested} {has_summary}"
         )
 
     try:
