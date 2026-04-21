@@ -84,6 +84,7 @@ def _save_lesson(lesson: Dict) -> bool:
         LESSONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(LESSONS_FILE, 'a', encoding='utf-8') as f:
             f.write(json.dumps(lesson, ensure_ascii=False) + '\n')
+        _patterns_cache["data"] = None  # invalidate so next read recomputes counts
         return True
     except (IOError, OSError) as e:
         print(f"⚠️ Failed to save lesson: {e}")
@@ -259,7 +260,7 @@ def search_lessons_semantic(query: str, n: int = 5) -> str:
             return "📭 No matching lessons found."
         lines = [f"🔍 Semantic lesson search: '{query}' — {len(docs)} result(s)"]
         for doc, meta, dist in zip(docs, metadatas, distances):
-            relevance = max(0.0, 1.0 - dist)
+            relevance = 1.0 / (1.0 + dist)
             lines.append(
                 f"\n  [{meta.get('skill','?')}] {meta.get('error_type','?')} "
                 f"({meta.get('timestamp','')[:10]}) — relevance {relevance:.0%}"
@@ -400,9 +401,10 @@ class CodeAnalyzer(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         """Flag network requests without timeouts and SQL injection risks."""
+        _HTTP_CLIENTS = {'requests', 'httpx'}
         if isinstance(node.func, ast.Attribute):
-            if node.func.attr in ['get', 'post', 'put', 'delete'] and isinstance(node.func.value, ast.Name):
-                if node.func.value.id == 'requests':
+            if node.func.attr in ['get', 'post', 'put', 'delete', 'patch'] and isinstance(node.func.value, ast.Name):
+                if node.func.value.id in _HTTP_CLIENTS:
                     has_timeout = any(kw.arg == 'timeout' for kw in node.keywords if kw.arg)
                     if not has_timeout:
                         self.issues.append({
@@ -621,7 +623,7 @@ def generate_patch(skill_name: str, issue_type: str, issue_line: int) -> Dict:
         "issue_type": issue_type,
         "line": issue_line,
         "original": original_line.strip(),
-        "proposed_fix": fix_applied.strip(),
+        "proposed_fix": fix_applied,
         "diff": f"--- {skill_name}.py:{issue_line}\n+++ {skill_name}.py:{issue_line}\n-{original_line.strip()}\n+{fix_applied.strip()}",
         "safe_to_apply": issue_type in ["bare_except", "missing_timeout", "missing_docstring"],
         "requires_review": issue_type not in ["bare_except", "missing_timeout", "missing_docstring"]
@@ -929,8 +931,13 @@ EVIDENCE: <one sentence — the specific trace result or failure reason, not "lo
 
     try:
         response = _call_llm_verdict(prompt)
-    except Exception as e:
-        return f"⚠️  VERDICT skipped (LLM unavailable): {e}"
+    except Exception:
+        import time as _time
+        _time.sleep(2)
+        try:
+            response = _call_llm_verdict(prompt)
+        except Exception as e:
+            return f"⚠️  VERDICT skipped (LLM unavailable): {e}"
 
     for line in response.splitlines():
         stripped = line.strip()
@@ -991,6 +998,8 @@ def verify_skill(skill_name: str) -> str:
         issues.append("missing NAME metadata")
     if not re.search(r'^DOC\s*=', source, re.MULTILINE):
         issues.append("missing DOC metadata")
+    if not re.search(r'^SHORT_DOC\s*=', source, re.MULTILINE):
+        issues.append("missing SHORT_DOC metadata")
 
     if issues:
         return (
@@ -1164,20 +1173,20 @@ def daily_review(skill_name: str = "") -> str:
     lessons = _load_lessons()
     cutoff = datetime.now() - timedelta(days=7)
     recent_lessons = []
-    for l in lessons:
-        ts = l.get("timestamp")
+    for lesson in lessons:
+        ts = lesson.get("timestamp")
         if not ts:
             continue
         try:
             if datetime.fromisoformat(ts) >= cutoff:
-                recent_lessons.append(l)
+                recent_lessons.append(lesson)
         except (ValueError, TypeError):
             continue  # skip lessons with malformed timestamps
 
     # Count recurring error types in recent lessons
     recurring: Dict[str, int] = {}
-    for l in recent_lessons:
-        et = l.get("error_type") or l.get("type") or "unknown"
+    for lesson in recent_lessons:
+        et = lesson.get("error_type") or lesson.get("type") or "unknown"
         recurring[et] = recurring.get(et, 0) + 1
 
     top_recurring = sorted(recurring.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -1299,11 +1308,19 @@ def should_self_improve(threshold: int = 3, window_days: int = 7) -> dict:
     }
     _DEFAULT_LOOP = "error_reduce"
 
+    # Build a set of error types for which any lesson recorded a fix, across all skills.
+    # check_for_learned_fix("", et) always returns None because no lesson has skill=="".
+    fixed_types: set = {
+        l.get("error_type") or l.get("type")
+        for l in lessons
+        if (l.get("error_type") or l.get("type")) and l.get("fix_applied", "").strip()
+    }
+
     patterns = []
     for et, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
         if count < threshold:
             continue
-        has_fix = bool(check_for_learned_fix("", et))  # check any skill
+        has_fix = et in fixed_types
         patterns.append({
             "error_type":     et,
             "count":          count,
