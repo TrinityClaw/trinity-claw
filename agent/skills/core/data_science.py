@@ -13,6 +13,18 @@ from typing import Optional, Union, List
 
 warnings.filterwarnings('ignore')
 
+__all__ = [
+    "analyze_dataset",
+    "predict_column",
+    "analyze_text_column",
+    "create_chart",
+    "status",
+    "predict_sales",
+    "eda",
+    "plot",
+    "tfidf",
+]
+
 # ============================================================
 # LAZY DEPENDENCY CHECKS (Import only when needed)
 # ============================================================
@@ -220,6 +232,7 @@ def predict_column(
         StandardScaler = _SKLEARN['StandardScaler']
         r2_score = _SKLEARN['r2_score']
         mean_squared_error = _SKLEARN['mean_squared_error']
+        mean_absolute_error = _SKLEARN['mean_absolute_error']
     except KeyError as e:
         return f"❌ Internal error: missing sklearn component {e}"
     
@@ -301,7 +314,7 @@ def predict_column(
         predictions = model.predict(X_test_scaled)
         r2 = r2_score(y_test, predictions)
         rmse = float(np.sqrt(mean_squared_error(y_test, predictions)))
-        mae = float(_SKLEARN.get('mean_absolute_error', lambda a,b: 0)(y_test, predictions))
+        mae = float(mean_absolute_error(y_test, predictions))
         
         # Feature importance (only for tree-based models)
         top_features = {}
@@ -363,8 +376,7 @@ def analyze_text_column(
 ) -> str:
     """
     Analyze text data using TF-IDF vectorization.
-    NEW: Properly initializes TfidfVectorizer before fit_transform.
-    
+
     Usage: <skill:data_science.analyze_text_column>/app/data/reviews.csv, text_column=review</skill:data_science.analyze_text_column>
     """
     # Check sklearn availability
@@ -387,7 +399,6 @@ def analyze_text_column(
         if not texts:
             return "❌ No valid text data found in column"
         
-        # ✅ PROPERLY INITIALIZE TfidfVectorizer BEFORE fit_transform
         vectorizer = TfidfVectorizer(
             max_features=max_features,
             stop_words='english',
@@ -395,8 +406,6 @@ def analyze_text_column(
             min_df=2,
             max_df=0.8
         )
-        
-        # Now fit_transform (this was the bug - calling without initialization)
         tfidf_matrix = vectorizer.fit_transform(texts)
         
         # Get feature names and top terms
