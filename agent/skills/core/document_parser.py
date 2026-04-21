@@ -9,6 +9,19 @@ import json
 import csv
 from pathlib import Path
 
+__all__ = [
+    "read",
+    "extract_tables",
+    "metadata",
+    "summarize",
+    "convert_to_text",
+    "create_text",
+    "create_pdf",
+    "create_pdf_from_markdown",
+    "ocr",
+    "list_supported",
+]
+
 NAME = "document_parser"
 SHORT_DOC = "Parse and extract text, tables, and metadata from PDF, DOCX, XLSX, CSV, and other file formats."
 DOC = (
@@ -103,6 +116,13 @@ def _resolve(path: str) -> Path:
         candidate = p.resolve()
     if not str(candidate).startswith(str(_BASE.resolve())):
         raise ValueError(f"Path escapes /app/: {path}")
+    return candidate
+
+def _safe_output(filename: str, base: Path) -> Path:
+    """Resolve an output filename under base, rejecting .. traversal."""
+    candidate = (base / filename).resolve()
+    if not str(candidate).startswith(str(base.resolve())):
+        raise ValueError(f"Output filename escapes {base}: {filename}")
     return candidate
 
 def _ext(p: Path) -> str:
@@ -443,7 +463,7 @@ def convert_to_text(*args) -> str:
         reader   = _READERS.get(_ext(p), _read_txt)
         text     = reader(p)
         out_name = str(args[1]).strip() if len(args) > 1 else f"{p.stem}_extracted.txt"
-        out_path = _KNOWLEDGE / out_name
+        out_path = _safe_output(out_name, _KNOWLEDGE)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text, encoding="utf-8")
         url = f"{_AGENT_BASE_URL}/download/{out_path.name}"
@@ -474,7 +494,7 @@ def create_text(filename, content) -> str:
             return "Error: provide filename and content.  Usage: create_text(filename, content)"
         filename = str(filename).strip()
         content  = str(content)
-        out_path = _KNOWLEDGE / filename
+        out_path = _safe_output(filename, _KNOWLEDGE)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(content, encoding="utf-8")
         url = f"{_AGENT_BASE_URL}/download/{filename}"
@@ -502,12 +522,7 @@ def create_pdf(filename, content) -> str:
     Returns a markdown download link: [filename.pdf](download URL)
     Do NOT pass this return value back as content.
     """
-    try:
-        from reportlab.lib.pagesizes import LETTER
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.lib.units import inch
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-    except ImportError:
+    if not HAS_REPORTLAB:
         return "[PDF generation not available. Run: pip install reportlab]"
     try:
         if not filename or not content:
@@ -516,7 +531,7 @@ def create_pdf(filename, content) -> str:
         content  = str(content)
         if not filename.lower().endswith(".pdf"):
             filename += ".pdf"
-        out_path = _KNOWLEDGE / filename
+        out_path = _safe_output(filename, _KNOWLEDGE)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         styles  = getSampleStyleSheet()
@@ -570,12 +585,7 @@ def create_pdf_from_markdown(filename, markdown_text) -> str:
     Returns a markdown download link: [filename.pdf](download URL)
     Do NOT pass this return value as the content argument in another call.
     """
-    try:
-        from reportlab.lib.pagesizes import LETTER
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import inch
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-    except ImportError:
+    if not HAS_REPORTLAB:
         return "[PDF generation not available. Run: pip install reportlab]"
     try:
         if not filename or not markdown_text:
@@ -584,7 +594,7 @@ def create_pdf_from_markdown(filename, markdown_text) -> str:
         text     = str(markdown_text)
         if not filename.lower().endswith(".pdf"):
             filename += ".pdf"
-        out_path = _KNOWLEDGE / filename
+        out_path = _safe_output(filename, _KNOWLEDGE)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         import re
