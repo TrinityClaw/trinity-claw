@@ -55,6 +55,7 @@ DOC = (
     "list_proposals(status='pending')→show lesson-derived improvement proposals needing a human decision; status: pending|resolved|dismissed|all; "
     "park_idea(idea, source='')→park a free-form improvement idea to improvement_ideas.jsonl for later action — use during research, mid-experiment, or when user mentions a potential improvement; "
     "list_ideas(status='open')→show parked improvement ideas; status: open|dismissed|all; "
+    "get_latest_idea()→return the single most-recent open idea as a plain string (≤140 chars) — for lightweight injection, not user display; "
     "dismiss_idea(idea_id)→mark a parked idea as dismissed after acting on it or deciding it's not worth pursuing; "
     "should_create_skill(execution_logs, iteration_count, user_message='')→analyze a completed task trace to decide if a new skill should be created; "
     "returns {create: bool, reason, trigger, complexity_score}; triggers: complexity (5+ calls), error_recovery, correction, workflow (3+ skills)."
@@ -1179,25 +1180,25 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
     skipped_dup     = 0
     scanned         = 0
 
+    # Scan AUTO_FIXABLE types (can be auto-applied) plus high/critical types
+    # that require manual review (sql_injection_risk, hardcoded_path).
+    SUGGEST_TYPES = AUTO_FIXABLE + ("sql_injection_risk", "hardcoded_path")
+
     scan_list = core_files if skill_name else core_files[:max_skills]
     for skill_path in scan_list:
-        skill_name = skill_path.stem
-        scanned   += 1
+        _skill_stem = skill_path.stem
+        scanned    += 1
 
-        analysis = si.analyze_skill_code(skill_name)
+        analysis = si.analyze_skill_code(_skill_stem)
         if analysis.get("error"):
             continue
-
-        # Scan AUTO_FIXABLE types (can be auto-applied) plus high/critical types
-        # that require manual review (sql_injection_risk, hardcoded_path).
-        SUGGEST_TYPES = AUTO_FIXABLE + ("sql_injection_risk", "hardcoded_path")
 
         for issue_type in SUGGEST_TYPES:
             matching = [i for i in analysis["issues"] if i["type"] == issue_type]
             if not matching:
                 continue
 
-            key = _suggestion_key(skill_name, issue_type)
+            key = _suggestion_key(_skill_stem, issue_type)
             first_issue = matching[0]
             if key in pending_by_key:
                 # Already pending — update priority fields if the skill has deteriorated
@@ -1211,11 +1212,11 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
                 continue
 
             # Generate patch for the first occurrence as a preview
-            patch = si.generate_patch(skill_name, issue_type, first_issue["line"])
+            patch = si.generate_patch(_skill_stem, issue_type, first_issue["line"])
 
             suggestion = {
                 "timestamp":    datetime.now().isoformat(),
-                "skill":        skill_name,
+                "skill":        _skill_stem,
                 "issue_type":   issue_type,
                 "status":       "pending",
                 "occurrences":  len(matching),
@@ -1428,7 +1429,16 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     before_score = before.get("health_score", 0) if not before.get("error") else 0
 
     # Apply fix to the CORE skill
-    si.fix(skill_name, issue_type, "all")
+    try:
+        si.fix(skill_name, issue_type, "all")
+    except Exception as fix_exc:
+        skill_path.write_text(original_code, encoding="utf-8")
+        backup_path.unlink(missing_ok=True)
+        suggestions[match_idx]["status"]     = "failed"
+        suggestions[match_idx]["applied_at"] = datetime.now().isoformat()
+        suggestions[match_idx]["fail_reason"] = f"si.fix() raised: {fix_exc}"
+        _save_suggestions(suggestions)
+        return f"❌ FAILED: si.fix() raised {type(fix_exc).__name__} — core file restored"
 
     # Post-patch audit
     after = si.analyze_skill_code(skill_name)
@@ -2287,7 +2297,7 @@ def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
         "ast_audit":         lambda: _loop_ast_audit(max_experiments),
         "error_reduce":      lambda: _loop_error_reduce(max_experiments),
         "daily_review":      _loop_daily_review,
-        "suggest_core":      lambda: suggest_core(max_experiments),
+        "suggest_core":      lambda: suggest_core(max_skills=max_experiments),
         "pattern_mining":    _loop_pattern_mining,
         "discover_patterns": _discover_new_patterns,
     }
@@ -2468,7 +2478,8 @@ def schedule_nightly(run_time: str = "2am", max_experiments=5) -> str:
         _kb_result = f"\n⚠️  KB schedule skipped: {_kb_err}"
 
     return (
-        f"✅ Nightly improvement loop scheduled (every day, starting around {run_time}):\n"
+        f"✅ Nightly improvement loop scheduled (every 24h from now):\n"
+        f"   Note: exact start time is not enforced — job runs ~24h after first schedule.\n"
         f"{result}{_kb_result}\n\n"
         f"In the morning:\n"
         f"  autoimprove.report(1)          → see what was auto-fixed overnight\n"
@@ -2732,10 +2743,11 @@ def status() -> str:
         "  CORE    → suggest   (audit → patch preview → you approve → apply)",
         "",
         "Loops:",
-        "  • daily_review — learning review, no code changes",
-        "  • ast_audit    — auto-fix bare_except & missing_timeout in dynamic skills",
-        "  • error_reduce — auto-fix top error pattern + surface lesson proposals",
+        "  • daily_review      — learning review, no code changes",
+        "  • ast_audit         — auto-fix bare_except & missing_timeout in dynamic skills",
+        "  • error_reduce      — auto-fix top error pattern + surface lesson proposals",
         "  • suggest_core      — audit core skills, queue suggestions for your review",
+        "  • pattern_mining    — scan session history for recurring task patterns, park skill proposals",
         "  • discover_patterns — scan lessons.jsonl for untracked error types, propose via LLM",
         "",
         f"Dynamic skills ({len(dynamic_skills)}): {', '.join(dynamic_skills) or 'none'}",
@@ -3041,6 +3053,7 @@ __all__ = [
     "list_proposals",
     "park_idea",
     "list_ideas",
+    "get_latest_idea",
     "dismiss_idea",
     "loop_roi",
     "schedule_nightly",
