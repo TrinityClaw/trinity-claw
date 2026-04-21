@@ -8,6 +8,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+__all__ = [
+    "ls", "list_images", "cat", "pwd", "exists", "size", "sha256",
+    "write", "append", "patch", "patch_all", "mkdir", "delete",
+    "tree", "checkpoint", "restore", "checkpoints", "find_duplicates",
+]
+
 NAME = "files"
 
 logger = logging.getLogger(__name__)
@@ -201,7 +207,14 @@ def patch(path: str, old_text: str, new_text: str) -> str:
             snippet = old_text[:40] + ("..." if len(old_text) > 40 else "")
             return f"❌ Text not found in {path}:\n  '{snippet}'"
         updated = content.replace(old_text, new_text, 1)
-        p.write_text(updated, encoding="utf-8")
+        with tempfile.NamedTemporaryFile("w", dir=p.parent, encoding="utf-8", delete=False, suffix=".tmp") as tf:
+            tf.write(updated)
+            tmp = Path(tf.name)
+        try:
+            tmp.replace(p)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         return f"✅ Patched {path} — replaced {len(old_text)} chars with {len(new_text)} chars"
     except Exception as e:
         return f"Error: {e}"
@@ -223,7 +236,14 @@ def patch_all(path: str, old_text: str, new_text: str) -> str:
             snippet = old_text[:40] + ("..." if len(old_text) > 40 else "")
             return f"❌ Text not found in {path}:\n  '{snippet}'"
         updated = content.replace(old_text, new_text)
-        p.write_text(updated, encoding="utf-8")
+        with tempfile.NamedTemporaryFile("w", dir=p.parent, encoding="utf-8", delete=False, suffix=".tmp") as tf:
+            tf.write(updated)
+            tmp = Path(tf.name)
+        try:
+            tmp.replace(p)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         return f"✅ Patched {path} — replaced {count} occurrence(s)"
     except Exception as e:
         return f"Error: {e}"
@@ -435,7 +455,7 @@ def checkpoints() -> str:
 
 
 def find_duplicates(path: str) -> str:
-    """Find duplicate files in a directory by comparing MD5 hashes"""
+    """Find duplicate files in a directory by comparing SHA-256 hashes"""
     try:
         p = _read_path(path)
         if not p.exists():
