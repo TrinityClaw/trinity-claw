@@ -38,6 +38,7 @@ _firing_tasks: set = set()       # names of tasks currently being dispatched
 _running = False
 _thread = None
 
+_MAX_DISPATCH_WORKERS = 10       # cap concurrent task dispatches
 
 _LOG_MAX_BYTES  = 5 * 1024 * 1024   # rotate when file exceeds 5 MB
 _LOG_KEEP_LINES = 8_000              # keep this many lines after rotation
@@ -97,12 +98,30 @@ def _save(tasks: dict):
 
 # ── Time Parsing ──────────────────────────────────────────────────────────────
 
+_UNIT_PATTERN = (
+    r'(s|sec|secs|second|seconds|'
+    r'm|min|mins|minute|minutes|'
+    r'h|hr|hrs|hour|hours|'
+    r'd|day|days|'
+    r'w|wk|wks|week|weeks)'
+)
+
+
+def _unit_to_seconds(n: float, unit: str) -> int:
+    if unit.startswith('s'):  return int(n)
+    if unit.startswith('m'):  return int(n * 60)
+    if unit.startswith('h'):  return int(n * 3600)
+    if unit.startswith('d'):  return int(n * 86400)
+    if unit.startswith('w'):  return int(n * 604800)
+    raise ValueError(f"Unknown unit: {unit}")
+
+
 def _parse_when(when_str: str) -> datetime:
     """
     Parse natural language or ISO datetime to a datetime object.
 
     Supported formats:
-      - "in 2 hours", "in 30 minutes", "in 1 day"
+      - "in 2 hours", "in 30 minutes", "in 1 day", "in 2 weeks"
       - "tomorrow", "tomorrow at 3pm", "tomorrow at 14:30"
       - "today at 5pm"
       - "at 3pm", "at 14:30"  (today if future, else tomorrow)
@@ -112,21 +131,10 @@ def _parse_when(when_str: str) -> datetime:
     s = when_str.strip().lower()
     now = datetime.now()
 
-    # "in X seconds/minutes/hours/days"
-    m = re.match(
-        r'in\s+(\d+)\s*'
-        r'(s|sec|secs|second|seconds|'
-        r'm|min|mins|minute|minutes|'
-        r'h|hr|hrs|hour|hours|'
-        r'd|day|days)',
-        s
-    )
+    # "in X seconds/minutes/hours/days/weeks"
+    m = re.match(r'in\s+(\d+)\s*' + _UNIT_PATTERN, s)
     if m:
-        n, unit = int(m.group(1)), m.group(2)
-        if unit.startswith('s'):   return now + timedelta(seconds=n)
-        if unit.startswith('m'):   return now + timedelta(minutes=n)
-        if unit.startswith('h'):   return now + timedelta(hours=n)
-        if unit.startswith('d'):   return now + timedelta(days=n)
+        return now + timedelta(seconds=_unit_to_seconds(int(m.group(1)), m.group(2)))
 
     # Extract optional "at H:MM [am/pm]" component
     tp = re.search(r'at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', s)
@@ -172,8 +180,6 @@ def _parse_when(when_str: str) -> datetime:
         return candidate
 
     # ISO / structured date string fallback — requires python-dateutil.
-    # Separate ImportError from parse errors so a missing package doesn't
-    # silently swallow the "really couldn't parse" case.
     try:
         from dateutil import parser as dparser
     except ImportError:
@@ -194,47 +200,30 @@ def _parse_when(when_str: str) -> datetime:
 def _parse_interval(interval_str: str) -> int:
     """
     Parse an interval string to seconds.
-    Examples: '30m', '2h', '1.5h', '1d', 'every 6 hours', '90 minutes', '45s'
+    Examples: '30m', '2h', '1.5h', '1d', '2w', 'every 6 hours', '90 minutes', '45s'
     Also handles ranges like '3-4h' or '2-3 hours' by taking the lower bound.
     """
     s = re.sub(r'^every\s+', '', interval_str.strip().lower())
     # Handle range notation like '3-4h' or '2-3 hours' — take the lower bound
-    range_m = re.match(
-        r'(\d+(?:\.\d+)?)-\d+(?:\.\d+)?\s*'
-        r'(s|sec|secs|second|seconds|'
-        r'm|min|mins|minute|minutes|'
-        r'h|hr|hrs|hour|hours|'
-        r'd|day|days)',
-        s
-    )
+    range_m = re.match(r'(\d+(?:\.\d+)?)-\d+(?:\.\d+)?\s*' + _UNIT_PATTERN, s)
     if range_m:
         s = range_m.group(1) + range_m.group(2)  # collapse to lower bound
-    m = re.match(
-        r'(\d+(?:\.\d+)?)\s*'
-        r'(s|sec|secs|second|seconds|'
-        r'm|min|mins|minute|minutes|'
-        r'h|hr|hrs|hour|hours|'
-        r'd|day|days)',
-        s
-    )
+    m = re.match(r'(\d+(?:\.\d+)?)\s*' + _UNIT_PATTERN, s)
     if m:
-        n, unit = float(m.group(1)), m.group(2)
-        if unit.startswith('s'):  return int(n)
-        if unit.startswith('m'):  return int(n * 60)
-        if unit.startswith('h'):  return int(n * 3600)
-        if unit.startswith('d'):  return int(n * 86400)
+        return _unit_to_seconds(float(m.group(1)), m.group(2))
     raise ValueError(
         f"Cannot parse interval: '{interval_str}'. "
-        "Try: '30m', '2h', '1d', 'every 6 hours', '90 minutes'"
+        "Try: '30m', '2h', '1d', '2w', 'every 6 hours', '90 minutes'"
     )
 
 
 def _human_interval(seconds: int) -> str:
     """Convert a seconds count to a compact human-readable string (e.g. '2h', '30m')."""
-    if seconds < 60:    return f"{seconds}s"
-    if seconds < 3600:  return f"{seconds // 60}m"
-    if seconds < 86400: return f"{seconds // 3600}h"
-    return f"{seconds // 86400}d"
+    if seconds < 60:       return f"{seconds}s"
+    if seconds < 3600:     return f"{seconds // 60}m"
+    if seconds < 86400:    return f"{seconds // 3600}h"
+    if seconds < 604800:   return f"{seconds // 86400}d"
+    return f"{seconds // 604800}w"
 
 
 def _eta(next_run: datetime) -> str:
@@ -251,9 +240,101 @@ def _eta(next_run: datetime) -> str:
     return f"in {m}m"
 
 
+# ── Calendar-Aligned Recurrence ───────────────────────────────────────────────
+
+_WEEKDAY_MAP = {
+    'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+    'friday': 4, 'saturday': 5, 'sunday': 6,
+}
+_WEEKDAY_GROUPS = {
+    'weekday':  [0, 1, 2, 3, 4],
+    'weekdays': [0, 1, 2, 3, 4],
+    'weekend':  [5, 6],
+    'weekends': [5, 6],
+}
+
+
+def _next_calendar_run(weekdays, hour: int, minute: int, after: datetime = None) -> datetime:
+    """Return the next datetime matching (weekdays, hour, minute), strictly after `after`."""
+    base = after if after is not None else datetime.now()
+    for delta in range(8):  # max 7 days covers any weekday combination
+        candidate = (base + timedelta(days=delta)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if candidate <= base:
+            continue
+        if weekdays is None or candidate.weekday() in weekdays:
+            return candidate
+    raise ValueError(
+        f"Could not compute next run for calendar spec weekdays={weekdays} at {hour:02d}:{minute:02d}"
+    )
+
+
+def _parse_recurring_spec(every_str: str) -> dict:
+    """
+    Parse a recurrence spec. Returns either:
+      {"kind": "interval", "seconds": N}
+    or:
+      {"kind": "calendar", "weekdays": list|None, "hour": H, "minute": M, "label": str}
+
+    Calendar patterns recognised:
+      "every day at 8pm", "every daily at 9am"
+      "every monday at 9am", "every friday"
+      "every weekday at 8am", "every weekend at 10am"
+    """
+    s = every_str.strip().lower()
+    base = re.sub(r'^every\s+', '', s)
+
+    # Extract optional "at H:MM [am/pm]"
+    tp = re.search(r'at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', base)
+    if tp:
+        t_hour = int(tp.group(1))
+        t_min  = int(tp.group(2) or 0)
+        ampm   = tp.group(3)
+        if ampm == 'pm' and t_hour != 12:
+            t_hour += 12
+        elif ampm == 'am' and t_hour == 12:
+            t_hour = 0
+        day_part = base[:tp.start()].strip()
+    else:
+        t_hour = t_min = None
+        day_part = base.strip()
+
+    # Match day tokens
+    weekdays = None
+    day_label = None
+    if day_part in ('day', 'days', 'daily'):
+        weekdays  = None   # every day
+        day_label = 'day'
+    elif day_part in _WEEKDAY_GROUPS:
+        weekdays  = _WEEKDAY_GROUPS[day_part]
+        day_label = day_part
+    elif day_part in _WEEKDAY_MAP:
+        weekdays  = [_WEEKDAY_MAP[day_part]]
+        day_label = day_part
+
+    if day_label is not None:
+        hour   = t_hour if t_hour is not None else 9
+        minute = t_min  if t_min  is not None else 0
+        label  = f"every {day_label} at {hour:02d}:{minute:02d}"
+        return {"kind": "calendar", "weekdays": weekdays, "hour": hour, "minute": minute, "label": label}
+
+    # Fall back to duration interval
+    secs = _parse_interval(every_str)
+    return {"kind": "interval", "seconds": secs}
+
+
+def _recur_label(t: dict) -> str:
+    """Return a human-readable recurrence description for a task dict."""
+    if t.get('recur_kind') == 'calendar':
+        return t.get('cal_label', f"every {t.get('cal_hour', 9):02d}:{t.get('cal_minute', 0):02d}")
+    secs = t.get('interval_seconds')
+    return f"every {_human_interval(secs)}" if secs else "recurring"
+
+
 # ── Agent Dispatch ────────────────────────────────────────────────────────────
 
-_AGENT_URL      = os.getenv("TRINITY_AGENT_URL", "http://127.0.0.1:8001/chat")
+_AGENT_URL        = os.getenv("TRINITY_AGENT_URL", "http://127.0.0.1:8001/chat")
 _DISPATCH_RETRIES = 2
 _DISPATCH_RETRY_DELAY = 5  # seconds between retries
 _TRANSIENT_HTTP_CODES = {429, 502, 503, 504}
@@ -324,13 +405,13 @@ def _run():
                     except (ValueError, KeyError) as e:
                         print(f"[scheduler] skipping malformed task '{name}': {e}")
 
-            # Phase 2: dispatch concurrently outside the lock
+            # Phase 2: dispatch concurrently outside the lock (capped thread pool)
             results = []
             if to_fire:
                 def _fire_one(task_tuple):
                     name, prompt, kind, interval_secs = task_tuple
                     fired_at = datetime.now()
-                    _append_activity(f"scheduler:{name}", prompt[:80], "⏳ started")
+                    _append_activity(f"scheduler:{name}", prompt, "⏳ started")
                     print(f"[scheduler] firing: {name}")
                     try:
                         result = _dispatch(prompt, name)
@@ -343,7 +424,8 @@ def _run():
                     return (name, prompt, kind, interval_secs, fired_at, result)
 
                 with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=len(to_fire), thread_name_prefix="sched"
+                    max_workers=min(len(to_fire), _MAX_DISPATCH_WORKERS),
+                    thread_name_prefix="sched"
                 ) as pool:
                     for item in pool.map(_fire_one, to_fire):
                         results.append(item)
@@ -359,9 +441,19 @@ def _run():
                         t['last_run']    = fired_at.isoformat()
                         t['last_result'] = result[:300]
                         t['run_count']   = t.get('run_count', 0) + 1
-                        _append_activity(f"scheduler:{name}", prompt[:80], result)
+                        _append_activity(f"scheduler:{name}", prompt, result)
                         if kind == 'once':
                             del tasks[name]
+                        elif t.get('recur_kind') == 'calendar':
+                            # Advance to the next calendar-aligned occurrence
+                            try:
+                                prev_next = datetime.fromisoformat(t['next_run'])
+                                t['next_run'] = _next_calendar_run(
+                                    t.get('cal_weekdays'), t['cal_hour'], t['cal_minute'],
+                                    after=prev_next
+                                ).isoformat()
+                            except Exception as e:
+                                print(f"[scheduler] calendar advance error for '{name}': {e}")
                         else:
                             # Advance from the stored next_run (not dispatch time)
                             # to preserve schedule alignment (e.g. always at :00).
@@ -369,7 +461,6 @@ def _run():
                             # dispatch exceeded the interval.
                             prev_next = datetime.fromisoformat(t['next_run'])
                             ideal = prev_next + timedelta(seconds=interval_secs)
-                            # Use tz-aware now if ideal is tz-aware to avoid TypeError
                             now_cmp = datetime.now(ideal.tzinfo) if ideal.tzinfo else datetime.now()
                             t['next_run'] = max(ideal, now_cmp).isoformat()
                     _save(tasks)
@@ -457,10 +548,11 @@ def schedule(name: str, when: str = None, prompt: str = None, *, every: str = No
 
 def schedule_recurring(name: str, every: str = None, prompt: str = None, *, when: str = None) -> str:
     """
-    Schedule a prompt to run REPEATEDLY on an interval.
+    Schedule a prompt to run REPEATEDLY.
 
     name   — unique identifier for this task
-    every  — how often: '30m', '2h', '1d', 'every 6 hours'
+    every  — how often: '30m', '2h', '1d', '2w', 'every day at 8pm',
+             'every monday at 9am', 'every weekday at 8am'
     prompt — what the agent should do each time
     """
     # Accept 'when' as alias for 'every' (LLM sometimes confuses schedule() and schedule_recurring())
@@ -472,38 +564,63 @@ def schedule_recurring(name: str, every: str = None, prompt: str = None, *, when
             f"❌ scheduler.schedule_recurring missing required argument(s): {', '.join(missing)}. "
             f"Usage: schedule_recurring(name, every, prompt) — e.g. schedule_recurring('check_prices', '1h', 'Check DDR5 prices')"
         )
+
     try:
-        secs = _parse_interval(every)
+        spec = _parse_recurring_spec(every)
     except ValueError as e:
         return f"❌ {e}"
 
-    next_run = datetime.now() + timedelta(seconds=secs)
-    task = {
-        "type":             "recurring",
-        "prompt":           prompt,
-        "next_run":         next_run.isoformat(),
-        "interval_seconds": secs,
-        "created":          datetime.now().isoformat(),
-        "last_run":         None,
-        "run_count":        0,
-    }
+    if spec['kind'] == 'calendar':
+        try:
+            next_run = _next_calendar_run(spec['weekdays'], spec['hour'], spec['minute'])
+        except ValueError as e:
+            return f"❌ {e}"
+        task = {
+            "type":             "recurring",
+            "recur_kind":       "calendar",
+            "prompt":           prompt,
+            "next_run":         next_run.isoformat(),
+            "interval_seconds": None,
+            "cal_weekdays":     spec['weekdays'],
+            "cal_hour":         spec['hour'],
+            "cal_minute":       spec['minute'],
+            "cal_label":        spec['label'],
+            "created":          datetime.now().isoformat(),
+            "last_run":         None,
+            "run_count":        0,
+        }
+        display = spec['label']
+        next_str = next_run.strftime('%Y-%m-%d %H:%M')
+    else:
+        secs     = spec['seconds']
+        next_run = datetime.now() + timedelta(seconds=secs)
+        task = {
+            "type":             "recurring",
+            "recur_kind":       "interval",
+            "prompt":           prompt,
+            "next_run":         next_run.isoformat(),
+            "interval_seconds": secs,
+            "created":          datetime.now().isoformat(),
+            "last_run":         None,
+            "run_count":        0,
+        }
+        display  = f"every {_human_interval(secs)}"
+        next_str = next_run.strftime('%H:%M')
+
     with _lock:
         tasks = _load()
         if name in tasks:
             existing = tasks[name]
-            next_str = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
+            next_existing = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
             return (
-                f"⚠️  Task '{name}' already exists (next run: {next_str}, "
+                f"⚠️  Task '{name}' already exists (next run: {next_existing}, "
                 f"type: {existing['type']}). "
                 f"Use remove('{name}') first, or choose a different name."
             )
         tasks[name] = task
         _save(tasks)
     _ensure_running()
-    return (
-        f"✅ Scheduled '{name}' to run every {_human_interval(secs)}, "
-        f"first at {next_run.strftime('%H:%M')}"
-    )
+    return f"✅ Scheduled '{name}' to run {display}, first at {next_str}"
 
 
 def remove(name: str) -> str:
@@ -519,15 +636,16 @@ def remove(name: str) -> str:
 
 def list_tasks() -> str:
     """List all scheduled tasks with next run time and prompt preview."""
-    tasks = _load()
+    with _lock:
+        tasks = _load()
     if not tasks:
         return "📭 No scheduled tasks"
 
     lines = [f"📅 Scheduled tasks ({len(tasks)}):"]
     for name, t in tasks.items():
-        next_run = datetime.fromisoformat(t['next_run'])
-        kind     = "🔁 recurring" if t['type'] == 'recurring' else "1️⃣  once"
-        ivl      = f" every {_human_interval(t['interval_seconds'])}" if t['type'] == 'recurring' else ""
+        next_run    = datetime.fromisoformat(t['next_run'])
+        kind        = "🔁 recurring" if t['type'] == 'recurring' else "1️⃣  once"
+        ivl         = f" {_recur_label(t)}" if t['type'] == 'recurring' else ""
         last_result = t.get('last_result', '')
         last_ok     = "✅" if last_result and not last_result.startswith("❌") else ("❌" if last_result else "—")
         last_run_str = f"  last run: {t['last_run']} {last_ok} {last_result[:80]}\n" if last_result else ""
@@ -544,13 +662,14 @@ def list_tasks() -> str:
 def get_task(name: str) -> str:
     """Get the FULL details of a scheduled task by name, including its complete prompt.
     Use this when the user wants to see or edit a task's prompt — list_tasks() truncates it."""
-    tasks = _load()
+    with _lock:
+        tasks = _load()
     if name not in tasks:
         return f"❌ Task '{name}' not found. Use list_tasks() to see available tasks."
     t = tasks[name]
-    next_run = datetime.fromisoformat(t['next_run'])
-    kind = "recurring" if t['type'] == 'recurring' else "once"
-    ivl  = f" every {_human_interval(t['interval_seconds'])}" if t['type'] == 'recurring' else ""
+    next_run    = datetime.fromisoformat(t['next_run'])
+    kind        = "recurring" if t['type'] == 'recurring' else "once"
+    ivl         = f" {_recur_label(t)}" if t['type'] == 'recurring' else ""
     last_result = t.get('last_result', 'never run yet')
     lines = [
         f"📋 Task: {name}",
@@ -595,12 +714,13 @@ def clear() -> str:
 
 def status() -> str:
     """Show scheduler health: running state, task count, check interval."""
-    tasks = _load()
+    with _lock:
+        tasks = _load()
     thread_alive = _thread is not None and _thread.is_alive()
     return (
         f"Scheduler: {'running ✅' if thread_alive else 'stopped ❌'} | "
         f"Tasks: {len(tasks)} | "
-        f"Check interval: 30s | "
+        f"Poll interval: 30s (after dispatch completes) | "
         f"Storage: {_TASKS_FILE}"
     )
 
@@ -677,8 +797,14 @@ def help_schedule() -> str:
         "  name:   unique task ID (e.g., 'daily_backup')\n"
         "  when:   natural language time ('in 2h', 'tomorrow at 9am', 'next monday')\n"
         "  prompt: what the agent should execute\n"
-        "Example: schedule_recurring('report', 'every monday at 8am', 'Generate weekly metrics')\n\n"
-        "Other functions: schedule_recurring(name, every, prompt), list_tasks(), "
+        "Example: schedule_recurring('report', 'every monday at 8am', 'Generate weekly metrics')\n"
+        "         schedule_recurring('prices', '6h', 'Check DDR5 prices')\n"
+        "         schedule_recurring('standup', 'every weekday at 9am', 'Send standup summary')\n\n"
+        "Recurrence formats accepted:\n"
+        "  Duration intervals:  '30m', '2h', '1d', '2w', 'every 6 hours'\n"
+        "  Calendar-aligned:    'every day at 8pm', 'every monday at 9am',\n"
+        "                       'every weekday at 8am', 'every weekend at 10am'\n\n"
+        "Other functions: list_tasks(), "
         "get_task(name), edit_task_prompt(name, new_prompt), remove(name), "
         "clear(), status(), stop(), "
         "parse_preview(when) — preview what a time expression resolves to, "
