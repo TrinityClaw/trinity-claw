@@ -19,6 +19,7 @@ DOC = (
     'list_tasks()→all tasks with truncated prompt preview, '
     'get_task(name)→FULL task details including complete prompt — use this when user asks to see or edit a task, '
     'edit_task_prompt(name, new_prompt)→replace a task\'s prompt without changing its schedule, '
+    'edit_task_when(name, new_when)→change WHEN a task runs (once: new time expression; recurring: new interval or calendar spec), '
     'remove(name), clear(), status(), parse_preview(when), get_activity_log(hours=24), '
     'get_task_report(name, limit=50)→full result history for one task. '
     'IMPORTANT: list_tasks() truncates prompts. Always use get_task(name) when the user wants to read or edit a specific task.'
@@ -26,7 +27,7 @@ DOC = (
 
 __all__ = [
     "schedule", "schedule_recurring", "remove", "list_tasks",
-    "get_task", "edit_task_prompt", "clear", "status", "stop",
+    "get_task", "edit_task_prompt", "edit_task_when", "clear", "status", "stop",
     "get_activity_log", "get_task_report", "parse_preview", "help_schedule",
 ]
 
@@ -132,9 +133,9 @@ def _parse_when(when_str: str) -> datetime:
     now = datetime.now()
 
     # "in X seconds/minutes/hours/days/weeks"
-    m = re.match(r'in\s+(\d+)\s*' + _UNIT_PATTERN, s)
+    m = re.match(r'in\s+(\d+(?:\.\d+)?)\s*' + _UNIT_PATTERN, s)
     if m:
-        return now + timedelta(seconds=_unit_to_seconds(int(m.group(1)), m.group(2)))
+        return now + timedelta(seconds=_unit_to_seconds(float(m.group(1)), m.group(2)))
 
     # Extract optional "at H:MM [am/pm]" component
     tp = re.search(r'at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', s)
@@ -411,7 +412,6 @@ def _run():
                 def _fire_one(task_tuple):
                     name, prompt, kind, interval_secs = task_tuple
                     fired_at = datetime.now()
-                    _append_activity(f"scheduler:{name}", prompt, "⏳ started")
                     print(f"[scheduler] firing: {name}")
                     try:
                         result = _dispatch(prompt, name)
@@ -503,6 +503,7 @@ def schedule(name: str, when: str = None, prompt: str = None, *, every: str = No
              'next friday at 9am', '2026-03-01 10:00'
     prompt — what the agent should do at that time
     """
+    name = name.strip() if name else name
     # Accept 'every' as alias for 'when' (LLM sometimes passes every= to schedule() by mistake)
     if when is None and every is not None:
         when = every
@@ -555,6 +556,7 @@ def schedule_recurring(name: str, every: str = None, prompt: str = None, *, when
              'every monday at 9am', 'every weekday at 8am'
     prompt — what the agent should do each time
     """
+    name = name.strip() if name else name
     # Accept 'when' as alias for 'every' (LLM sometimes confuses schedule() and schedule_recurring())
     if every is None and when is not None:
         every = when
@@ -703,6 +705,71 @@ def edit_task_prompt(name: str, new_prompt: str) -> str:
     )
 
 
+def edit_task_when(name: str, new_when: str) -> str:
+    """Change WHEN an existing task runs, without touching its prompt.
+
+    For once tasks    — new_when is a time expression: 'tomorrow at 9am', 'in 2 hours'.
+    For recurring tasks — new_when is a new interval or calendar spec: '2h', 'every day at 8pm'.
+    """
+    with _lock:
+        tasks = _load()
+        if name not in tasks:
+            return f"❌ Task '{name}' not found. Use list_tasks() to see available tasks."
+        t = tasks[name]
+        old_next = datetime.fromisoformat(t['next_run']).strftime('%Y-%m-%d %H:%M')
+
+        if t['type'] == 'once':
+            try:
+                run_at = _parse_when(new_when)
+            except ValueError as e:
+                return f"❌ {e}"
+            if run_at <= datetime.now():
+                return f"❌ Parsed time {run_at.strftime('%Y-%m-%d %H:%M')} is already in the past."
+            t['next_run'] = run_at.isoformat()
+            _save(tasks)
+            return (
+                f"✅ Rescheduled '{name}' to run once at "
+                f"{run_at.strftime('%Y-%m-%d %H:%M')} ({_eta(run_at)})\n"
+                f"  (was: {old_next})"
+            )
+
+        # recurring task
+        try:
+            spec = _parse_recurring_spec(new_when)
+        except ValueError as e:
+            return f"❌ {e}"
+
+        if spec['kind'] == 'calendar':
+            try:
+                next_run = _next_calendar_run(spec['weekdays'], spec['hour'], spec['minute'])
+            except ValueError as e:
+                return f"❌ {e}"
+            t['recur_kind']       = 'calendar'
+            t['interval_seconds'] = None
+            t['cal_weekdays']     = spec['weekdays']
+            t['cal_hour']         = spec['hour']
+            t['cal_minute']       = spec['minute']
+            t['cal_label']        = spec['label']
+            t['next_run']         = next_run.isoformat()
+            display = spec['label']
+        else:
+            secs     = spec['seconds']
+            next_run = datetime.now() + timedelta(seconds=secs)
+            t['recur_kind']       = 'interval'
+            t['interval_seconds'] = secs
+            t['next_run']         = next_run.isoformat()
+            for key in ('cal_weekdays', 'cal_hour', 'cal_minute', 'cal_label'):
+                t.pop(key, None)
+            display = f"every {_human_interval(secs)}"
+
+        _save(tasks)
+        return (
+            f"✅ Rescheduled '{name}' to run {display}, next at "
+            f"{next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)})\n"
+            f"  (was: {old_next})"
+        )
+
+
 def clear() -> str:
     """Cancel and remove ALL scheduled tasks."""
     with _lock:
@@ -805,8 +872,9 @@ def help_schedule() -> str:
         "  Calendar-aligned:    'every day at 8pm', 'every monday at 9am',\n"
         "                       'every weekday at 8am', 'every weekend at 10am'\n\n"
         "Other functions: list_tasks(), "
-        "get_task(name), edit_task_prompt(name, new_prompt), remove(name), "
-        "clear(), status(), stop(), "
+        "get_task(name), edit_task_prompt(name, new_prompt), "
+        "edit_task_when(name, new_when) — change when a task runs without touching its prompt, "
+        "remove(name), clear(), status(), stop(), "
         "parse_preview(when) — preview what a time expression resolves to, "
         "get_activity_log(hours=24), get_task_report(name, limit=50)"
     )
