@@ -297,10 +297,12 @@ def index_all_lessons() -> str:
     return f"✅ Indexed {indexed}/{len(lessons)} lessons into ChromaDB '{_LESSONS_COLLECTION}'."
 
 
-def check_for_learned_fix(skill_name: str, error_type: str, skill_path: str = "") -> Optional[str]:
+def check_for_learned_fix(skill_name: str = "", error_type: str = "", skill_path: str = "") -> Optional[str]:
     """Check if we've already learned a fix for this error type in this skill.
     If skill_path is given, prefer lessons recorded for that exact path to avoid
     cross-contamination when two skills share the same name across core/dynamic."""
+    if not skill_name or not error_type:
+        return None
     lessons = _load_lessons()
     fallback = None
     for lesson in reversed(lessons):  # most recent fix wins
@@ -313,12 +315,14 @@ def check_for_learned_fix(skill_name: str, error_type: str, skill_path: str = ""
     return fallback
 
 
-def check_lessons(skill_name: str, func_name: str) -> Optional[str]:
+def check_lessons(skill_name: str = "", func_name: str = "") -> Optional[str]:
     """Pre-dispatch check: return a warning string if this skill has failed before,
     so the caller can surface the lesson before executing.
     Returns None if no prior failures exist (the common, happy path).
 
     Called by app.py before executing each skill tag — zero tool-call overhead."""
+    if not skill_name or not func_name:
+        return None
     label = f"{skill_name}.{func_name}"
     lessons = _load_lessons()
     matches = [l for l in lessons if l.get("skill") == skill_name]
@@ -774,8 +778,10 @@ def get_skill_health_report(skill_name: str) -> str:
     
     return "\n".join(lines)
 
-def suggest_tests(skill_name: str) -> str:
+def suggest_tests(skill_name: str = "") -> str:
     """Suggest test cases based on the skill's functions."""
+    if not skill_name:
+        return "❌ suggest_tests() requires a skill_name argument. Usage: suggest_tests('my_skill')"
     path = SKILLS_DIR / f"{skill_name}.py"
     if not path.exists():
         path = CORE_SKILLS_DIR / f"{skill_name}.py"
@@ -1018,8 +1024,10 @@ def verify_skill(skill_name: str) -> str:
     )
 
 
-def audit(skill_name: str) -> str:
+def audit(skill_name: str = "") -> str:
     """Analyze a skill and return health report."""
+    if not skill_name:
+        return "❌ audit() requires a skill_name argument. Usage: audit('my_skill')"
     return get_skill_health_report(skill_name)
 
 def _fix_all(skill_name: str, issue_type: str) -> str:
@@ -1412,7 +1420,6 @@ __all__ = [
     "improve",
     # Lower-level functions callable by agents
     "record_mistake",
-    "check_for_learned_fix",
     "generate_patch",
     "apply_patch",
     "get_skill_health_report",
