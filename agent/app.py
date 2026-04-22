@@ -3483,6 +3483,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop ‚Ä
         _continuation_pushes = 0        # cloud: how many "stop describing, act!" pushes sent so far
         _local_continuation_pushes = 0  # local: same, for Ollama/tag path
         _consecutive_error_iters = 0    # how many consecutive iterations had only failed skill calls
+        _skill_failure_counts: dict = {}  # (skill, func) -> cumulative failure count this request
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             print(f"üîÅ Agent iteration {iteration}/{MAX_ITERATIONS}")
@@ -3695,6 +3696,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop ‚Ä
                     _consecutive_error_iters += 1
                 else:
                     _consecutive_error_iters = 0
+                for _l in execution_log:
+                    _sfc_key = (_l.get("skill", ""), _l.get("function", ""))
+                    if _l.get("status") == "error":
+                        _skill_failure_counts[_sfc_key] = _skill_failure_counts.get(_sfc_key, 0) + 1
+                    else:
+                        _skill_failure_counts.pop(_sfc_key, None)
                 messages.append({"role": "assistant", "content": executed_reply})
                 # Compute remaining website steps from the full execution log.
                 _wf_written = set()
@@ -3826,9 +3833,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop ‚Ä
                     )
                 _deadend_nudge = ""
                 if _consecutive_error_iters >= 2:
+                    _sfc_blocked = [f"{s}.{f}" for (s, f), n in _skill_failure_counts.items() if n >= 3]
+                    _sfc_msg = (f" DO NOT call {', '.join(_sfc_blocked)} again ‚Äî failed 3+ times this session." if _sfc_blocked else "")
                     _deadend_nudge = (
                         f" ‚ö†Ô∏è DEAD-END: {_consecutive_error_iters} consecutive iterations"
                         " all failed. Do NOT repeat the same approach and do NOT give up."
+                        f"{_sfc_msg}"
                         " Pivot completely: try a different skill, different query,"
                         " or use create_skill to build a custom tool for this problem."
                     )
@@ -3915,13 +3925,22 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop ‚Ä
                     _consecutive_error_iters += 1
                 else:
                     _consecutive_error_iters = 0
+                for _l in execution_log:
+                    _sfc_key = (_l.get("skill", ""), _l.get("function", ""))
+                    if _l.get("status") == "error":
+                        _skill_failure_counts[_sfc_key] = _skill_failure_counts.get(_sfc_key, 0) + 1
+                    else:
+                        _skill_failure_counts.pop(_sfc_key, None)
 
                 if _consecutive_error_iters >= 2:
+                    _sfc_blocked = [f"{s}.{f}" for (s, f), n in _skill_failure_counts.items() if n >= 3]
+                    _sfc_msg = (f" DO NOT call {', '.join(_sfc_blocked)} again ‚Äî failed 3+ times this session." if _sfc_blocked else "")
                     messages.append({
                         "role": "user",
                         "content": (
                             f"‚ö†Ô∏è You have failed {_consecutive_error_iters} consecutive"
                             " iterations. Do NOT give up or report failure."
+                            f"{_sfc_msg}"
                             " Pivot completely: try a different skill, different approach,"
                             " or use create_skill to build a custom tool for this problem."
                             " Keep going."
