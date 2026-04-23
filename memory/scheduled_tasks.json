@@ -1,0 +1,42 @@
+{
+  "autoimprove_nightly": {
+    "type": "recurring",
+    "prompt": "Run overnight self-improvement on all skills. Call autoimprove.run_all(5, max_runtime_seconds=3600) — this audits and fixes dynamic skills automatically, and queues suggestions for core skills for the user to review.",
+    "next_run": "2026-01-01T02:00:00",
+    "interval_seconds": 86400,
+    "created": "2026-01-01T00:00:00",
+    "last_run": null,
+    "run_count": 0,
+    "last_result": null
+  },
+  "kb_nightly_ingest": {
+    "type": "recurring",
+    "prompt": "Auto-ingest any new or changed documents in /app/memory/knowledge/. Call knowledge_base.ingest_folder() and report how many new documents were indexed. If new documents were added, also notify via telegram_bot.send_message() with a brief summary.",
+    "next_run": "2026-01-01T11:00:00",
+    "interval_seconds": 86400,
+    "created": "2026-01-01T00:00:00",
+    "last_run": null,
+    "run_count": 0,
+    "last_result": null
+  },
+  "daily_end_of_day": {
+    "type": "recurring",
+    "prompt": "Write today's end-of-day journal entry. First call notes.get_activity_log(hours=24) to review what was done. Then call notes.end_day(summary='<2-3 sentence summary of today's tasks and outcomes>', next_steps='<any pending items or plans for tomorrow>', user_insights='<what you observed about the user's focus areas or patterns today>'). Be specific and concise — avoid generic filler.",
+    "next_run": "2026-01-01T23:00:00",
+    "interval_seconds": 86400,
+    "created": "2026-01-01T00:00:00",
+    "last_run": null,
+    "run_count": 0,
+    "last_result": null
+  },
+  "meta_review_weekly": {
+    "type": "recurring",
+    "prompt": "Run the weekly meta-review synthesis. Call meta_review.weekly_digest(7) and meta_review.loop_roi_report(). Review the output for any critical recommendations (unfixed error types with high counts, low fix coverage). If there are actionable items, call autoimprove.park_idea() for each one. Report a 3-5 line summary of findings.",
+    "next_run": "2026-01-03T08:00:00",
+    "interval_seconds": 604800,
+    "created": "2026-01-01T00:00:00",
+    "last_run": null,
+    "run_count": 0,
+    "last_result": null
+  }
+}
