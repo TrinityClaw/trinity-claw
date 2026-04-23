@@ -3233,7 +3233,25 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
             pass
 
     # On new sessions (first message): run daily_review in background â€” never blocks the response
+    # Read the cached should_self_improve result written by the previous session's bg thread.
+    # The bg thread always finishes after the current request's template is built, so we
+    # use the prior check here and write a fresh one in _bg_should_improve below.
     _skill_health_section = ""
+    _si_cache_path = Path("/app/memory/self_improve_check.json")
+    try:
+        if _si_cache_path.exists():
+            _si_cache = json.loads(_si_cache_path.read_text(encoding="utf-8"))
+            _si_age_h = (datetime.now() - datetime.fromisoformat(
+                _si_cache.get("checked_at", "2000-01-01")
+            )).total_seconds() / 3600
+            if _si_cache.get("improve") and _si_age_h < 48:
+                _si_loop = _si_cache.get("suggested_loop", "error_reduce")
+                _skill_health_section = (
+                    f"\nâš ï¸ RECURRING FAILURES: {_si_cache.get('reason', '')}\n"
+                    f"Recommended action: autoimprove.run_loop('{_si_loop}')\n"
+                )
+    except Exception:
+        pass
     if len(history) == 0:
         def _bg_daily_review():
             try:
@@ -3265,6 +3283,17 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
             try:
                 from skills.core import self_improvement as _si
                 result = _si.should_self_improve(threshold=3, window_days=7)
+                # Persist result so the NEXT session can read it synchronously into
+                # _skill_health_section (this thread always finishes after the template
+                # is already built for the current request).
+                try:
+                    _cache = dict(result)
+                    _cache["checked_at"] = datetime.now().isoformat()
+                    Path("/app/memory/self_improve_check.json").write_text(
+                        json.dumps(_cache, indent=2), encoding="utf-8"
+                    )
+                except Exception:
+                    pass
                 if result.get("improve"):
                     _ai = skills.get("autoimprove")
                     if _ai and hasattr(_ai, "park_idea"):
