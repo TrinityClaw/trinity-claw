@@ -502,6 +502,9 @@ def _call_llm_simple(prompt: str, max_tokens: int = 256) -> str:
                     "options": {"temperature": 0.0, "num_predict": max_tokens},
                 }
                 resp = _req.post(f"{base}/api/chat", json=payload, timeout=30)
+                # Don't retry on permanent client errors (4xx)
+                if 400 <= resp.status_code < 500:
+                    return ""
                 resp.raise_for_status()
                 return resp.json().get("message", {}).get("content", "").strip()
             else:
@@ -521,6 +524,9 @@ def _call_llm_simple(prompt: str, max_tokens: int = 256) -> str:
                     headers=headers,
                     timeout=30,
                 )
+                # Don't retry on permanent client errors (4xx)
+                if 400 <= resp.status_code < 500:
+                    return ""
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"].strip()
         except Exception:
@@ -672,7 +678,11 @@ def _refine_query(
                     t.lower() for t in re.findall(r'\w+', refined)
                     if t.lower() not in _RESEARCH_STOP and len(t) > 3
                 }
-                if base_terms & refined_terms:
+                # Skip the topical continuity check when base_terms is empty
+                # (query was all stopwords / very short words) — there's nothing
+                # to intersect against, so we can't distinguish drift from a
+                # genuinely good reformulation.  Accept the LLM result as-is.
+                if not base_terms or base_terms & refined_terms:
                     return refined
                 # LLM drifted off-topic — log so degradation is visible over time
                 _log({
@@ -927,7 +937,7 @@ def _run_smoke_test(skill_name: str, ce) -> tuple:
     """
     # ── Layer 1: status() or import check ─────────────────────────────────────
     test_result = ce.test_skill(skill_name, "status", "[]", timeout=10)
-    if not test_result.startswith("✅") and "not found" in test_result:
+    if not test_result.startswith("✅"):
         test_result = ce.run_snippet(
             "import sys\n"
             "sys.path.insert(0, '/app/skills/dynamic')\n"
@@ -1028,6 +1038,25 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
 
     if not target_issues:
         return f"NO_CHANGE: no '{issue_type}' in {skill_name} (score={before_score})"
+
+    # Guard: missing_docstring patches are subjective — if self_improvement.fix()
+    # doesn't implement a deterministic rewrite for this type, the experiment will
+    # always return NO_CHANGE and silently waste a slot.  Surface a warning so the
+    # issue is visible rather than accumulating as unexplained NO_CHANGE entries.
+    if issue_type == "missing_docstring":
+        patch_probe = si.generate_patch(skill_name, issue_type, target_issues[0].get("line", 0))
+        if not patch_probe.get("diff") and not patch_probe.get("safe_to_apply"):
+            _log({
+                "timestamp":  datetime.now().isoformat(),
+                "skill":      skill_name,
+                "issue_type": issue_type,
+                "outcome":    "NO_CHANGE",
+                "reason":     "missing_docstring: si.fix() has no deterministic patcher — skipping experiment",
+            })
+            return (
+                f"NO_CHANGE: skipped '{issue_type}' for {skill_name} — "
+                "no deterministic patcher available (see suggest_core for manual review)"
+            )
 
     if dry_run:
         issue_summary = ", ".join(
@@ -1453,15 +1482,9 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
 
     after_score = after.get("health_score", 0)
 
-    # Smoke test — core skills use sys.path from core dir
-    test_result = ce.run_snippet(
-        "import sys\n"
-        "sys.path.insert(0, '/app/skills/core')\n"
-        f"import {skill_name}\n"
-        f"print(getattr({skill_name}, 'NAME', 'loaded ok'))",
-        timeout=15,
-    )
-    test_passed = test_result.startswith("✅")
+    # Smoke test — use the same layered test as run_experiment so core patches
+    # face the same bar as dynamic patches (layer 1: status(); layer 2: scenarios).
+    test_passed, test_detail = _run_smoke_test(skill_name, ce)
 
     timestamp = datetime.now().isoformat()
 
@@ -1470,14 +1493,14 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
         backup_path.unlink(missing_ok=True)
         suggestions[match_idx]["status"]     = "failed"
         suggestions[match_idx]["applied_at"] = timestamp
-        suggestions[match_idx]["fail_reason"] = f"runtime test failed: {test_result[:150]}"
+        suggestions[match_idx]["fail_reason"] = f"runtime test failed: {test_detail[:150]}"
         _save_suggestions(suggestions)
         _log({
             "timestamp": timestamp, "skill": skill_name, "issue_type": issue_type,
             "outcome": "REVERTED", "track": "core", "before_score": before_score,
             "after_score": after_score, "reason": "runtime test failed after apply_suggestion",
         })
-        return f"❌ FAILED: runtime test failed — core file restored\n{test_result[:200]}"
+        return f"❌ FAILED: runtime test failed — core file restored\n{test_detail[:200]}"
 
     # Success
     backup_path.unlink(missing_ok=True)
@@ -1486,15 +1509,24 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     suggestions[match_idx]["applied_at"]    = timestamp
     suggestions[match_idx]["original_code"] = original_code  # stored for unapply_suggestion()
     _save_suggestions(suggestions)
+
+    # MAD confidence — same scoring as run_experiment so report() stats include core fixes
+    score_delta           = (after_score - before_score) if (before_score and after_score) else None
+    recent_deltas         = _load_all_score_deltas()
+    conf_ratio, conf_label = _compute_confidence(score_delta, recent_deltas)
+
     _log({
-        "timestamp":    timestamp,
-        "skill":        skill_name,
-        "issue_type":   issue_type,
-        "outcome":      "IMPROVED",
-        "track":        "core",
-        "before_score": before_score,
-        "after_score":  after_score,
-        "issues_fixed": issues_fixed,
+        "timestamp":        timestamp,
+        "skill":            skill_name,
+        "issue_type":       issue_type,
+        "outcome":          "IMPROVED",
+        "track":            "core",
+        "before_score":     before_score,
+        "after_score":      after_score,
+        "score_delta":      score_delta,
+        "confidence":       conf_ratio,
+        "confidence_label": conf_label,
+        "issues_fixed":     issues_fixed,
     })
 
     # Auto-close open improvement ideas whose source matches the applied skill.
@@ -2156,7 +2188,7 @@ def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
 
 # ── Discover new error pattern types ─────────────────────────────────────────
 
-def _discover_new_patterns(min_occurrences: int = 2) -> str:
+def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) -> str:
     """
     Scan lessons.jsonl for error/failure types NOT already tracked in
     error_patterns.json.  Uses the LLM to analyze recurring unknown failure modes
@@ -2169,6 +2201,8 @@ def _discover_new_patterns(min_occurrences: int = 2) -> str:
     Args:
         min_occurrences: Min times an untracked type must appear before analysis
                          (default 2 — low bar since the LLM decides severity).
+        max_proposals:   Max ideas to park per run (default 10) — prevents flooding
+                         improvement_ideas.jsonl when lessons.jsonl is large.
 
     Returns:
         Summary of untracked types found and ideas parked.
@@ -2177,6 +2211,10 @@ def _discover_new_patterns(min_occurrences: int = 2) -> str:
         min_occurrences = int(min_occurrences)
     except (ValueError, TypeError):
         min_occurrences = 2
+    try:
+        max_proposals = int(max_proposals)
+    except (ValueError, TypeError):
+        max_proposals = 10
 
     if not LESSONS_FILE.exists():
         return "NO_DATA: lessons.jsonl not found — run skills first to accumulate lessons"
@@ -2228,6 +2266,9 @@ def _discover_new_patterns(min_occurrences: int = 2) -> str:
     lines = [f"🔍 discover_patterns: {len(qualifying)} qualifying untracked type(s):"]
 
     for et, msgs in sorted(qualifying.items(), key=lambda x: -len(x[1])):
+        if proposed >= max_proposals:
+            lines.append(f"  … capped at {max_proposals} proposals — remaining types skipped")
+            break
         # Dedupe while preserving order
         unique_msgs = list(dict.fromkeys(msgs))
         examples_str = "\n".join(f"  - {m}" for m in unique_msgs[:5])
@@ -2299,7 +2340,7 @@ def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
         "daily_review":      _loop_daily_review,
         "suggest_core":      lambda: suggest_core(max_skills=max_experiments),
         "pattern_mining":    _loop_pattern_mining,
-        "discover_patterns": _discover_new_patterns,
+        "discover_patterns": lambda: _discover_new_patterns(max_proposals=max_experiments),
     }
     if loop_name not in _loops:
         return f"❌ Unknown loop '{loop_name}'. Available: {list(_loops.keys())}"
@@ -2462,9 +2503,23 @@ def schedule_nightly(run_time: str = "2am", max_experiments=5) -> str:
         f"Call autoimprove.run_all({max_experiments}, max_runtime_seconds=None) — this audits and fixes dynamic skills "
         f"automatically, and queues suggestions for core skills for the user to review."
     )
+    # Build an 'every' string that anchors to the requested run_time so the
+    # scheduler fires at the right hour instead of just "+24h from now".
+    run_time_clean = str(run_time).strip().lower()
+    # Normalise common shorthand: '2am' → 'every day at 2am'
+    if re.match(r'^\d{1,2}(am|pm)$', run_time_clean):
+        every_str = f"every day at {run_time_clean}"
+    elif run_time_clean == "midnight":
+        every_str = "every day at midnight"
+    elif run_time_clean == "noon":
+        every_str = "every day at noon"
+    elif run_time_clean.startswith("every"):
+        every_str = run_time_clean  # already a valid natural-language spec
+    else:
+        every_str = f"every day at {run_time_clean}"  # pass through, let scheduler validate
     result = sched.schedule_recurring(
         name="autoimprove_nightly",
-        every="1d",
+        every=every_str,
         prompt=prompt,
     )
 
@@ -2723,8 +2778,14 @@ def loop_roi(runs: int = 10) -> str:
 
 def status() -> str:
     """Show autoimprove config, loops, and skills in scope."""
-    dynamic_skills = [p.stem for p in SKILLS_DYNAMIC_DIR.glob("*.py") if not p.name.startswith("_")]
-    core_skills    = [p.stem for p in SKILLS_CORE_DIR.glob("*.py")    if not p.name.startswith("_")]
+    try:
+        dynamic_skills = [p.stem for p in SKILLS_DYNAMIC_DIR.glob("*.py") if not p.name.startswith("_")]
+    except OSError:
+        dynamic_skills = []
+    try:
+        core_skills = [p.stem for p in SKILLS_CORE_DIR.glob("*.py") if not p.name.startswith("_")]
+    except OSError:
+        core_skills = []
     entries        = _load_log(7)
     last_run       = entries[-1].get("timestamp", "never")[:16] if entries else "never"
     suggestions    = _load_suggestions()
