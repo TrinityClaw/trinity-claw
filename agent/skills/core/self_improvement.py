@@ -387,10 +387,10 @@ class CodeAnalyzer(ast.NodeVisitor):
             })
         
         args_without_hints = [
-            arg.arg for arg in node.args.args 
+            arg.arg for arg in node.args.args
             if arg.arg not in ('self', 'cls') and arg.annotation is None
         ]
-        if args_without_hints or node.returns is None:
+        if args_without_hints:
             self.issues.append({
                 "type": "no_type_hints",
                 "line": node.lineno,
@@ -464,7 +464,7 @@ class CodeAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
     
     # Paths that are intentional Docker/container architecture — not bugs
-    _DOCKER_PATH_PREFIXES = ("/app/", "/app\\")
+    _DOCKER_PATH_PREFIXES = ("/app/",)
 
     def visit_Constant(self, node: ast.Constant) -> None:
         """Flag string constants that look like hardcoded absolute file paths."""
@@ -660,6 +660,9 @@ def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
     if patch.get("error"):
         return patch
 
+    if patch.get("requires_review") or patch.get("manual_review_required"):
+        return {"error": "Cannot apply patch that requires manual review", "patch": patch}
+
     path = SKILLS_DIR / f"{skill_name}.py"
     if not path.exists():
         path = CORE_SKILLS_DIR / f"{skill_name}.py"
@@ -741,7 +744,6 @@ def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
         "success": True,
         "skill": skill_name,
         "patch_applied": patch["issue_type"],
-        "backup_created": backup_path.name if backup_path else None,
         "verification": "PASSED",
         "message": f"✅ Applied fix for {patch['issue_type']} in {skill_name} [verified]",
     }
@@ -837,7 +839,9 @@ def learn_from_feedback(skill_name: str, feedback: str, was_helpful: bool) -> st
         "type": "user_feedback"
     }
     saved = _save_lesson(lesson)
-    
+    if saved:
+        _index_lesson_in_chroma(lesson)
+
     status = "✅ Thank you! Feedback recorded." if was_helpful and saved else "📝 Feedback noted for improvement."
     return f"{status} Future suggestions will be refined."
 
@@ -1317,7 +1321,6 @@ def should_self_improve(threshold: int = 3, window_days: int = 7) -> dict:
     _DEFAULT_LOOP = "error_reduce"
 
     # Build a set of error types for which any lesson recorded a fix, across all skills.
-    # check_for_learned_fix("", et) always returns None because no lesson has skill=="".
     fixed_types: set = {
         l.get("error_type") or l.get("type")
         for l in lessons
@@ -1405,6 +1408,7 @@ improve = fix
 __all__ = [
     "NAME",
     "DOC",
+    "SHORT_DOC",
     # Primary user-facing functions
     "audit",
     "fix",
@@ -1418,6 +1422,9 @@ __all__ = [
     # Aliases
     "analyze",
     "improve",
+    # Semantic lesson search
+    "search_lessons_semantic",
+    "index_all_lessons",
     # Lower-level functions callable by agents
     "record_mistake",
     "generate_patch",
