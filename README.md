@@ -25,6 +25,7 @@ A self-modifying AI agent with persistent memory, dynamic skill creation, and in
 
 ## ⚠️ Security Notice
 
+> **Use at your own risk.**
 
 TrinityClaw is **secure by design** in its original form:
 - All skills run inside an isolated Docker container with no host access
@@ -48,7 +49,7 @@ This project follows responsible AI agent design practices, but **no system is u
 ## Features
 
 - **Self-Modifying**: Creates new skills dynamically
-- **Persistent Memory**: ChromaDB vector storage + JSONL conversation logs
+- **Persistent Memory**: ChromaDB vector storage + JSONL logs, daily journaling, goal tracking, and weekly meta-review synthesis across all memory files
 - **Multi-Step Reasoning**: Agent loop for complex tasks
 - **Dynamic Skills**: Core system skills + user-created skills
 - **Web Browsing**: Fetch and analyze web content, including JS-rendered pages
@@ -308,6 +309,7 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 │   │  - git_manager  │  │                 │               │
 │   │  - scheduler    │  │                 │               │
 │   │  - telegram_bot │  │                 │               │
+│   │  - meta_review  │  │                 │               │
 │   └─────────────────┘  └─────────────────┘               │
 │                                                             │
 │   ┌─────────────────────────────────────────────────────┐  │
@@ -323,11 +325,12 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 
 ---
 
-## Core Skills (30)
+## Core Skills (31)
 
 | Skill | Description | Functions |
 |-------|-------------|-----------|
-| `notes` | Persistent note storage | `save`, `load`, `list_notes`, `delete`, `search`, `export_all`, `get_last_logs`, `search_logs` |
+| `notes` | Persistent notes, daily journal, user model, and goal tracking | `save`, `load`, `list_notes`, `delete`, `search`, `export_all`, `get_last_logs`, `search_logs`, `end_day`, `daily_review`, `get_activity_log`, `set_preference`, `get_preference`, `record_pattern`, `set_context`, `update_user_model`, `get_user_model`, `prune_user_model`, `set_user_fact`, `get_user_facts_card`, `add_goal`, `complete_goal`, `list_goals` |
+| `meta_review` | Weekly synthesis of all memory files into actionable insights | `weekly_digest`, `loop_roi_report`, `error_trend_report` |
 | `files` | File operations (read anywhere, write to memory/dynamic) | `ls`, `cat`, `pwd`, `exists`, `size`, `sha256`, `write`, `append`, `patch`, `patch_all`, `mkdir`, `delete`, `tree`, `find_duplicates` |
 | `web` | Web browsing + browser automation. `search()` auto-tries Tavily → DuckDuckGo → Bing (set `TAVILY_API_KEY` for best results) | `fetch`, `get`, `head`, `read`, `search`, `download`, `scrape`, `scrape_links`, `scrape_images`, `scrape_table`, `extract_meta`, `browser_goto`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_text`, `browser_fill`, `browser_evaluate`, `browser_wait`, `browser_links`, `browser_inputs`, `browser_scroll`, `browser_press`, `browser_close`, `status` |
 | `code_executor` | Safe Python sandbox + math evaluator | `run_snippet`, `test_skill`, `run_bash`, `calc`, `status` |
@@ -923,6 +926,72 @@ curl -X POST http://localhost:8001/skill/call \
 
 ---
 
+## Persistent Memory System
+
+TrinityClaw builds a growing model of you and your work across every session. Memory is layered:
+
+| Layer | What's stored | Where |
+|-------|--------------|-------|
+| **Notes** | Free-form notes and saved research | `memory/notes.json` |
+| **User model** | Preferences, patterns, context, rejected ideas | `memory/user_model.json` |
+| **Goals** | Open and completed goals with optional due dates | `memory/user_model.json` (goals array) |
+| **Daily journal** | End-of-day summaries, learnings, next steps | `memory/daily_journal.jsonl` |
+| **Lessons** | Per-skill failure/fix records used by autoimprove | `memory/lessons.jsonl` |
+| **Activity log** | Rolling action log (24h window) | `memory/activity_log.jsonl` |
+| **Improvement log** | Every autoimprove experiment with outcome + scores | `memory/improvement_log.jsonl` |
+| **ChromaDB** | Semantic vector index of all past context | `memory/databases/` |
+
+### Daily Journal — `notes.end_day()`
+
+At 23:00 every night (scheduled automatically) the agent writes a journal entry. You can also trigger it manually:
+
+```
+notes.end_day(
+  summary="What was accomplished today",
+  next_steps="Pending items or plans for tomorrow",
+  user_insights="Patterns observed about your focus areas"
+)
+```
+
+The journal is injected into the system prompt at the start of every session (last 3–7 days), so the agent always knows what you worked on recently without you repeating yourself.
+
+### Goal Tracking — `notes.add_goal()` / `notes.list_goals()`
+
+Track ongoing objectives across sessions:
+
+```
+# Add a goal
+notes.add_goal("Launch the new landing page", due_date="2026-05-01")
+
+# List open goals
+notes.list_goals()
+
+# Mark done
+notes.complete_goal("landing page")
+```
+
+Active goals are automatically injected into the session context so the agent stays oriented toward what matters.
+
+### Weekly Meta-Review — `meta_review.weekly_digest()`
+
+Every Saturday at 08:00 (scheduled automatically) the agent synthesizes all memory files into a single report covering:
+- Top recurring error types and whether fixes exist
+- Lesson fix-coverage rate (how many failures have been addressed)
+- Which autoimprove loops are actually producing improvements (ROI)
+- Recent journal themes and next steps
+
+Run it manually anytime:
+
+```
+meta_review.weekly_digest(7)       ← last 7 days
+meta_review.loop_roi_report()      ← per-loop improvement breakdown
+meta_review.error_trend_report(30) ← error frequency + fix coverage
+```
+
+Critical findings (unfixed high-frequency errors, low fix coverage) are parked as improvement ideas automatically.
+
+---
+
 ## AutoImprove — Overnight Self-Improvement
 
 `autoimprove` is a dynamic skill that runs autoresearch-style loops while you sleep. It continuously audits your skills, auto-fixes safe issues, queues suggestions for your review, and can research any topic on the web.
@@ -1047,8 +1116,9 @@ autoimprove.report(30)    ← last month
 
 | File | Contents |
 |------|----------|
-| `memory/improvement_log.jsonl` | Every experiment — outcome, scores, timestamps |
+| `memory/improvement_log.jsonl` | Every experiment — outcome, scores, timestamps. Read by `meta_review.loop_roi_report()` |
 | `memory/core_suggestions.jsonl` | Pending/applied/failed suggestions for core skills |
+| `memory/lessons.jsonl` | Per-skill failure/fix records. Read by `meta_review.weekly_digest()` |
 | `memory/notes.json` | Research findings saved by `research()` |
 
 ---
@@ -1098,14 +1168,16 @@ trinity-claw/
 │       │   ├── google_drive.py
 │       │   ├── meeting_notes.py
 │       │   ├── youtube.py
-│       │   └── autoimprove.py  # Autoresearch loops + web research (see AutoImprove section)
+│       │   ├── autoimprove.py  # Autoresearch loops + web research (see AutoImprove section)
+│       │   ├── meta_review.py  # Weekly synthesis: errors, loop ROI, journal themes
+│       │   └── _user_model_store.py  # Internal: user model data layer (used by notes.py)
 │       └── dynamic/            # User skills (AI agent can read-write)
 │
 ├── config/
 │   └── litellm_config.yaml     # LLM configuration
 │
-├── memory/                     # Persistent storage
-│   ├── session_logs.jsonl      # Conversation history
+├── memory/                     # Persistent storage (excluded from git except items below)
+│   ├── scheduled_tasks1.json   # Starter scheduled task config — rename to scheduled_tasks.json on first run
 │   ├── knowledge/              # Drop business documents here for ingestion
 │   └── websites/               # web_builder projects (served on port 8090)
 │
@@ -1235,5 +1307,5 @@ MIT License - see LICENSE file for details.
 
 ---
 
-**Version**: TrinityClaw v1.3.0
-**Last Updated**: 2026-03-14
+**Version**: TrinityClaw v1.4.0
+**Last Updated**: 2026-04-23
