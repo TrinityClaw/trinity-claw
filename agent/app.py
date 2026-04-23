@@ -3580,6 +3580,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
                 if not ai_reply.strip() and all_execution_logs:
                     parts = []
                     for log in all_execution_logs:
+                        if log.get("status") == "lesson_warning":
+                            continue
                         skill_label = f"{log['skill']}.{log.get('function', '')}"
                         if log.get("status") == "success":
                             res = str(log.get("result", "")).strip()
@@ -3706,6 +3708,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
                         else:
                             parts = []
                             for log in all_execution_logs:
+                                if log.get("status") == "lesson_warning":
+                                    continue
                                 skill_label = f"{log['skill']}.{log.get('function', '')}"
                                 if log.get("status") == "success":
                                     res = str(log.get("result", "")).strip()
