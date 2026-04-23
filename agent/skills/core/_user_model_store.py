@@ -59,7 +59,7 @@ def _atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
 def _load_user_model() -> dict:
     _empty = {
         "preferences": {}, "patterns": [], "context": {},
-        "rejections": [], "insights": [],
+        "rejections": [], "insights": [], "goals": [],
         "meta": {"schema_version": 2, "last_updated": None},
     }
     if not USER_MODEL_FILE.exists():
@@ -323,6 +323,14 @@ def get_context_for_prompt() -> str:
         if insights:
             lines.append("Recent user insight: " + insights[-1]["insight"])
 
+        open_goals = [g for g in model.get("goals", []) if g.get("status") == "open"]
+        if open_goals:
+            parts = []
+            for g in open_goals[-5:]:
+                due = f" (due {g['due_date']})" if g.get("due_date") else ""
+                parts.append(g["goal"] + due)
+            lines.append("Active goals: " + "; ".join(parts))
+
         return "\n".join(lines)
     except Exception as exc:
         logger.error(f"get_context_for_prompt error: {exc}")
@@ -473,3 +481,92 @@ def get_fact_history(key: str) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"❌ get_fact_history error: {e}"
+
+
+# ── Goal Tracking ──────────────────────────────────────────────────────────────
+
+MAX_GOAL_LEN = 500
+
+
+def add_goal(goal: str, due_date: str = "", context: str = "") -> str:
+    """Track a user goal or objective.
+    goal: description of the goal.
+    due_date: optional ISO date string e.g. '2026-04-30'.
+    context: optional note about why this goal matters."""
+    try:
+        goal    = _trunc(goal.strip(), MAX_GOAL_LEN)
+        context = _trunc(context.strip(), MAX_VALUE_LEN)
+        gid     = datetime.now().strftime("%Y%m%d%H%M%S%f")[:18]
+        with _file_lock(USER_MODEL_FILE):
+            model = _load_user_model()
+            model.setdefault("goals", []).append({
+                "id":           gid,
+                "goal":         goal,
+                "due_date":     due_date.strip() or None,
+                "context":      context or None,
+                "status":       "open",
+                "created_at":   datetime.now().isoformat(),
+                "completed_at": None,
+            })
+            _save_user_model(model)
+        due_str = f" (due {due_date})" if due_date else ""
+        return f"🎯 Goal tracked: '{goal}'{due_str}"
+    except Exception as e:
+        return f"❌ add_goal error: {e}"
+
+
+def complete_goal(goal_text: str) -> str:
+    """Mark a goal as completed. Matches by case-insensitive substring."""
+    try:
+        needle = goal_text.strip().lower()
+        with _file_lock(USER_MODEL_FILE):
+            model   = _load_user_model()
+            open_gs = [g for g in model.get("goals", []) if g.get("status") == "open"]
+            matches = [g for g in open_gs if needle in g["goal"].lower()]
+            if not matches:
+                return f"❌ No open goal matching '{goal_text}'"
+            if len(matches) > 1:
+                opts = "; ".join(m["goal"] for m in matches)
+                return f"❌ Ambiguous — multiple matches: {opts}"
+            matches[0]["status"]       = "completed"
+            matches[0]["completed_at"] = datetime.now().isoformat()
+            _save_user_model(model)
+        return f"✅ Goal completed: '{matches[0]['goal']}'"
+    except Exception as e:
+        return f"❌ complete_goal error: {e}"
+
+
+def list_goals(status: str = "open") -> str:
+    """List goals filtered by status ('open' or 'completed'). Default: open."""
+    try:
+        status  = status.strip().lower()
+        model   = _load_user_model()
+        goals   = [g for g in model.get("goals", []) if g.get("status") == status]
+        if not goals:
+            return f"📭 No {status} goals."
+        icon    = "🎯" if status == "open" else "✅"
+        lines   = [f"{icon} {status.capitalize()} goals ({len(goals)}):"]
+        for g in goals:
+            due   = f"  due {g['due_date']}" if g.get("due_date") else ""
+            ctx   = f"  — {g['context']}" if g.get("context") else ""
+            done  = f"  completed {g['completed_at'][:10]}" if g.get("completed_at") else ""
+            lines.append(f"  • {g['goal']}{due}{ctx}{done}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ list_goals error: {e}"
+
+
+def get_goals_for_prompt() -> str:
+    """Compact active goal list for injection into the system prompt."""
+    try:
+        model      = _load_user_model()
+        open_goals = [g for g in model.get("goals", []) if g.get("status") == "open"]
+        if not open_goals:
+            return ""
+        parts = []
+        for g in open_goals[-5:]:
+            due = f" (due {g['due_date']})" if g.get("due_date") else ""
+            parts.append(g["goal"] + due)
+        return "Active goals: " + "; ".join(parts)
+    except Exception:
+        return ""

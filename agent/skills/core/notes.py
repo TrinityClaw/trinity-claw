@@ -17,6 +17,7 @@ from _user_model_store import (
     set_context, record_pattern, add_rejection,
     update_user_model, get_user_model, get_context_for_prompt, prune_user_model,
     set_user_fact, get_user_facts_card, get_fact_history,
+    add_goal, complete_goal, list_goals, get_goals_for_prompt,
 )
 from _journal_store import (
     write_daily_entry, get_journal, get_today, compress_journal, end_day,
@@ -37,6 +38,8 @@ __all__ = [
     "set_context", "record_pattern", "add_rejection",
     "update_user_model", "get_user_model", "get_context_for_prompt", "prune_user_model",
     "set_user_fact", "get_user_facts_card", "get_fact_history",
+    # goal tracking (re-exported from _user_model_store)
+    "add_goal", "complete_goal", "list_goals", "get_goals_for_prompt",
     # journal (re-exported from _journal_store)
     "write_daily_entry", "get_journal", "get_today", "compress_journal", "end_day",
 ]
@@ -76,7 +79,11 @@ DOC = (
     "get_user_facts_card()→return compact user fact card with source and valid_from metadata; "
     "get_fact_history(key)→return full timeline of a user fact — current value plus all archived previous values with validity windows; "
     "get_preference_history(key)→return full timeline of a preference — current plus archived previous values; "
-    "compress_journal(days_old=15)→compress journal entries older than N days: archives originals to daily_journal_archive.jsonl and replaces them with summary-only stubs to reduce token load; called automatically by end_day()."
+    "compress_journal(days_old=15)→compress journal entries older than N days: archives originals to daily_journal_archive.jsonl and replaces them with summary-only stubs to reduce token load; called automatically by end_day(); "
+    "add_goal(goal, due_date?, context?)→track a user goal or objective; due_date is optional ISO date e.g. '2026-04-30'; "
+    "complete_goal(goal_text)→mark a goal as completed by case-insensitive substring match; "
+    "list_goals(status?)→show goals filtered by status ('open' or 'completed', default 'open'); "
+    "get_goals_for_prompt()→compact active goal list for system prompt injection."
 )
 
 _LOGS_FILE    = Path("/app/memory/session_logs.jsonl")
