@@ -1787,6 +1787,13 @@ def execute_skill_tags(response_text: str) -> tuple:
     # Strip any [✅ ...] / [❌ ...] blocks the LLM hallucinated before we inject real ones
     response_text = _strip_fake_result_blocks(response_text)
 
+    # Normalize bracket corruption — LLMs occasionally output wrong bracket types.
+    # [skill:name.func]...[/skill:name.func]  →  <skill:name.func>...</skill:name.func>
+    # <skill:name.func]...                    →  <skill:name.func>...
+    response_text = re.sub(r'\[skill:([\w.]+)\]', r'<skill:\1>', response_text)
+    response_text = re.sub(r'\[/skill:([\w.]+)\]', r'</skill:\1>', response_text)
+    response_text = re.sub(r'<(skill:[\w.]+)\]', r'<\1>', response_text)
+
     # Rescue unclosed skill tags: if the model's output was truncated before the
     # closing tag (common with large file content), append the expected closing tag
     # so the regex can match it and execute the skill normally.
@@ -2003,6 +2010,21 @@ def execute_skill_tags(response_text: str) -> tuple:
     all_matches = list(re.finditer(pattern, response_text, flags=re.DOTALL))
 
     if not all_matches:
+        # Detect residual malformed skill syntax and record a lesson so the agent
+        # sees this failure on the next run — silent non-matches were never recorded.
+        if re.search(r'[\[<]/?skill:', response_text) and "self_improvement" in skills:
+            try:
+                skills["self_improvement"].record_mistake(
+                    skill_name="agent.skill_tags",
+                    error_type="MalformedSyntax",
+                    error_msg=(
+                        "Skill tag used wrong bracket syntax — no skills executed. "
+                        "ALWAYS use <skill:name.function>args</skill:name.function> "
+                        "with angle brackets < > only. Never use [ ] or mix brackets."
+                    ),
+                )
+            except Exception:
+                pass
         return response_text, execution_log, ""
 
     processed_text = re.sub(pattern, replace_tag, response_text, flags=re.DOTALL)
