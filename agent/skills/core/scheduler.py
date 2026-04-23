@@ -64,8 +64,8 @@ def _append_activity(source: str, action: str, result: str):
         entry = json.dumps({
             "ts":     datetime.now().isoformat(timespec="seconds"),
             "source": source,
-            "action": action[:120],
-            "result": result[:200],
+            "action": action[:500],
+            "result": result[:800],
             "ok":     not result.startswith("❌"),
         })
         with _ACTIVITY_LOG.open("a", encoding="utf-8") as f:
@@ -229,7 +229,10 @@ def _human_interval(seconds: int) -> str:
 
 def _eta(next_run: datetime) -> str:
     """Return a human-readable ETA string for a future datetime (e.g. 'in 2h 15m')."""
-    now = datetime.now(next_run.tzinfo) if next_run.tzinfo else datetime.now()
+    if next_run.tzinfo:
+        now = datetime.now().astimezone(next_run.tzinfo)
+    else:
+        now = datetime.now()
     diff = next_run - now
     secs = int(diff.total_seconds())
     if secs <= 0:
@@ -258,6 +261,8 @@ _WEEKDAY_GROUPS = {
 def _next_calendar_run(weekdays, hour: int, minute: int, after: datetime = None) -> datetime:
     """Return the next datetime matching (weekdays, hour, minute), strictly after `after`."""
     base = after if after is not None else datetime.now()
+    if weekdays is not None and len(weekdays) == 0:
+        weekdays = None  # treat empty list as "any day"
     for delta in range(8):  # max 7 days covers any weekday combination
         candidate = (base + timedelta(days=delta)).replace(
             hour=hour, minute=minute, second=0, microsecond=0
@@ -447,10 +452,9 @@ def _run():
                         elif t.get('recur_kind') == 'calendar':
                             # Advance to the next calendar-aligned occurrence
                             try:
-                                prev_next = datetime.fromisoformat(t['next_run'])
                                 t['next_run'] = _next_calendar_run(
                                     t.get('cal_weekdays'), t['cal_hour'], t['cal_minute'],
-                                    after=prev_next
+                                    after=datetime.now()
                                 ).isoformat()
                             except Exception as e:
                                 print(f"[scheduler] calendar advance error for '{name}': {e}")
