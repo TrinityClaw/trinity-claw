@@ -19,7 +19,8 @@ DOC = (
     "list_urls()→formatted status of all monitored URLs (preferred over get_status_summary/get_url_history/get_recent_changes); "
     "remove_url(url), check_url_now(url), check_all_urls(). "
     "Twitter state helpers for stateful automation (deduplication across scheduler runs): "
-    "tw_is_seen(key)→bool — has this tweet_id/username already been liked/followed?; "
+    "tw_is_seen(key, max_age_days?)→bool — has this tweet_id/username already been liked/followed? "
+    "Pass max_age_days=N to only count entries processed within the last N days; "
     "tw_mark_seen(key, value?)→mark as processed; "
     "tw_last_tweet_time()→ISO timestamp of last posted tweet, empty if never; "
     "tw_log_tweet()→record that a tweet was just posted (call right after browser_session.tweet()); "
@@ -557,11 +558,12 @@ def check_url_now(url: str) -> Dict:
 _TW_DB = url_monitor_instance.db_path
 
 
-def tw_is_seen(key: str) -> bool:
+def tw_is_seen(key: str, max_age_days: int = None) -> bool:
     """Check if a tweet_id or username has already been processed (liked, followed, etc.).
 
-    key — a unique identifier, e.g. tweet URL, tweet ID, or @username.
-    Returns True if already seen, False if new.
+    key          — a unique identifier, e.g. tweet URL, tweet ID, or @username.
+    max_age_days — if set, only counts as seen if the entry was logged within N days.
+    Returns True if already seen (within max_age_days if specified), False if new.
 
     Use this before like_tweet() or follow_user() to prevent double-actions:
       if not url_monitor.tw_is_seen(tweet_url):
@@ -570,7 +572,11 @@ def tw_is_seen(key: str) -> bool:
     """
     conn = sqlite3.connect(_TW_DB)
     c = conn.cursor()
-    c.execute("SELECT 1 FROM twitter_state WHERE key = ?", (key,))
+    if max_age_days is not None:
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+        c.execute("SELECT 1 FROM twitter_state WHERE key = ? AND logged_at >= ?", (key, cutoff))
+    else:
+        c.execute("SELECT 1 FROM twitter_state WHERE key = ?", (key,))
     result = c.fetchone() is not None
     conn.close()
     return result
