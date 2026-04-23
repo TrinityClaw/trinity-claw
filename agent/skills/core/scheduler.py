@@ -20,9 +20,15 @@ DOC = (
     'get_task(name)→FULL task details including complete prompt — use this when user asks to see or edit a task, '
     'edit_task_prompt(name, new_prompt)→replace a task\'s prompt without changing its schedule, '
     'edit_task_when(name, new_when)→change WHEN a task runs (once: new time expression; recurring: new interval or calendar spec), '
-    'remove(name), clear(), status(), parse_preview(when), get_activity_log(hours=24), '
+    'remove(name), clear(), status(), stop()→halt the scheduler thread, '
+    'parse_preview(when)→preview a time expression without scheduling, '
+    'help_schedule()→full usage docs, '
+    'get_activity_log(hours=24), '
     'get_task_report(name, limit=50)→full result history for one task. '
-    'IMPORTANT: list_tasks() truncates prompts. Always use get_task(name) when the user wants to read or edit a specific task.'
+    'IMPORTANT: list_tasks() truncates prompts. Always use get_task(name) when the user wants to read or edit a specific task. '
+    'EDITING: to change what a task does use edit_task_prompt(name, new_prompt); '
+    'to change when it runs use edit_task_when(name, new_when). '
+    'Do NOT call schedule() or schedule_recurring() on an existing task name — use the edit_* functions instead.'
 )
 
 __all__ = [
@@ -463,8 +469,11 @@ def _run():
                             # to preserve schedule alignment (e.g. always at :00).
                             # Cap to now so next_run is never in the past if
                             # dispatch exceeded the interval.
+                            # Use interval_seconds from the fresh disk load so that
+                            # edit_task_when() changes made during dispatch take effect.
+                            fresh_secs = t.get('interval_seconds') or interval_secs
                             prev_next = datetime.fromisoformat(t['next_run'])
-                            ideal = prev_next + timedelta(seconds=interval_secs)
+                            ideal = prev_next + timedelta(seconds=fresh_secs)
                             now_cmp = datetime.now(ideal.tzinfo) if ideal.tzinfo else datetime.now()
                             t['next_run'] = max(ideal, now_cmp).isoformat()
                     _save(tasks)
@@ -535,19 +544,24 @@ def schedule(name: str, when: str = None, prompt: str = None, *, every: str = No
     with _lock:
         tasks = _load()
         if name in tasks:
-            existing = tasks[name]
-            next_str = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
-            return (
-                f"⚠️  Task '{name}' already exists (next run: {next_str}, "
-                f"type: {existing['type']}). "
-                f"Use remove('{name}') first, or choose a different name."
-            )
+            return _duplicate_task_error(name, tasks[name])
         tasks[name] = task
         _save(tasks)
     _ensure_running()
     return (
         f"✅ Scheduled '{name}' to run once at "
         f"{run_at.strftime('%Y-%m-%d %H:%M')} ({_eta(run_at)})"
+    )
+
+
+def _duplicate_task_error(name: str, existing: dict) -> str:
+    """Return a helpful error when a task name already exists."""
+    next_str = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
+    return (
+        f"⚠️  Task '{name}' already exists (next run: {next_str}, type: {existing['type']}). "
+        f"To change what it does: edit_task_prompt('{name}', new_prompt). "
+        f"To change when it runs: edit_task_when('{name}', new_when). "
+        f"To replace it entirely: remove('{name}') then schedule a new one."
     )
 
 
@@ -616,13 +630,7 @@ def schedule_recurring(name: str, every: str = None, prompt: str = None, *, when
     with _lock:
         tasks = _load()
         if name in tasks:
-            existing = tasks[name]
-            next_existing = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
-            return (
-                f"⚠️  Task '{name}' already exists (next run: {next_existing}, "
-                f"type: {existing['type']}). "
-                f"Use remove('{name}') first, or choose a different name."
-            )
+            return _duplicate_task_error(name, tasks[name])
         tasks[name] = task
         _save(tasks)
     _ensure_running()
