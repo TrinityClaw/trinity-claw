@@ -863,7 +863,7 @@ def list_tabs() -> str:
         return f"❌ {e}"
 
 
-def screenshot(tab_index: int = 0) -> str:
+def screenshot(tab_index: int = 0, full_page: bool = False) -> str:
     """Take a screenshot of the specified tab.
     Returns the saved file path so you can use image_viewer.view_image() to inspect it.
     """
@@ -873,7 +873,11 @@ def screenshot(tab_index: int = 0) -> str:
         _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = _SCREENSHOT_DIR / f"session_{ts}.png"
-        page.screenshot(path=str(path), full_page=False)
+        try:
+            page.screenshot(path=str(path), full_page=full_page)
+        except TypeError:
+            # CDP-connected pages (user's Chrome) don't support full_page
+            page.screenshot(path=str(path))
         return (
             f"✅ Screenshot saved: {path}\n"
             f"Title : {page.title()}\n"
