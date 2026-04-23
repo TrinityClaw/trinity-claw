@@ -185,6 +185,8 @@ Call `web_builder.write_file("project-name", "index.html", HTML)`.
 
 For long pages, write HTML in **2 calls**: nav + first half of sections, then remaining sections + footer using `patch_file()`.
 
+**Completeness protocol:** Never truncate with `<!-- ... rest of sections -->`, `// TODO`, or "the pattern repeats". Every section must be written in full. If approaching output limits, stop at a clean section boundary and output: `[PAUSED — N of M sections complete. Send "continue" to resume from: next-section-name]`. The next response picks up exactly there without repeating prior output.
+
 After 3B returns ✅, proceed immediately to Phase 4 without pausing.
 
 ---
@@ -198,11 +200,34 @@ browser_session.scroll("bottom")
 browser_session.screenshot()           # screenshot B: footer
 ```
 
-Compare against your Phase 1 screenshots. For each section:
-- Does the layout match (col count, image position, text alignment)? ✅/❌
-- Does the background color match? ✅/❌
-- Do the fonts look right (serif vs sans, weight, size)? ✅/❌
-- Does the nav look right (color, position)? ✅/❌
+Compare against your Phase 1 screenshots. Check each category:
+
+**Layout & Structure**
+- Does section order match the source? ✅/❌
+- Does column count match per section (3-col, 2-col, single, etc.)? ✅/❌
+- Does image position match (left/right/background/above)? ✅/❌
+- Does the nav look right (bg color, position, sticky/static)? ✅/❌
+
+**Color & Surfaces**
+- Does each section's background color match? ✅/❌
+- Do button colors (bg + text) match? ✅/❌
+- Does the footer bg match? ✅/❌
+
+**Typography**
+- Do heading and body fonts match (serif vs sans, weight, size)? ✅/❌
+- Are heading sizes proportionate to the source? ✅/❌
+- Is text alignment correct per section? ✅/❌
+
+**Interactivity & States**
+- Do all nav links and buttons have hover states? ✅/❌
+- Are transitions smooth (not instant)? ✅/❌
+- Are focus rings visible on keyboard navigation? ✅/❌
+
+**Content**
+- Is all heading/body text from the source (no filler, no Lorem Ipsum)? ✅/❌
+- Do card counts match what was seen in Phase 1 screenshots? ✅/❌
+
+Fix priority order for any ❌: (1) font swap, (2) color/bg, (3) hover states, (4) layout/spacing, (5) component details.
 
 Fix any ❌ with `web_builder.patch_file()`. Re-screenshot to confirm.
 
