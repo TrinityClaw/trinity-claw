@@ -869,6 +869,35 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
                 preview += f"\n  ... [{len(content) - 800} more chars truncated]"
             lines.append(preview)
 
+    # ── Extract code snippets from all sources ────────────────────────────────
+    _code_blocks: List[str] = []
+    for _src in all_sources:
+        _c = _src.get("content") or ""
+        for _block in re.findall(r"```[\w]*\n(.*?)```", _c, re.DOTALL):
+            _block = _block.strip()
+            if _block and _block not in _code_blocks:
+                _code_blocks.append(_block)
+
+    _research_save_path = None
+    if _code_blocks:
+        lines += ["", "── Code Snippets ──────────────────────────────────────────"]
+        for _i, _blk in enumerate(_code_blocks, 1):
+            lines.append(f"\n[snippet {_i}]\n{_blk}")
+        try:
+            _research_dir = MEMORY_DIR / "research"
+            _research_dir.mkdir(parents=True, exist_ok=True)
+            _slug = re.sub(r"[^a-z0-9]+", "-", query.lower())[:50].strip("-")
+            _fname = f"{datetime.now().strftime('%Y-%m-%d')}-{_slug}.md"
+            _rpath = _research_dir / _fname
+            _rpath.write_text(
+                f"# Research snippets: {query}\n\n"
+                + "\n\n---\n\n".join(f"```\n{b}\n```" for b in _code_blocks),
+                encoding="utf-8",
+            )
+            _research_save_path = str(_rpath)
+        except Exception as _rse:
+            _research_save_path = f"(snippet save failed: {_rse})"
+
     lines += [
         "",
         "=" * 60,
@@ -888,19 +917,23 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
             save_path = f"(save failed: {e})"
 
     _log({
-        "timestamp":      timestamp,
-        "loop":           "research",
-        "outcome":        "RESEARCH",
-        "query":          query,
-        "depth":          depth,
-        "iterations":     len(iter_log),
-        "final_coverage": best_coverage,
-        "converged":      final_decision == "CONVERGED",
-        "sources_found":  len(all_sources),
-        "saved_as":       save_path,
+        "timestamp":        timestamp,
+        "loop":             "research",
+        "outcome":          "RESEARCH",
+        "query":            query,
+        "depth":            depth,
+        "iterations":       len(iter_log),
+        "final_coverage":   best_coverage,
+        "converged":        final_decision == "CONVERGED",
+        "sources_found":    len(all_sources),
+        "snippets_found":   len(_code_blocks),
+        "saved_as":         save_path,
+        "snippets_saved":   _research_save_path,
     })
 
     footer = f"\n💾 Saved to notes: \"{save_path}\"" if save_path else ""
+    if _research_save_path:
+        footer += f"\n📎 Code snippets ({len(_code_blocks)}): {_research_save_path}"
     return result_text + footer
 
 

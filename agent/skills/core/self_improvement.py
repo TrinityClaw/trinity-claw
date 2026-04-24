@@ -16,6 +16,7 @@ import os
 import re
 import json
 import hashlib
+import subprocess
 import requests as _requests
 from pathlib import Path
 from datetime import datetime
@@ -39,6 +40,8 @@ DOC = (
     "should_self_improve(threshold=3, window_days=7)→check if recurring failures in recent lessons warrant running autoimprove loops; "
     "returns {improve: bool, reason: str, patterns: list, suggested_loop: str}; "
     "call this at session start or after a task with errors to decide if autoimprove.run_loop() is warranted; "
+    "suggest_tests(skill_name)→generate a real pytest file at /app/memory/tests/test_<skill>.py, run it, and return pass/fail output; "
+    "run_tests(skill_name)→run an existing test file for the skill and return pytest output; "
     "report()→system-wide improvement summary with top recurring issues."
 )
 
@@ -786,54 +789,105 @@ def get_skill_health_report(skill_name: str) -> str:
     
     return "\n".join(lines)
 
+_TESTS_DIR = Path("/app/tests")
+
+
+def _generate_pytest_source(skill_name: str, skill_path: Path, functions: list) -> str:
+    """Build a runnable pytest file for the given public functions."""
+    lines = [
+        "import pytest",
+        "import importlib.util, sys",
+        "",
+        f'_SKILL_PATH = "{skill_path}"',
+        "",
+        "@pytest.fixture(scope='module')",
+        "def skill_mod():",
+        "    spec = importlib.util.spec_from_file_location('_skill', _SKILL_PATH)",
+        "    mod = importlib.util.module_from_spec(spec)",
+        "    spec.loader.exec_module(mod)",
+        "    return mod",
+        "",
+    ]
+    for func in functions:
+        fname = func.name
+        args = [a.arg for a in func.args.args if a.arg not in ("self", "cls")]
+        safe_name = re.sub(r"[^a-z0-9_]", "_", fname.lower())
+
+        lines += [
+            f"def test_{safe_name}_exists(skill_mod):",
+            f'    assert hasattr(skill_mod, "{fname}"), "{fname} missing from {skill_name}"',
+            "",
+            f"def test_{safe_name}_no_crash(skill_mod):",
+            f"    fn = getattr(skill_mod, '{fname}')",
+            "    try:",
+        ]
+        if args:
+            none_args = ", ".join("None" for _ in args)
+            lines.append(f"        fn({none_args})")
+        else:
+            lines.append("        fn()")
+        lines += [
+            "    except TypeError:",
+            "        pass  # expected — required args not satisfied",
+            "    except Exception as e:",
+            f'        pytest.fail(f"Unexpected exception in {fname}: {{e}}")',
+            "",
+        ]
+    return "\n".join(lines)
+
+
 def suggest_tests(skill_name: str = "") -> str:
-    """Suggest test cases based on the skill's functions."""
+    """Write a pytest file for the skill and run it, returning pass/fail results."""
     if not skill_name:
-        return "❌ suggest_tests() requires a skill_name argument. Usage: suggest_tests('my_skill')"
+        return "❌ suggest_tests() requires a skill_name argument."
     path = SKILLS_DIR / f"{skill_name}.py"
     if not path.exists():
         path = CORE_SKILLS_DIR / f"{skill_name}.py"
         if not path.exists():
             return f"❌ Skill '{skill_name}' not found"
-    
+
     try:
-        source = path.read_text(encoding='utf-8')
+        source = path.read_text(encoding="utf-8")
         tree = ast.parse(source)
     except (IOError, OSError, SyntaxError) as e:
-        return f"❌ Cannot parse skill for test suggestions: {e}"
-    
-    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and not node.name.startswith('_')]
-    
+        return f"❌ Cannot parse skill: {e}"
+
+    functions = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and not n.name.startswith("_")
+    ]
     if not functions:
-        return "No public functions found to test"
-    
-    tests = [f"🧪 Suggested Tests for {skill_name}:", "=" * 50]
-    
-    for func in functions:
-        args = [arg.arg for arg in func.args.args if arg.arg not in ('self', 'cls')]
-        try:
-            returns = ast.unparse(func.returns) if func.returns else "Any"
-        except AttributeError:
-            returns = "Any"
-        
-        tests.append(f"\nFunction: {func.name}({', '.join(args)}) -> {returns}")
-        tests.append(f"  Test 1: Happy path with valid inputs")
-        tests.append(f"  Test 2: Edge case: empty/None inputs")
-        tests.append(f"  Test 3: Error handling: invalid inputs")
-        
-        func_lower = func.name.lower()
-        if any(kw in func_lower for kw in ['fetch', 'request', 'get', 'post']):
-            tests.append(f"  Test 4: Timeout handling (mock slow response)")
-            tests.append(f"  Test 5: HTTP error codes (404, 500, 429)")
-        elif any(kw in func_lower for kw in ['parse', 'extract', 'load']):
-            tests.append(f"  Test 4: Malformed input handling")
-            tests.append(f"  Test 5: Unicode/special character handling")
-    
-    # FIX: Extract variable to avoid backslash in f-string
-    test_file_hint = f"test_{skill_name}.py"
-    tests.append(f"\n💡 Pro tip: Save tests in {SKILLS_DIR}/{test_file_hint}")
-    
-    return "\n".join(tests)
+        return f"⚠️ No public functions found in {skill_name}"
+
+    _TESTS_DIR.mkdir(parents=True, exist_ok=True)
+    test_file = _TESTS_DIR / f"test_{skill_name}.py"
+    test_src = _generate_pytest_source(skill_name, path, functions)
+    test_file.write_text(test_src, encoding="utf-8")
+
+    return run_tests(skill_name)
+
+
+def run_tests(skill_name: str) -> str:
+    """Run pytest for the skill's test file in /app/memory/tests/ and return results."""
+    test_file = _TESTS_DIR / f"test_{skill_name}.py"
+    if not test_file.exists():
+        return f"❌ No test file found at {test_file}. Run suggest_tests('{skill_name}') first."
+
+    try:
+        proc = subprocess.run(
+            ["python", "-m", "pytest", str(test_file), "-v", "--tb=short", "--no-header"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        passed = proc.returncode == 0
+        output = (proc.stdout + proc.stderr).strip()
+        status = "✅ PASSED" if passed else "❌ FAILED"
+        return f"🧪 Tests for {skill_name}: {status}\n{'-'*50}\n{output}"
+    except subprocess.TimeoutExpired:
+        return f"❌ Tests timed out after 60s for {skill_name}"
+    except Exception as e:
+        return f"❌ Could not run tests: {e}"
 
 def learn_from_feedback(skill_name: str, feedback: str, was_helpful: bool) -> str:
     """Learn from user feedback on suggestions."""
