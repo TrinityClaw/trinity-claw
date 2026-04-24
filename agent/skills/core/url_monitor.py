@@ -5,7 +5,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional
 
@@ -124,13 +124,15 @@ class UrlMonitor:
         conn.close()
 
     def setup_logging(self):
-        log_path = "/app/memory/url_monitor.log"
-        logging.basicConfig(
-            filename=log_path,
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
         self.logger = logging.getLogger('UrlMonitor')
+        if not self.logger.handlers:
+            handler = logging.FileHandler("/app/memory/url_monitor.log")
+            handler.setFormatter(logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            ))
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
+            self.logger.propagate = False
 
     def add_url(self, url: str, friendly_name: str = "", frequency_minutes: int = 60,
                 tags: List[str] = None, alert_on_changes: bool = True,
@@ -189,7 +191,15 @@ class UrlMonitor:
 
                 # Retry once on 429, honouring Retry-After (fix #12)
                 if status_code == 429:
-                    retry_after = min(int(resp_headers.get('Retry-After', '10')), 60)
+                    _ra = resp_headers.get('Retry-After', '10')
+                    try:
+                        retry_after = min(int(_ra), 60)
+                    except ValueError:
+                        try:
+                            _ra_dt = parsedate_to_datetime(_ra)
+                            retry_after = max(0, min(int((_ra_dt - datetime.now(timezone.utc)).total_seconds()), 60))
+                        except Exception:
+                            retry_after = 10
                     self.logger.info(f"429 on {url}, retrying after {retry_after}s")
                     await asyncio.sleep(retry_after)
                     status_code, resp_headers, content = await self._fetch(
@@ -384,15 +394,16 @@ class UrlMonitor:
         avg_response_time = cursor.fetchone()[0] or 0.0  # fix #16
 
         # MAX(id) as tiebreaker prevents duplicate rows when timestamps collide (fix #3)
+        # No time restriction so URLs with long check intervals still appear (fix #7)
         cursor.execute('''
             SELECT url_checks.url, url_checks.status_code,
                    url_checks.check_time, url_checks.error
             FROM url_checks
+            JOIN url_metadata ON url_metadata.url = url_checks.url
             WHERE url_checks.id IN (
-                SELECT MAX(id) FROM url_checks
-                WHERE check_time > datetime('now', '-1 day')
-                GROUP BY url
+                SELECT MAX(id) FROM url_checks GROUP BY url
             )
+              AND url_metadata.is_active = 1
         ''')
         latest_checks = cursor.fetchall()
         conn.close()
@@ -440,8 +451,15 @@ class UrlMonitor:
         return {"success": True, "message": f"Removed {url} from monitoring"}
 
 
-# Create global instance
-url_monitor_instance = UrlMonitor()
+# Lazy singleton — instantiated on first use so import never fails
+_url_monitor_instance: Optional[UrlMonitor] = None
+
+
+def _get_instance() -> UrlMonitor:
+    global _url_monitor_instance
+    if _url_monitor_instance is None:
+        _url_monitor_instance = UrlMonitor()
+    return _url_monitor_instance
 
 
 # ── Skill interface functions ─────────────────────────────────────────────────
@@ -452,7 +470,7 @@ def add_url(url: str, friendly_name: str = "", frequency_minutes: int = 60,
     """Add a new URL to monitor."""
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
-    return url_monitor_instance.add_url(
+    return _get_instance().add_url(
         url, friendly_name, frequency_minutes, tags, alert_on_changes,
         frequency=frequency, verify_ssl=verify_ssl,
     )
@@ -460,21 +478,21 @@ def add_url(url: str, friendly_name: str = "", frequency_minutes: int = 60,
 
 def get_status_summary() -> Dict:
     try:
-        return url_monitor_instance.get_status_summary()
+        return _get_instance().get_status_summary()
     except Exception as e:
         return {"error": str(e)}
 
 
 def get_url_history(url: str, limit: int = 10) -> List[Dict]:
     try:
-        return url_monitor_instance.get_url_history(url, int(limit))
+        return _get_instance().get_url_history(url, int(limit))
     except Exception as e:
         return [{"error": str(e)}]
 
 
 def get_recent_changes(limit: int = 10) -> List[Dict]:
     try:
-        return url_monitor_instance.get_recent_changes(int(limit))
+        return _get_instance().get_recent_changes(int(limit))
     except Exception as e:
         return [{"error": str(e)}]
 
@@ -482,7 +500,7 @@ def get_recent_changes(limit: int = 10) -> List[Dict]:
 def list_urls() -> str:
     """List all monitored URLs with their latest status. Preferred over get_status_summary."""
     try:
-        conn = sqlite3.connect(url_monitor_instance.db_path)
+        conn = sqlite3.connect(_get_instance().db_path)
         cursor = conn.cursor()
         # CTE avoids correlated per-row subquery; index on (url, check_time) makes it fast (fix #4)
         cursor.execute('''
@@ -495,6 +513,7 @@ def list_urls() -> str:
             FROM url_metadata m
             LEFT JOIN latest l ON l.url = m.url
             LEFT JOIN url_checks c ON c.id = l.max_id
+            WHERE m.is_active = 1
             ORDER BY m.created_at DESC
         ''')
         rows = cursor.fetchall()
@@ -528,26 +547,38 @@ def list_urls() -> str:
 
 
 async def check_all_urls() -> List[Dict]:
-    return await url_monitor_instance.check_all_urls()
+    return await _get_instance().check_all_urls()
 
 
 def remove_url(url: str) -> Dict:
-    return url_monitor_instance.remove_url(url)
+    return _get_instance().remove_url(url)
 
 
 def check_url_now(url: str) -> Dict:
     """Check a single URL immediately."""
     async def _check():
-        status = await url_monitor_instance.check_url(url)
+        inst = _get_instance()
+        status = await inst.check_url(url)
+        change_detected = inst.save_check_result(status)
         return {
             "url": url,
             "status_code": status.status_code,
             "response_time": status.response_time,
             "content_length": status.content_length,
             "content_hash": status.content_hash,
+            "change_detected": change_detected,
             "error": status.error,
         }
 
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _check()).result()
     return asyncio.run(_check())
 
 
@@ -555,7 +586,8 @@ def check_url_now(url: str) -> Dict:
 # Lightweight SQLite key/value store for deduplication in scheduler-driven
 # Twitter automation. Stored in url_monitor.db (twitter_state table).
 
-_TW_DB = url_monitor_instance.db_path
+def _tw_db() -> str:
+    return _get_instance().db_path
 
 
 def tw_is_seen(key: str, max_age_days: int = None) -> bool:
@@ -570,7 +602,7 @@ def tw_is_seen(key: str, max_age_days: int = None) -> bool:
           browser_session.like_tweet(tweet_url)
           url_monitor.tw_mark_seen(tweet_url, "liked")
     """
-    conn = sqlite3.connect(_TW_DB)
+    conn = sqlite3.connect(_tw_db())
     c = conn.cursor()
     if max_age_days is not None:
         cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
@@ -590,7 +622,7 @@ def tw_mark_seen(key: str, value: str = "done") -> str:
 
     Returns confirmation string.
     """
-    conn = sqlite3.connect(_TW_DB)
+    conn = sqlite3.connect(_tw_db())
     c = conn.cursor()
     c.execute(
         "INSERT OR REPLACE INTO twitter_state (key, value, logged_at) VALUES (?, ?, ?)",
@@ -610,7 +642,7 @@ def tw_last_tweet_time() -> str:
       if not last or (datetime.now() - datetime.fromisoformat(last)).total_seconds() >= 8*3600:
           # post a tweet
     """
-    conn = sqlite3.connect(_TW_DB)
+    conn = sqlite3.connect(_tw_db())
     c = conn.cursor()
     c.execute("SELECT value FROM twitter_state WHERE key = 'last_tweet_time'")
     row = c.fetchone()
@@ -626,7 +658,7 @@ def tw_log_tweet() -> str:
     """
     now = datetime.now().isoformat()
     try:
-        conn = sqlite3.connect(_TW_DB)
+        conn = sqlite3.connect(_tw_db())
         c = conn.cursor()
         c.execute(
             "INSERT OR REPLACE INTO twitter_state (key, value, logged_at) VALUES (?, ?, ?)",
@@ -647,7 +679,7 @@ def tw_prune(max_age_days: int = 90) -> str:
     """
     cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
     try:
-        conn = sqlite3.connect(_TW_DB)
+        conn = sqlite3.connect(_tw_db())
         c = conn.cursor()
         c.execute(
             "DELETE FROM twitter_state WHERE key != 'last_tweet_time' AND logged_at < ?",
