@@ -190,6 +190,7 @@ def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied
 # ── ChromaDB semantic indexing for lessons ─────────────────────────────────────
 
 _CHROMA_HOST        = os.getenv("CHROMA_HOST", "chroma")
+_CHROMA_PORT        = int(os.getenv("CHROMA_PORT", "8000"))
 _LESSONS_COLLECTION = "lessons_semantic"
 
 
@@ -197,7 +198,7 @@ def _get_lessons_collection():
     """Return the ChromaDB lessons collection, or None if ChromaDB is unavailable."""
     try:
         import chromadb
-        client = chromadb.HttpClient(host=_CHROMA_HOST, port=8000)
+        client = chromadb.HttpClient(host=_CHROMA_HOST, port=_CHROMA_PORT)
         return client.get_or_create_collection(name=_LESSONS_COLLECTION)
     except Exception:
         return None
@@ -463,8 +464,13 @@ class CodeAnalyzer(ast.NodeVisitor):
 
         self.generic_visit(node)
     
-    # Paths that are intentional Docker/container architecture — not bugs
-    _DOCKER_PATH_PREFIXES = ("/app/",)
+    # Paths that are intentional Docker/container architecture or well-known system dirs — not bugs
+    _DOCKER_PATH_PREFIXES = (
+        "/app/",
+        "/tmp/", "/var/", "/etc/", "/usr/", "/opt/",
+        "/home/", "/root/", "/proc/", "/sys/", "/dev/",
+        "/run/", "/srv/", "/mnt/", "/media/",
+    )
 
     def visit_Constant(self, node: ast.Constant) -> None:
         """Flag string constants that look like hardcoded absolute file paths."""
@@ -913,8 +919,17 @@ def _verdict_check(skill_name: str, source: str) -> str:
     - PASS = traced execution returns expected result
     """
     if len(source) > 8000:
-        cut = source.rfind('\n', 0, 8000)
-        cut = cut if cut != -1 else 8000
+        # Seek back to the nearest function/class definition boundary so the
+        # LLM receives complete function bodies rather than truncated ones.
+        cut = -1
+        for boundary in ('\ndef ', '\nasync def ', '\nclass '):
+            pos = source.rfind(boundary, 0, 8000)
+            if pos != -1 and pos > cut:
+                cut = pos
+        if cut == -1:
+            cut = source.rfind('\n', 0, 8000)
+        if cut == -1:
+            cut = 8000
         source_preview = source[:cut] + "\n... [truncated]"
     else:
         source_preview = source
@@ -1156,14 +1171,16 @@ def daily_review(skill_name: str = "") -> str:
     if skill_name:
         targets = [skill_name]
     else:
-        for p in sorted(SKILLS_DIR.glob("*.py")):
-            if not p.name.startswith("_"):
-                targets.append(p.stem)
-        if not targets:
-            # Fall back to core if dynamic dir is empty
-            for p in sorted(CORE_SKILLS_DIR.glob("*.py")):
+        if SKILLS_DIR.exists():
+            for p in sorted(SKILLS_DIR.glob("*.py")):
                 if not p.name.startswith("_"):
                     targets.append(p.stem)
+        if not targets:
+            # Fall back to core if dynamic dir is missing or empty
+            if CORE_SKILLS_DIR.exists():
+                for p in sorted(CORE_SKILLS_DIR.glob("*.py")):
+                    if not p.name.startswith("_"):
+                        targets.append(p.stem)
 
     if not targets:
         return "⚠️ No skills found to review."
@@ -1426,6 +1443,8 @@ __all__ = [
     "search_lessons_semantic",
     "index_all_lessons",
     # Lower-level functions callable by agents
+    "check_lessons",
+    "check_for_learned_fix",
     "record_mistake",
     "generate_patch",
     "apply_patch",
