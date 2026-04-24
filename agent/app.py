@@ -1862,7 +1862,26 @@ def execute_skill_tags(response_text: str) -> tuple:
                     error_msg = "[‚ùå Error: The model provided a placeholder instead of the actual skill code. This usually happens when the request is too large or the API times out. Try asking for a simpler version first.]"
                     execution_log.append({"skill": skill_name, "function": func_name, "status": "placeholder_error", "error": error_msg})
                     return error_msg
-                    
+
+                # Design gate: non-trivial new skills require an approved spec
+                _dyn_path = Path("/app/skills/dynamic") / filename
+                if not _dyn_path.exists() and len(code) > 300:
+                    _designs_dir = Path("/app/memory/designs")
+                    _slug = re.sub(r"[^a-z0-9]", "", filename.replace(".py", "").lower())
+                    _spec_found = any(
+                        _slug in re.sub(r"[^a-z0-9]", "", f.stem.lower())
+                        for f in _designs_dir.glob("*.md")
+                    ) if _designs_dir.exists() else False
+                    if not _spec_found:
+                        error_msg = (
+                            f"[‚ùå Design gate: no approved spec found for '{filename}'. "
+                            f"Run autoimprove__design with the task description, pick an approach, "
+                            f"then autoimprove__write_spec to create the spec. "
+                            f"(Gate skipped for: updates to existing dynamic skills, or code <300 chars.)]"
+                        )
+                        execution_log.append({"skill": skill_name, "function": func_name, "status": "design_gate_blocked"})
+                        return error_msg
+
                 args = [filename, code]
                 kwargs = {}
             else:
@@ -3515,6 +3534,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop ‚Ä
                 })
 
         all_execution_logs = []
+        _task_start_time = time.time()
         ai_reply = ""
         # Holds the design brief JSON after analyze_design_folder runs so it can
         # be injected into the very next continuation message (keeping it fresh
@@ -4095,13 +4115,19 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop ‚Ä
                     _req_message, _ai_reply_snap,
                     task_type=task_type, session_id=_req_session_id
                 )
+                _skills_used = [log["skill"] for log in _exec_logs_snap if log.get("skill")]
+                _had_error   = any(log.get("status") in ("error", "exception", "not_found", "parse_error", "placeholder_error") for log in _exec_logs_snap)
                 save_to_jsonl(
                     _req_message, _ai_reply_snap,
                     session_id=_req_session_id,
                     metadata={
-                        "model": _req_model,
+                        "model":         _req_model,
+                        "task_type":     task_type,
+                        "success":       not _had_error,
+                        "duration_s":    round(time.time() - _task_start_time, 2),
+                        "tools_used":    len(_skills_used),
                         "execution_log": _exec_logs_snap,
-                        "skills_used": [log["skill"] for log in _exec_logs_snap if log.get("skill")],
+                        "skills_used":   _skills_used,
                     },
                 )
             except Exception as _e:
