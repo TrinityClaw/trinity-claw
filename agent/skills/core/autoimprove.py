@@ -68,6 +68,7 @@ SKILLS_CORE_DIR    = Path("/app/skills/core")
 MEMORY_DIR         = Path("/app/memory")
 IMPROVE_LOG        = MEMORY_DIR / "improvement_log.jsonl"
 SUGGESTIONS_FILE   = MEMORY_DIR / "core_suggestions.jsonl"
+UNAPPLY_BACKUP_DIR = MEMORY_DIR / "unapply_backups"
 PATTERNS_FILE      = MEMORY_DIR / "error_patterns.json"
 LESSONS_FILE       = MEMORY_DIR / "lessons.jsonl"
 PROPOSALS_FILE     = MEMORY_DIR / "lesson_proposals.jsonl"
@@ -1075,11 +1076,32 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
     # the fix didn't hold — flag it so the false-positive rate stays visible in report().
     _regressed = _check_prior_improved(skill_name, issue_type)
 
+    # Disk backup — mirrors apply_suggestion's crash-safety pattern.
+    # A stale .bak means a previous run crashed mid-experiment; restore from it
+    # before retrying so we never operate on a partially-patched file.
+    backup_path = skill_path.with_suffix(".py.bak")
+    if backup_path.exists():
+        try:
+            stale_original = backup_path.read_text(encoding="utf-8")
+            skill_path.write_text(stale_original, encoding="utf-8")
+            backup_path.unlink(missing_ok=True)
+            original_code = stale_original
+        except Exception as e:
+            return (
+                f"REVERTED: found stale backup {backup_path.name} from a previous crashed run "
+                f"but could not restore it — {e}. Inspect manually before retrying."
+            )
+    try:
+        backup_path.write_text(original_code, encoding="utf-8")
+    except Exception as e:
+        return f"REVERTED: cannot write backup for {skill_name}.py — {e}"
+
     # 3. Apply patch
     try:
         si.fix(skill_name, issue_type, "all")
     except Exception as fix_exc:
         skill_path.write_text(original_code, encoding="utf-8")
+        backup_path.unlink(missing_ok=True)
         _log({
             "timestamp": timestamp, "skill": skill_name, "issue_type": issue_type,
             "outcome": "REVERTED", "before_score": before_score, "after_score": None,
@@ -1091,6 +1113,7 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
     after = si.analyze_skill_code(skill_name)
     if after.get("error"):
         skill_path.write_text(original_code, encoding="utf-8")
+        backup_path.unlink(missing_ok=True)
         _log({
             "timestamp": timestamp, "skill": skill_name, "issue_type": issue_type,
             "outcome": "REVERTED", "before_score": before_score, "after_score": None,
@@ -1109,13 +1132,16 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
 
     if not test_passed:
         skill_path.write_text(original_code, encoding="utf-8")
+        backup_path.unlink(missing_ok=True)
         outcome = "REVERTED"
         reason  = f"runtime test failed: {test_detail}"
     elif issues_fixed > 0:
+        backup_path.unlink(missing_ok=True)
         outcome = "IMPROVED"
         reason  = f"score {before_score}→{after_score}, fixed {issues_fixed}/{len(target_issues)} issues"
     else:
         skill_path.write_text(original_code, encoding="utf-8")
+        backup_path.unlink(missing_ok=True)
         outcome = "NO_CHANGE"
         reason  = f"score unchanged at {before_score}, no issues reduced"
 
@@ -1502,12 +1528,19 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
         })
         return f"❌ FAILED: runtime test failed — core file restored\n{test_detail[:200]}"
 
-    # Success
+    # Success — persist original code to a dedicated file so the JSONL doesn't grow
+    # with full file contents on every applied suggestion.
     backup_path.unlink(missing_ok=True)
     issues_fixed = match.get("occurrences", "?")
-    suggestions[match_idx]["status"]        = "applied"
-    suggestions[match_idx]["applied_at"]    = timestamp
-    suggestions[match_idx]["original_code"] = original_code  # stored for unapply_suggestion()
+    unapply_bak  = UNAPPLY_BACKUP_DIR / f"{skill_name}__{issue_type}.py"
+    try:
+        UNAPPLY_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        unapply_bak.write_text(original_code, encoding="utf-8")
+        suggestions[match_idx]["original_code_path"] = str(unapply_bak)
+    except Exception:
+        suggestions[match_idx]["original_code"] = original_code  # fallback if write fails
+    suggestions[match_idx]["status"]     = "applied"
+    suggestions[match_idx]["applied_at"] = timestamp
     _save_suggestions(suggestions)
 
     # MAD confidence — same scoring as run_experiment so report() stats include core fixes
@@ -1589,7 +1622,14 @@ def unapply_suggestion(skill_name: str, issue_type: str) -> str:
             f"Applied suggestions: {applied or 'none'}"
         )
 
-    original_code = match.get("original_code")
+    bak_path_str = match.get("original_code_path")
+    if bak_path_str:
+        try:
+            original_code = Path(bak_path_str).read_text(encoding="utf-8")
+        except Exception as e:
+            return f"❌ Cannot read backup file {bak_path_str}: {e}"
+    else:
+        original_code = match.get("original_code")
     if not original_code:
         return (
             f"❌ No original_code stored for {skill_name} [{issue_type}] — "
@@ -1607,6 +1647,11 @@ def unapply_suggestion(skill_name: str, issue_type: str) -> str:
     suggestions[match_idx]["status"]      = "reverted"
     suggestions[match_idx]["reverted_at"] = timestamp
     _save_suggestions(suggestions)
+    if bak_path_str:
+        try:
+            Path(bak_path_str).unlink(missing_ok=True)
+        except Exception:
+            pass
     _log({
         "timestamp":  timestamp,
         "skill":      skill_name,
@@ -2008,7 +2053,10 @@ def _loop_daily_review() -> str:
     except ImportError as e:
         return f"❌ {e}"
 
-    review = si.daily_review()
+    try:
+        review = si.daily_review()
+    except AttributeError:
+        return "❌ self_improvement.daily_review() not found — skill may need updating"
 
     # Prune stale inferred patterns and low-confidence preferences from user model
     prune_note = ""
@@ -2618,7 +2666,15 @@ def report(days=7) -> str:
             avg_delta = sum(period_deltas) / len(period_deltas)
             lines.append(f"  Avg score delta     : +{avg_delta:.1f} pts")
     else:
-        lines.append(f"  Confidence          : — (need {MAD_MIN_SAMPLES}+ IMPROVED experiments for MAD baseline)")
+        # Distinguish: experiments exist but were logged before the confidence field
+        # was added to the schema (confidence: None) vs. genuinely no data yet.
+        if improved > 0:
+            lines.append(
+                f"  Confidence          : — (this window's {improved} IMPROVED "
+                "entr(y/ies) predate the confidence field — new runs will populate it)"
+            )
+        else:
+            lines.append(f"  Confidence          : — (need {MAD_MIN_SAMPLES}+ IMPROVED experiments for MAD baseline)")
 
     if skill_wins:
         lines.append("")
