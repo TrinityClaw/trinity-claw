@@ -38,12 +38,13 @@ DOC = (
     "Drop files into /app/memory/knowledge/ then call ingest_folder() to index them. "
     "Functions: "
     "ingest_folder(folder_path?)→parse & chunk all new/changed docs into ChromaDB, auto-generates LLM summary per doc; "
-    "ingest_file(path)→ingest a single file; "
-    "search(query, n_results?)→semantic search over business documents; "
+    "ingest_file(path, chunk_size?)→ingest a single file, optional custom chunk size in characters (default 800); "
+    "search(query, n_results?, project?)→semantic search, optionally scoped to a project folder; n_results 1-500; "
     "get_summary(filename)→retrieve the stored LLM summary for an ingested document; "
     "list_ingested()→show all indexed documents with chunk/word counts; "
     "delete_document(filename)→remove a document and its chunks from the index; "
     "prune_stale(days=90, dry_run=True)→list (or remove) index entries not re-ingested within N days; dry_run=True just lists them, dry_run=False deletes from index and ChromaDB; "
+    "export_index(path?)→export all indexed chunks to a JSONL file; "
     "status()→show collection stats and ChromaDB health."
 )
 
@@ -141,14 +142,14 @@ def _summarize_text(text: str, filename: str) -> str:
 
 # ── Chunking ──────────────────────────────────────────────────────────────────
 
-def _chunk_text(text: str, rel_path: str, project: str) -> list:
+def _chunk_text(text: str, rel_path: str, project: str, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = _CHUNK_OVERLAP) -> list:
     """Split text into overlapping chunks. Returns list of (chunk_text, metadata)."""
     chunks = []
     start  = 0
     idx    = 0
     filename = Path(rel_path).name
     while start < len(text):
-        end   = start + _CHUNK_SIZE
+        end   = start + chunk_size
         chunk = text[start:end]
         if chunk.strip():
             chunks.append((chunk, {
@@ -159,14 +160,14 @@ def _chunk_text(text: str, rel_path: str, project: str) -> list:
                 "source":      f"{rel_path}#chunk{idx}",
             }))
             idx += 1
-        start = end - _CHUNK_OVERLAP
+        start = end - chunk_overlap
         if start >= len(text):
             break
     return chunks
 
 # ── Core ingestion logic ───────────────────────────────────────────────────────
 
-def _ingest_one(path: Path, col, index: dict) -> str:
+def _ingest_one(path: Path, col, index: dict, chunk_size: int = _CHUNK_SIZE) -> str:
     """Chunk a single file and upsert its chunks into ChromaDB. Returns a status line."""
     # Use path relative to knowledge dir as the unique key — avoids same-name collisions
     try:
@@ -190,7 +191,10 @@ def _ingest_one(path: Path, col, index: dict) -> str:
         except Exception as e:
             return f"  ❌ {rel_path} — ChromaDB delete of old chunks failed, aborting re-ingest: {e}"
 
-    text = _extract_text(path)
+    try:
+        text = _extract_text(path)
+    except Exception as e:
+        return f"  ❌ {rel_path} — extraction raised: {e}"
     if "[" in text[:20] and "error" in text.lower():
         return f"  ❌ {rel_path} — extraction failed: {text[:120]}"
 
@@ -198,7 +202,7 @@ def _ingest_one(path: Path, col, index: dict) -> str:
     if word_count < 5:
         return f"  ⚠️  {rel_path} — too short to index ({word_count} words)"
 
-    chunks = _chunk_text(text, rel_path, project)
+    chunks = _chunk_text(text, rel_path, project, chunk_size)
     if not chunks:
         return f"  ⚠️  {rel_path} — no chunks produced"
 
@@ -291,7 +295,8 @@ def ingest_file(*args) -> str:
     """
     Ingest a single file into the business knowledge base.
     Path can be absolute or relative to /app/memory/knowledge/.
-    Usage: ingest_file('report.pdf')  or  ingest_file('/app/memory/knowledge/report.pdf')
+    Optional second arg sets chunk size in characters (default 800).
+    Usage: ingest_file('report.pdf')  or  ingest_file('report.pdf', 1200)
     """
     if not args:
         return "❌ Usage: ingest_file(path)"
@@ -307,32 +312,49 @@ def ingest_file(*args) -> str:
     except RuntimeError as e:
         return f"❌ {e}"
 
+    chunk_size = int(args[1]) if len(args) > 1 else _CHUNK_SIZE
     index  = _load_index()
-    result = _ingest_one(path, col, index)
+    result = _ingest_one(path, col, index, chunk_size)
     _save_index(index)
     return result
+
+
+def _highlight(text: str, query: str) -> str:
+    """Wrap query terms (>2 chars) in ** for visibility."""
+    import re
+    terms = [re.escape(t) for t in query.split() if len(t) > 2]
+    if not terms:
+        return text
+    return re.compile("|".join(terms), re.IGNORECASE).sub(
+        lambda m: f"**{m.group()}**", text
+    )
 
 
 def search(*args) -> str:
     """
     Semantic search over all ingested business documents.
     Returns the most relevant chunks with source filenames and relevance scores.
-    Usage: search(query)  or  search(query, n_results)
-    Default n_results: 5
+    Usage: search(query)  or  search(query, n_results)  or  search(query, n_results, project)
+    n_results: 1-500, default 5.  project: optional folder name to scope results.
     """
     if not args:
-        return "❌ Usage: search(query)  or  search(query, 10)"
+        return "❌ Usage: search(query)  or  search(query, 10)  or  search(query, 5, 'my-project')"
 
-    query = str(args[0]).strip()
-    n     = int(args[1]) if len(args) > 1 else 5
+    query   = str(args[0]).strip()
+    n       = int(args[1]) if len(args) > 1 else 5
+    project = str(args[2]).strip() if len(args) > 2 else None
+
+    if n < 1 or n > 500:
+        return f"❌ n_results must be between 1 and 500 (got {n})"
 
     try:
         col = _get_collection()
     except RuntimeError as e:
         return f"❌ {e}"
 
+    where = {"project": project} if project else None
     try:
-        results = col.query(query_texts=[query], n_results=n)
+        results = col.query(query_texts=[query], n_results=n, where=where)
     except Exception as e:
         return f"❌ ChromaDB query error: {e}"
 
@@ -341,14 +363,16 @@ def search(*args) -> str:
     distances = results.get("distances",  [[]])[0]
 
     if not docs:
-        return f"🔍 No results for: '{query}'\nHave you run ingest_folder() yet?"
+        scope = f" in project '{project}'" if project else ""
+        return f"🔍 No results for: '{query}'{scope}\nHave you run ingest_folder() yet?"
 
-    lines = [f"🔍 Top {len(docs)} results for: '{query}'\n"]
+    scope_label = f" [project: {project}]" if project else ""
+    lines = [f"🔍 Top {len(docs)} results for: '{query}'{scope_label}\n"]
     for i, (doc, meta, dist) in enumerate(zip(docs, metas, distances), 1):
         filename = meta.get("filename", "unknown")
         chunk    = meta.get("chunk_index", "?")
         score    = round(1 - dist, 3) if dist is not None else "?"
-        preview  = doc[:400].replace("\n", " ")
+        preview  = _highlight(doc[:400].replace("\n", " "), query)
         lines.append(
             f"[{i}] {filename} (chunk {chunk}, relevance {score})\n"
             f"    {preview}{'…' if len(doc) > 400 else ''}\n"
@@ -410,14 +434,19 @@ def delete_document(*args) -> str:
         return f"❌ '{given}' not in index. Use list_ingested() to see what's indexed."
 
     try:
-        col = _get_collection()
+        col    = _get_collection()
+        before = col.count()
         col.delete(where={"rel_path": rel_path})
+        after  = col.count()
     except Exception as e:
         return f"❌ ChromaDB delete error: {e}"
 
     del index[rel_path]
     _save_index(index)
-    return f"✅ Removed '{rel_path}' from the business knowledge base."
+    deleted = before - after
+    if deleted == 0:
+        return f"⚠️ '{rel_path}' removed from index but no chunks were found in ChromaDB."
+    return f"✅ Removed '{rel_path}' from the business knowledge base ({deleted} chunks deleted)."
 
 
 def get_summary(*args) -> str:
@@ -474,6 +503,8 @@ def schedule_nightly_kb(run_time: str = "2am") -> str:
         sched = _il.import_module("scheduler")
     except ImportError:
         return "❌ scheduler skill not available — cannot schedule nightly KB ingest."
+    except Exception as e:
+        return f"❌ scheduler skill failed to load: {e}"
 
     prompt = (
         "Auto-ingest any new or changed documents in /app/memory/knowledge/. "
@@ -550,26 +581,19 @@ def prune_stale(days: int = 90, dry_run: bool = True) -> str:
     except RuntimeError as e:
         return f"❌ ChromaDB unavailable — index not modified: {e}"
 
-    removed = 0
-    errors  = []
-    for rel_path, _ in stale:
-        try:
-            col.delete(where={"rel_path": rel_path})
-        except Exception as e:
-            errors.append(f"  ChromaDB delete failed for {rel_path}: {e}")
-            continue  # don't remove from index if ChromaDB delete failed
+    rel_paths = [rp for rp, _ in stale]
+    try:
+        col.delete(where={"rel_path": {"$in": rel_paths}})
+    except Exception as e:
+        return f"❌ ChromaDB bulk delete failed — index not modified: {e}"
+
+    for rel_path in rel_paths:
         if rel_path in index:
             del index[rel_path]
-            removed += 1
 
     _save_index(index)
-
-    lines.append(f"\n✅ Removed {removed}/{len(stale)} stale entries from index and ChromaDB.")
+    lines.append(f"\n✅ Removed {len(stale)} stale entr{'y' if len(stale) == 1 else 'ies'} from index and ChromaDB.")
     lines.append("Call ingest_folder() to re-ingest them with fresh content.")
-    if errors:
-        lines.append("⚠️ ChromaDB errors (index was still updated):")
-        lines.extend(errors)
-
     return "\n".join(lines)
 
 
@@ -599,3 +623,41 @@ def status(*args) -> str:
         lines.append(f"  Chunks    : {total_chunks:,}")
 
     return "\n".join(lines)
+
+
+def export_index(*args) -> str:
+    """
+    Export all indexed chunks from ChromaDB to a JSONL file (one chunk per line).
+    Usage: export_index()  or  export_index('/path/to/output.jsonl')
+    Default output: /app/memory/knowledge/export_<timestamp>.jsonl
+    """
+    import time
+
+    out_path = Path(str(args[0]).strip()) if args else _KNOWLEDGE_DIR / f"export_{int(time.time())}.jsonl"
+
+    index = _load_index()
+    if not index:
+        return "📭 Nothing to export — index is empty."
+
+    try:
+        col     = _get_collection()
+        results = col.get(include=["documents", "metadatas"])
+    except RuntimeError as e:
+        return f"❌ {e}"
+    except Exception as e:
+        return f"❌ ChromaDB get error: {e}"
+
+    ids   = results.get("ids",       [])
+    docs  = results.get("documents", [])
+    metas = results.get("metadatas", [])
+
+    if not ids:
+        return "📭 ChromaDB collection is empty — nothing to export."
+
+    lines = []
+    for id_, doc, meta in zip(ids, docs, metas):
+        lines.append(json.dumps({"id": id_, "text": doc, **(meta or {})}, ensure_ascii=False))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return f"✅ Exported {len(lines)} chunks to {out_path}"
