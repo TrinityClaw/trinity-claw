@@ -118,9 +118,15 @@ TRINITY_API_KEY=$trinityKey
   $envContent | Out-File -FilePath ".env" -Encoding utf8
 
   # Create litellm_config.yaml
+  if (-not (Test-Path "config")) { New-Item -ItemType Directory -Path "config" | Out-Null }
   $litellmContent = @"
 model_list:
   - model_name: trinity-default
+    litellm_params:
+      model: $model
+      api_base: $apiBase
+
+  - model_name: trinity-vision
     litellm_params:
       model: $model
       api_base: $apiBase

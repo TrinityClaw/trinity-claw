@@ -198,7 +198,7 @@ if [ "$model_source" = "local" ]; then
         fi
 
         echo "   📥 Pulling qwen3.5:9b (~6.6GB, this may take several minutes)..."
-        ollama pull qwen3.5:9b
+        ollama pull qwen3.5:9b || { echo "   ❌ Failed to pull qwen3.5:9b. Check your internet and try again."; exit 1; }
 
         if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
             echo "   🚀 Starting Ollama service..."
@@ -228,6 +228,11 @@ EOF
     cat > config/litellm_config.yaml << EOF
 model_list:
   - model_name: trinity-default
+    litellm_params:
+      model: ollama/qwen3.5:9b
+      api_base: ${OLLAMA_API_BASE}
+
+  - model_name: trinity-vision
     litellm_params:
       model: ollama/qwen3.5:9b
       api_base: ${OLLAMA_API_BASE}
