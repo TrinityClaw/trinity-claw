@@ -58,9 +58,11 @@ def _is_sensitive(p: Path) -> bool:
 
 
 def _read_path(path: str) -> Path:
-    """Resolve path; reads are allowed anywhere inside the container except sensitive files."""
+    """Resolve path; reads are confined to /app except for sensitive files."""
     p = Path(path) if Path(path).is_absolute() else _APP / path
     resolved = p.resolve()
+    if not resolved.is_relative_to(_APP.resolve()):
+        raise PermissionError(f"🔒 Access denied: path escapes /app: {path}")
     if _is_sensitive(resolved):
         raise PermissionError(f"🔒 Access denied: '{resolved.name}' is a protected credential file.")
     return resolved
@@ -85,7 +87,7 @@ def ls(path: str = "/app") -> str:
         if not p.exists():
             return f"Not found: {path}"
         items = sorted(p.iterdir())
-        lines = [f"{p} ({len(items)} items):"]
+        lines = [f"{path} ({len(items)} items):"]
         for item in items:
             lines.append(f"  {'[D]' if item.is_dir() else '[F]'} {item.name}")
         return "\n".join(lines)
@@ -94,27 +96,33 @@ def ls(path: str = "/app") -> str:
 
 
 def list_images(path: str = "/app/memory") -> str:
-    """List image files in a directory with their sizes."""
+    """List image files in a directory (recursively) with their sizes."""
     import mimetypes
     try:
         p = _read_path(path)
         if not p.exists():
             return f"Not found: {path}"
         images = []
-        for f in sorted(p.iterdir()):
+        for f in sorted(p.rglob("*")):
             if f.is_file():
                 mime, _ = mimetypes.guess_type(f.name)
                 if (mime and mime.startswith("image/")) or f.suffix.lower() in _IMAGE_EXTENSIONS:
-                    images.append(f"  {f.name}  ({f.stat().st_size / 1024 / 1024:.2f} MB)")
+                    images.append(f"  {f.relative_to(p)}  ({f.stat().st_size / 1024 / 1024:.2f} MB)")
         return "\n".join(images) if images else "No image files found."
     except Exception as e:
         return f"Error: {e}"
 
 
+_MAX_READ_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
 def cat(path: str) -> str:
-    """Read and return file contents"""
+    """Read and return file contents (max 10 MB)"""
     try:
-        return _read_path(path).read_text(encoding="utf-8")
+        p = _read_path(path)
+        if p.stat().st_size > _MAX_READ_SIZE:
+            return f"❌ File too large to read: {p.stat().st_size / 1024 / 1024:.1f} MB (limit 10 MB)"
+        return p.read_text(encoding="utf-8")
     except Exception as e:
         return f"Error: {e}"
 
@@ -142,10 +150,13 @@ def size(path: str) -> str:
 
 
 def sha256(path: str) -> str:
-    """Return SHA-256 hash of a file"""
+    """Return SHA-256 hash of a file (streamed, no size limit)"""
     try:
+        p = _read_path(path)
         h = hashlib.sha256()
-        h.update(_read_path(path).read_bytes())
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
         return h.hexdigest()
     except Exception as e:
         return f"Error: {e}"
@@ -162,8 +173,6 @@ def write(path: str = None, content: str = None, *, name: str = None) -> str:
         return "Error: write() requires a 'path' argument"
     if content is None:
         return "Error: write() requires a 'content' argument"
-    if content == "":
-        return "Error: write() requires non-empty content"
     try:
         p = _write_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -185,8 +194,16 @@ def append(path: str, content: str) -> str:
     try:
         p = _write_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(content)
+        existing = p.read_text(encoding="utf-8") if p.exists() else ""
+        updated = existing + content
+        with tempfile.NamedTemporaryFile("w", dir=p.parent, encoding="utf-8", delete=False, suffix=".tmp") as tf:
+            tf.write(updated)
+            tmp = Path(tf.name)
+        try:
+            tmp.replace(p)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         return f"✅ Appended to {p}"
     except Exception as e:
         return f"Error: {e}"
@@ -260,12 +277,15 @@ def mkdir(path: str) -> str:
 
 
 def delete(path: str) -> str:
-    """Delete a file within allowed write roots"""
+    """Delete a file or directory within allowed write roots"""
     try:
         p = _write_path(path)
         if not p.exists():
             return f"Not found: {path}"
-        p.unlink()
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
         return f"✅ Deleted: {path}"
     except Exception as e:
         return f"Error: {e}"
@@ -391,11 +411,17 @@ def restore(checkpoint_id: str) -> str:
         # Enforce write-root safety on restore target
         dest = _write_path(original_path)
 
-        # Find the backed-up file/dir (everything in checkpoint_dir except manifest.json)
-        contents = [p for p in checkpoint_dir.iterdir() if p.name != "manifest.json"]
-        if not contents:
-            return f"❌ Checkpoint directory is empty: {checkpoint_id}"
-        src = contents[0]
+        # Find the backed-up file/dir using the original filename from the manifest
+        original_name = Path(original_path).name
+        src = checkpoint_dir / original_name
+        if not src.exists():
+            # Fallback: pick the sole non-manifest entry if name changed
+            contents = [p for p in checkpoint_dir.iterdir() if p.name != "manifest.json"]
+            if not contents:
+                return f"❌ Checkpoint directory is empty: {checkpoint_id}"
+            if len(contents) > 1:
+                return f"❌ Ambiguous checkpoint contents (expected 1 entry, found {len(contents)}): {checkpoint_id}"
+            src = contents[0]
 
         if dest.exists():
             if dest.is_dir():
@@ -421,8 +447,8 @@ def restore(checkpoint_id: str) -> str:
         return f"❌ Restore failed: {e}"
 
 
-def checkpoints() -> str:
-    """List all saved checkpoints with their labels, dates, and source paths."""
+def checkpoints(limit: int = 50) -> str:
+    """List saved checkpoints with their labels, dates, and source paths (newest first, default limit 50)."""
     try:
         if not _CHECKPOINT_ROOT.exists():
             return "No checkpoints found."
@@ -433,6 +459,9 @@ def checkpoints() -> str:
         )
         if not entries:
             return "No checkpoints found."
+
+        total = len(entries)
+        entries = entries[:limit]
 
         lines = [f"{'ID':<30}  {'Created':<20}  {'Label':<25}  Source"]
         lines.append("─" * 100)
@@ -449,6 +478,8 @@ def checkpoints() -> str:
             except Exception:
                 lines.append(f"{entry.name:<30}  (unreadable manifest)")
 
+        if total > limit:
+            lines.append(f"\n  (showing {limit} of {total} — pass limit=N to see more)")
         return "\n".join(lines)
     except Exception as e:
         return f"❌ Could not list checkpoints: {e}"
