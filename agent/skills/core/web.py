@@ -23,6 +23,7 @@ __all__ = [
     "browser_wait", "browser_new_tab", "browser_close_tab", "browser_back", "browser_forward",
     "browser_refresh",
     "browser_scroll", "browser_hover", "browser_press", "browser_links", "browser_inputs",
+    "browser_wait_navigation", "browser_upload",
     "browser_close", "browser_status",
 ]
 
@@ -159,7 +160,7 @@ def _bw_ensure_loop() -> asyncio.AbstractEventLoop:
     return _bw_loop
 
 
-def _bw_run(coro, timeout: int = 30) -> Any:
+def _bw_run(coro, timeout: int = SKILL_TIMEOUT) -> Any:
     """Submit an async coroutine to the background loop and block for result."""
     if not HAS_PLAYWRIGHT:
         raise RuntimeError(
@@ -651,6 +652,7 @@ def _search_tavily(query: str, n: int) -> str:
         return "❌ TAVILY_API_KEY not set"
 
     try:
+        _apply_rate_limit("tavily")
         live = _is_time_sensitive(query)
         payload = {
             "api_key": api_key,
@@ -809,9 +811,11 @@ def _search_bing(query: str, n: int) -> str:
         )
         
         if response.status_code == 429:
+            _record_error("bing")
             return "❌ Bing rate limit"
-        
+
         response.raise_for_status()
+        _record_success("bing")
         
         if HAS_BS4:
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -1026,7 +1030,10 @@ def find_and_download_image(query: str, save_as: str = "") -> str:
     if result.startswith("❌"):
         return result
 
-    local_path = f"/app/memory/{save_as}"
+    # Parse the actual saved path from download()'s return string so we
+    # always report the real filename even if download() sanitized it.
+    path_match = re.search(r"Downloaded: (.+?) \(", result)
+    local_path = path_match.group(1) if path_match else f"/app/memory/{save_as}"
     return f"✅ Image ready at: {local_path}\nSource: {direct_url}\n{result}"
 
 
@@ -1103,7 +1110,7 @@ async def _bw_async_launch(headless: bool = True, slow_mo: int = 0) -> Dict:
     return {"ok": True, "msg": f"Browser launched (headless={headless})"}
 
 
-async def _bw_async_goto(url: str, wait_until: str = "networkidle", timeout: int = 30000) -> Dict:
+async def _bw_async_goto(url: str, wait_until: str = "domcontentloaded", timeout: int = 30000) -> Dict:
     """Navigate the browser page to url, launching the browser first if needed."""
     global _bw_page
     if _bw_page is None:
@@ -1199,12 +1206,13 @@ async def _bw_async_wait_for(selector: str, state: str = "visible", timeout: int
 
 async def _bw_async_new_tab(url: str = "") -> Dict:
     """Open a new browser tab, optionally navigating to url, and make it the active page."""
-    global _bw_page
+    global _bw_page, _bw_screenshot_count
     if _bw_context is None:
         return {"ok": False, "error": "Browser not launched. Call browser_launch() or browser_goto() first."}
     _bw_page = await _bw_context.new_page()
     if url:
-        await _bw_page.goto(url, wait_until="networkidle")
+        _bw_screenshot_count = 0  # new navigation — reset screenshot cap
+        await _bw_page.goto(url, wait_until="domcontentloaded")
     return {"ok": True, "url": _bw_page.url, "title": await _bw_page.title()}
 
 
@@ -1243,6 +1251,14 @@ async def _bw_async_refresh(wait_until: str = "domcontentloaded") -> Dict:
     return {"ok": True, "url": _bw_page.url, "title": await _bw_page.title()}
 
 
+async def _bw_async_wait_navigation(wait_until: str = "domcontentloaded", timeout: int = 30000) -> Dict:
+    """Wait for a navigation triggered by a prior action (e.g. form submit, link click)."""
+    if _bw_page is None:
+        return {"ok": False, "error": "No page open."}
+    await _bw_page.wait_for_load_state(wait_until, timeout=timeout)
+    return {"ok": True, "url": _bw_page.url, "title": await _bw_page.title()}
+
+
 async def _bw_async_scroll(x: int = 0, y: int = 500) -> Dict:
     """Scroll the current page by (x, y) pixels using window.scrollBy."""
     if _bw_page is None:
@@ -1265,6 +1281,16 @@ async def _bw_async_press(key: str) -> Dict:
         return {"ok": False, "error": "No page open."}
     await _bw_page.keyboard.press(key)
     return {"ok": True, "pressed": key}
+
+
+async def _bw_async_upload(selector: str, file_path: str) -> Dict:
+    """Set a file on a <input type='file'> element identified by selector."""
+    if _bw_page is None:
+        return {"ok": False, "error": "No page open."}
+    if not os.path.exists(file_path):
+        return {"ok": False, "error": f"File not found: {file_path}"}
+    await _bw_page.set_input_files(selector, file_path)
+    return {"ok": True, "uploaded": file_path, "into": selector}
 
 
 async def _bw_async_get_links() -> Dict:
@@ -1360,8 +1386,7 @@ def browser_goto(url: str, wait_until: str = "domcontentloaded", timeout: int = 
 def browser_screenshot(path: str = "", full_page: bool = False) -> Dict:
     """
     Screenshot the current page. Requires browser_goto() to have been called first.
-    Saves to /app/memory/screenshots/<timestamp>.png by default — do NOT pass a path
-    inside /app/memory/ directly (that folder is for JSON data files, not images).
+    Saves to /app/memory/screenshots/<timestamp>.png by default.
     full_page=True captures the ENTIRE scrollable page in ONE call — no need to scroll
     and call this multiple times. Limit: 3 screenshots per navigation maximum.
     Returns: {ok, saved_to, size_kb} — base64 is omitted to keep output concise.
@@ -1483,6 +1508,21 @@ def browser_refresh(wait_until: str = "domcontentloaded") -> Dict:
     return _bw_run(_bw_async_refresh(wait_until=wait_until))
 
 
+def browser_wait_navigation(wait_until: str = "domcontentloaded", timeout: int = 30000) -> Dict:
+    """
+    Wait for a navigation to complete after an action that triggers a page load
+    (e.g. browser_click on a submit button or link).
+    wait_until: 'domcontentloaded' (default) | 'load' | 'networkidle'
+    timeout: milliseconds (default 30000).
+    Returns: {ok, url, title}
+    """
+    global _bw_screenshot_count
+    result = _bw_run(_bw_async_wait_navigation(wait_until=wait_until, timeout=timeout), timeout=timeout // 1000 + 5)
+    if isinstance(result, dict) and result.get("ok"):
+        _bw_screenshot_count = 0  # new page — reset screenshot cap
+    return result
+
+
 def browser_scroll(x: int = 0, y: int = 500) -> Dict:
     """
     Scroll the page by (x, y) pixels.
@@ -1519,6 +1559,16 @@ def browser_inputs() -> Dict:
     Returns: {ok, inputs: [{tag, type, name, id, placeholder, value, text}], count}
     """
     return _bw_run(_bw_async_get_inputs())
+
+
+def browser_upload(selector: str, file_path: str) -> Dict:
+    """
+    Upload a file via a <input type='file'> element.
+    selector: CSS selector for the file input (e.g. 'input[type="file"]', '#avatar-upload')
+    file_path: Absolute local path to the file to upload (e.g. '/app/memory/image.jpg')
+    Returns: {ok, uploaded, into}
+    """
+    return _bw_run(_bw_async_upload(selector, file_path))
 
 
 def browser_close() -> Dict:
@@ -1561,12 +1611,15 @@ def parse_feed(url: str, limit: int = 10) -> str:
         if not _is_valid_url(url):
             return f"❌ Invalid URL: {url}"
 
+        _apply_rate_limit("http")
         headers = {
             "User-Agent": _get_random_user_agent(),
             "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
         }
-        resp = requests.get(url, headers=headers, timeout=15)
+        session = _get_session()
+        resp = session.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
+        _record_success("http")
 
         root = ET.fromstring(resp.content)
 
