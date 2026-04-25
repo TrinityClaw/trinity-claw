@@ -20,8 +20,9 @@ DOC = (
     'get_task(name)→FULL task details including complete prompt — use this when user asks to see or edit a task, '
     'edit_task_prompt(name, new_prompt)→replace a task\'s prompt without changing its schedule, '
     'edit_task_when(name, new_when)→change WHEN a task runs (once: new time expression; recurring: new interval or calendar spec), '
+    'run_now(name)→immediately fire a task (bypasses schedule; once tasks are NOT deleted), '
     'remove(name), clear(), status(), stop()→halt the scheduler thread, '
-    'parse_preview(when)→preview a time expression without scheduling, '
+    'parse_preview(when)→preview a time/interval expression without scheduling (works for both one-time and recurring specs), '
     'help_schedule()→full usage docs, '
     'get_activity_log(hours=24), '
     'get_task_report(name, limit=50)→full result history for one task. '
@@ -33,7 +34,7 @@ DOC = (
 
 __all__ = [
     "schedule", "schedule_recurring", "remove", "list_tasks",
-    "get_task", "edit_task_prompt", "edit_task_when", "clear", "status", "stop",
+    "get_task", "edit_task_prompt", "edit_task_when", "run_now", "clear", "status", "stop",
     "get_activity_log", "get_task_report", "parse_preview", "help_schedule",
 ]
 
@@ -499,10 +500,11 @@ _ensure_running()
 
 def stop():
     """Stop the background scheduler thread (for clean shutdown or tests)."""
-    global _running
+    global _running, _thread
     _running = False
     if _thread is not None:
         _thread.join(timeout=35)  # wait up to one loop tick + buffer
+        _thread = None
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -556,7 +558,10 @@ def schedule(name: str, when: str = None, prompt: str = None, *, every: str = No
 
 def _duplicate_task_error(name: str, existing: dict) -> str:
     """Return a helpful error when a task name already exists."""
-    next_str = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
+    try:
+        next_str = datetime.fromisoformat(existing['next_run']).strftime('%Y-%m-%d %H:%M')
+    except (ValueError, KeyError):
+        next_str = "unknown"
     return (
         f"⚠️  Task '{name}' already exists (next run: {next_str}, type: {existing['type']}). "
         f"To change what it does: edit_task_prompt('{name}', new_prompt). "
@@ -657,7 +662,12 @@ def list_tasks() -> str:
 
     lines = [f"📅 Scheduled tasks ({len(tasks)}):"]
     for name, t in tasks.items():
-        next_run    = datetime.fromisoformat(t['next_run'])
+        try:
+            next_run = datetime.fromisoformat(t['next_run'])
+            next_str = f"{next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)})"
+        except (ValueError, KeyError):
+            next_str = "⚠️ invalid next_run"
+            next_run = None
         kind        = "🔁 recurring" if t['type'] == 'recurring' else "1️⃣  once"
         ivl         = f" {_recur_label(t)}" if t['type'] == 'recurring' else ""
         last_result = t.get('last_result', '')
@@ -665,7 +675,7 @@ def list_tasks() -> str:
         last_run_str = f"  last run: {t['last_run']} {last_ok} {last_result[:80]}\n" if last_result else ""
         lines.append(
             f"\n  {kind}{ivl} | {name}\n"
-            f"  next: {next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)}) | "
+            f"  next: {next_str} | "
             f"runs so far: {t.get('run_count', 0)}\n"
             f"{last_run_str}"
             f"  prompt: \"{t['prompt'][:80]}{'...' if len(t['prompt']) >= 80 else ''}\""
@@ -681,14 +691,18 @@ def get_task(name: str) -> str:
     if name not in tasks:
         return f"❌ Task '{name}' not found. Use list_tasks() to see available tasks."
     t = tasks[name]
-    next_run    = datetime.fromisoformat(t['next_run'])
+    try:
+        next_run = datetime.fromisoformat(t['next_run'])
+        next_str = f"{next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)})"
+    except (ValueError, KeyError):
+        next_str = "⚠️ invalid next_run — use edit_task_when() to fix"
     kind        = "recurring" if t['type'] == 'recurring' else "once"
     ivl         = f" {_recur_label(t)}" if t['type'] == 'recurring' else ""
     last_result = t.get('last_result', 'never run yet')
     lines = [
         f"📋 Task: {name}",
         f"  Type:      {kind}{ivl}",
-        f"  Next run:  {next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)})",
+        f"  Next run:  {next_str}",
         f"  Run count: {t.get('run_count', 0)}",
         f"  Last run:  {t.get('last_run', 'never')}",
         f"  Last result: {last_result}",
@@ -728,7 +742,10 @@ def edit_task_when(name: str, new_when: str) -> str:
         if name not in tasks:
             return f"❌ Task '{name}' not found. Use list_tasks() to see available tasks."
         t = tasks[name]
-        old_next = datetime.fromisoformat(t['next_run']).strftime('%Y-%m-%d %H:%M')
+        try:
+            old_next = datetime.fromisoformat(t['next_run']).strftime('%Y-%m-%d %H:%M')
+        except (ValueError, KeyError):
+            old_next = "unknown"
 
         if t['type'] == 'once':
             try:
@@ -780,6 +797,41 @@ def edit_task_when(name: str, new_when: str) -> str:
             f"{next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)})\n"
             f"  (was: {old_next})"
         )
+
+
+def run_now(name: str) -> str:
+    """Immediately fire a scheduled task by name, regardless of its next_run time.
+    The task is NOT deleted after firing — its schedule is preserved exactly as-is.
+    Use this to test a task or force an out-of-band execution."""
+    with _lock:
+        tasks = _load()
+        if name not in tasks:
+            return f"❌ Task '{name}' not found. Use list_tasks() to see available tasks."
+        prompt = tasks[name]['prompt']
+        if name in _firing_tasks:
+            return f"⚠️ Task '{name}' is already running. Try again after it completes."
+        _firing_tasks.add(name)
+
+    try:
+        fired_at = datetime.now()
+        print(f"[scheduler] run_now: {name}")
+        result = _dispatch(prompt, name)
+    except Exception as e:
+        result = f"❌ dispatch exception: {e}"
+    finally:
+        with _lock:
+            _firing_tasks.discard(name)
+
+    with _lock:
+        tasks = _load()
+        if name in tasks:
+            tasks[name]['last_run']    = fired_at.isoformat()
+            tasks[name]['last_result'] = result[:300]
+            tasks[name]['run_count']   = tasks[name].get('run_count', 0) + 1
+            _save(tasks)
+    _append_activity(f"scheduler:{name}", prompt, result)
+    icon = "✅" if not result.startswith("❌") else "❌"
+    return f"{icon} run_now '{name}' fired at {fired_at.strftime('%H:%M:%S')} → {result[:200]}"
 
 
 def clear() -> str:
@@ -886,17 +938,37 @@ def help_schedule() -> str:
         "Other functions: list_tasks(), "
         "get_task(name), edit_task_prompt(name, new_prompt), "
         "edit_task_when(name, new_when) — change when a task runs without touching its prompt, "
+        "run_now(name) — immediately fire a task without affecting its schedule, "
         "remove(name), clear(), status(), stop(), "
-        "parse_preview(when) — preview what a time expression resolves to, "
+        "parse_preview(when) — preview what a time or recurring expression resolves to, "
         "get_activity_log(hours=24), get_task_report(name, limit=50)"
     )
 
 
 def parse_preview(when: str) -> str:
     """
-    Preview what a time expression resolves to without scheduling anything.
-    Useful to verify before committing: parse_preview('next monday at 9am')
+    Preview what a time or recurrence expression resolves to without scheduling anything.
+    Works for both one-time ('in 2h', 'tomorrow at 9am') and recurring specs ('every monday at 9am', '2h').
     """
+    s = when.strip().lower()
+    # Try recurring spec first if it looks like an interval/recurring pattern
+    if s.startswith('every') or re.match(r'\d+(?:\.\d+)?\s*' + _UNIT_PATTERN, s):
+        try:
+            spec = _parse_recurring_spec(when)
+            if spec['kind'] == 'calendar':
+                next_run = _next_calendar_run(spec['weekdays'], spec['hour'], spec['minute'])
+                return (
+                    f"🔁 '{when}' → recurring {spec['label']}\n"
+                    f"   next occurrence: {next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)})"
+                )
+            else:
+                next_run = datetime.now() + timedelta(seconds=spec['seconds'])
+                return (
+                    f"🔁 '{when}' → recurring every {_human_interval(spec['seconds'])}\n"
+                    f"   first run: {next_run.strftime('%Y-%m-%d %H:%M')} ({_eta(next_run)})"
+                )
+        except ValueError:
+            pass  # fall through to one-time parse
     try:
         dt = _parse_when(when)
         now = datetime.now()
