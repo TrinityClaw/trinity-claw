@@ -1,26 +1,25 @@
 import json
 import logging
-import fcntl
 import sqlite3
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
-from contextlib import contextmanager
 
 # Ensure this directory is on sys.path so the private store modules are importable
 _CORE_DIR = str(Path(__file__).parent)
 if _CORE_DIR not in sys.path:
     sys.path.insert(0, _CORE_DIR)
 
+from _store_utils import _trunc, _file_lock, _atomic_write
 from _user_model_store import (
     set_preference, get_preference, get_preference_history,
-    set_context, record_pattern, add_rejection,
+    set_context, delete_context, record_pattern, add_rejection,
     update_user_model, get_user_model, get_context_for_prompt, prune_user_model,
     set_user_fact, get_user_facts_card, get_fact_history,
-    add_goal, complete_goal, list_goals, get_goals_for_prompt,
+    add_goal, complete_goal, cancel_goal, list_goals, get_goals_for_prompt,
 )
 from _journal_store import (
-    write_daily_entry, get_journal, get_today, compress_journal, end_day,
+    write_daily_entry, get_journal, get_today, get_archive, compress_journal, end_day,
 )
 
 # Explicit re-exports: the skill loader resolves functions via getattr() at
@@ -39,9 +38,11 @@ __all__ = [
     "update_user_model", "get_user_model", "get_context_for_prompt", "prune_user_model",
     "set_user_fact", "get_user_facts_card", "get_fact_history",
     # goal tracking (re-exported from _user_model_store)
-    "add_goal", "complete_goal", "list_goals", "get_goals_for_prompt",
+    "add_goal", "complete_goal", "cancel_goal", "list_goals", "get_goals_for_prompt",
+    # context management (re-exported from _user_model_store)
+    "delete_context",
     # journal (re-exported from _journal_store)
-    "write_daily_entry", "get_journal", "get_today", "compress_journal", "end_day",
+    "write_daily_entry", "get_journal", "get_today", "get_archive", "compress_journal", "end_day",
 ]
 
 NAME = "notes"
@@ -67,6 +68,7 @@ DOC = (
     "set_preference(key, value, source?, confidence?)→set a named user preference; source: user|inferred|system, confidence 0.0-1.0; "
     "get_preference(key, default?)→retrieve a single preference value; "
     "set_context(key, value)→update current working context (e.g. project, focus, deadline); "
+    "delete_context(key)→remove a key from the current working context; "
     "record_pattern(pattern, evidence?, action?)→add or increment a behavioral pattern Trinity has observed; "
     "add_rejection(idea, reason?)→record a dismissed idea so Trinity never suggests it again; "
     "get_context_for_prompt()→compact user model summary for injection into system prompt — call at session start; "
@@ -79,9 +81,11 @@ DOC = (
     "get_user_facts_card()→return compact user fact card with source and valid_from metadata; "
     "get_fact_history(key)→return full timeline of a user fact — current value plus all archived previous values with validity windows; "
     "get_preference_history(key)→return full timeline of a preference — current plus archived previous values; "
+    "get_archive(days=30)→return full original journal entries from the archive for the last N days (entries that were compressed out of the active journal); "
     "compress_journal(days_old=15)→compress journal entries older than N days: archives originals to daily_journal_archive.jsonl and replaces them with summary-only stubs to reduce token load; called automatically by end_day(); "
     "add_goal(goal, due_date?, context?)→track a user goal or objective; due_date is optional ISO date e.g. '2026-04-30'; "
     "complete_goal(goal_text)→mark a goal as completed by case-insensitive substring match; "
+    "cancel_goal(goal_text)→mark a goal as cancelled (abandoned/invalid) by case-insensitive substring match; "
     "list_goals(status?)→show goals filtered by status ('open' or 'completed', default 'open'); "
     "get_goals_for_prompt()→compact active goal list for system prompt injection."
 )
@@ -174,32 +178,9 @@ MAX_TAG_LEN = 50
 MAX_TAGS    = 20
 
 
-def _trunc(s, n: int) -> str:
-    return str(s)[:n]
-
-
 def _clean_tags(raw: str) -> list:
     tags = [_trunc(t.strip(), MAX_TAG_LEN) for t in raw.split(",") if t.strip()]
     return tags[:MAX_TAGS]
-
-
-@contextmanager
-def _file_lock(path: Path):
-    lock_path = path.with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
-
-
-def _atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding=encoding)
-    tmp.replace(path)
 
 
 # ── Notes ──────────────────────────────────────────────────────────────────────

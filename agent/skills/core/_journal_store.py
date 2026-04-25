@@ -6,37 +6,14 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime, date, timedelta
-from contextlib import contextmanager
-import fcntl
+
+from _store_utils import _trunc, _file_lock, _atomic_write
 
 logger = logging.getLogger(__name__)
 
 JOURNAL_FILE         = Path("/app/memory/daily_journal.jsonl")
 JOURNAL_ARCHIVE_FILE = Path("/app/memory/daily_journal_archive.jsonl")
 _ACTIVITY_LOG        = Path("/app/memory/activity_log.jsonl")
-
-
-def _trunc(s, n: int) -> str:
-    return str(s)[:n]
-
-
-@contextmanager
-def _file_lock(path: Path):
-    lock_path = path.with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
-
-
-def _atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding=encoding)
-    tmp.replace(path)
 
 
 # ── Journal ────────────────────────────────────────────────────────────────────
@@ -174,6 +151,47 @@ def get_today() -> str:
         return "\n".join(parts)
     except Exception as e:
         return f"❌ Error reading today's entry: {e}"
+
+
+def get_archive(days: int = 30) -> str:
+    """Return compressed/archived journal entries for the last N days, newest first.
+    These are full originals that were compressed out of the active journal."""
+    try:
+        try:
+            days = int(str(days).strip())
+        except (ValueError, TypeError):
+            days = 30
+        if not JOURNAL_ARCHIVE_FILE.exists():
+            return "No archived journal entries found."
+        cutoff  = (date.today() - timedelta(days=days)).isoformat()
+        entries = {}
+        for line in JOURNAL_ARCHIVE_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                d = e.get("date", "")
+                if d >= cutoff:
+                    entries[d] = e
+            except Exception:
+                continue
+        if not entries:
+            return f"No archived entries in the last {days} days."
+        result = []
+        for e in sorted(entries.values(), key=lambda x: x["date"], reverse=True):
+            result.append(f"=== {e['date']} [archived] ===")
+            result.append(f"Summary: {e.get('summary', '')}")
+            if e.get("learned"):
+                result.append(f"Learned: {e['learned']}")
+            if e.get("user_insights"):
+                result.append(f"User insights: {e['user_insights']}")
+            if e.get("next_steps"):
+                result.append(f"Next steps: {e['next_steps']}")
+            result.append("")
+        return "\n".join(result).strip()
+    except Exception as e:
+        return f"❌ Error reading archive: {e}"
 
 
 def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:

@@ -6,8 +6,8 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime, date, timedelta
-from contextlib import contextmanager
-import fcntl
+
+from _store_utils import _trunc, _file_lock, _atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -21,29 +21,6 @@ MAX_VALUE_LEN = 2_000
 MAX_INSIGHT   = 1_000
 MAX_PATTERN   = 500
 MAX_REJECTION = 500
-
-
-def _trunc(s, n: int) -> str:
-    return str(s)[:n]
-
-
-@contextmanager
-def _file_lock(path: Path):
-    lock_path = path.with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
-
-
-def _atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding=encoding)
-    tmp.replace(path)
 
 
 # ── User Model ─────────────────────────────────────────────────────────────────
@@ -85,7 +62,7 @@ def _save_user_model(model: dict) -> None:
 
 def set_preference(key: str, value, source: str = "user", confidence: float = 1.0, episode_id: str = "") -> str:
     try:
-        key   = _trunc(key, MAX_KEY_LEN)
+        key   = _trunc(key.strip().lower(), MAX_KEY_LEN)
         value = _trunc(value, MAX_VALUE_LEN)
         with _file_lock(USER_MODEL_FILE):
             model = _load_user_model()
@@ -102,8 +79,9 @@ def set_preference(key: str, value, source: str = "user", confidence: float = 1.
                     "archived_at": datetime.now().isoformat(),
                 }
                 USER_PREFS_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-                with USER_PREFS_HISTORY_FILE.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(archived) + "\n")
+                with _file_lock(USER_PREFS_HISTORY_FILE):
+                    with USER_PREFS_HISTORY_FILE.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(archived) + "\n")
             model["preferences"][key] = {
                 "value":      value,
                 "confidence": round(float(confidence), 2),
@@ -121,7 +99,7 @@ def set_preference(key: str, value, source: str = "user", confidence: float = 1.
 
 def get_preference(key: str, default=None):
     try:
-        pref = _load_user_model()["preferences"].get(key)
+        pref = _load_user_model()["preferences"].get(key.strip().lower())
         return pref["value"] if pref else default
     except Exception:
         return default
@@ -129,6 +107,7 @@ def get_preference(key: str, default=None):
 
 def get_preference_history(key: str) -> str:
     try:
+        key   = key.strip().lower()
         lines = [f"📜 Preference history: '{key}'"]
         model   = _load_user_model()
         current = model.get("preferences", {}).get(key)
@@ -325,8 +304,9 @@ def get_context_for_prompt() -> str:
 
         open_goals = [g for g in model.get("goals", []) if g.get("status") == "open"]
         if open_goals:
+            open_goals.sort(key=lambda g: (g.get("due_date") is None, g.get("due_date") or ""))
             parts = []
-            for g in open_goals[-5:]:
+            for g in open_goals[:5]:
                 due = f" (due {g['due_date']})" if g.get("due_date") else ""
                 parts.append(g["goal"] + due)
             lines.append("Active goals: " + "; ".join(parts))
@@ -339,10 +319,12 @@ def get_context_for_prompt() -> str:
 
 def prune_user_model(days_old: int = 30) -> str:
     try:
-        days_old = int(days_old)
-        cutoff   = (datetime.now() - timedelta(days=days_old)).isoformat()
+        days_old   = int(days_old)
+        cutoff     = (datetime.now() - timedelta(days=days_old)).isoformat()
+        cutoff_day = cutoff[:10]
         with _file_lock(USER_MODEL_FILE):
             model    = _load_user_model()
+
             before_p = len(model.get("patterns", []))
             model["patterns"] = [
                 p for p in model.get("patterns", [])
@@ -359,8 +341,25 @@ def prune_user_model(days_old: int = 30) -> str:
                     del model["preferences"][key]
                     pruned_pref += 1
 
+            before_i = len(model.get("insights", []))
+            model["insights"] = [
+                i for i in model.get("insights", [])
+                if i.get("date", "") >= cutoff_day
+            ]
+            pruned_i = before_i - len(model["insights"])
+
+            before_r = len(model.get("rejections", []))
+            model["rejections"] = [
+                r for r in model.get("rejections", [])
+                if r.get("dismissed_at", "") >= cutoff_day
+            ]
+            pruned_r = before_r - len(model["rejections"])
+
             _save_user_model(model)
-        return f"🧹 Pruned: {pruned_p} stale patterns, {pruned_pref} low-confidence preferences"
+        return (
+            f"🧹 Pruned: {pruned_p} stale patterns, {pruned_pref} low-confidence preferences, "
+            f"{pruned_i} old insights, {pruned_r} old rejections"
+        )
     except Exception as e:
         return f"❌ prune_user_model error: {e}"
 
@@ -398,8 +397,9 @@ def set_user_fact(key: str, value: str, source: str = "user", episode_id: str = 
                     "archived_at": datetime.now().isoformat(),
                 }
                 USER_FACTS_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-                with USER_FACTS_HISTORY_FILE.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(archived) + "\n")
+                with _file_lock(USER_FACTS_HISTORY_FILE):
+                    with USER_FACTS_HISTORY_FILE.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(archived) + "\n")
 
             facts[k] = {
                 "value":      value,
@@ -536,6 +536,43 @@ def complete_goal(goal_text: str) -> str:
         return f"❌ complete_goal error: {e}"
 
 
+def cancel_goal(goal_text: str) -> str:
+    """Mark a goal as cancelled. Matches by case-insensitive substring."""
+    try:
+        needle = goal_text.strip().lower()
+        with _file_lock(USER_MODEL_FILE):
+            model   = _load_user_model()
+            open_gs = [g for g in model.get("goals", []) if g.get("status") == "open"]
+            matches = [g for g in open_gs if needle in g["goal"].lower()]
+            if not matches:
+                return f"❌ No open goal matching '{goal_text}'"
+            if len(matches) > 1:
+                opts = "; ".join(m["goal"] for m in matches)
+                return f"❌ Ambiguous — multiple matches: {opts}"
+            matches[0]["status"]       = "cancelled"
+            matches[0]["completed_at"] = datetime.now().isoformat()
+            _save_user_model(model)
+        return f"🚫 Goal cancelled: '{matches[0]['goal']}'"
+    except Exception as e:
+        return f"❌ cancel_goal error: {e}"
+
+
+def delete_context(key: str) -> str:
+    """Remove a key from the current working context."""
+    try:
+        key = _trunc(key.strip(), MAX_KEY_LEN)
+        with _file_lock(USER_MODEL_FILE):
+            model = _load_user_model()
+            ctx   = model.setdefault("context", {})
+            if key not in ctx:
+                return f"❌ Context key '{key}' not found"
+            del ctx[key]
+            _save_user_model(model)
+        return f"✅ Context key '{key}' removed"
+    except Exception as e:
+        return f"❌ delete_context error: {e}"
+
+
 def list_goals(status: str = "open") -> str:
     """List goals filtered by status ('open' or 'completed'). Default: open."""
     try:
@@ -563,8 +600,9 @@ def get_goals_for_prompt() -> str:
         open_goals = [g for g in model.get("goals", []) if g.get("status") == "open"]
         if not open_goals:
             return ""
+        open_goals.sort(key=lambda g: (g.get("due_date") is None, g.get("due_date") or ""))
         parts = []
-        for g in open_goals[-5:]:
+        for g in open_goals[:5]:
             due = f" (due {g['due_date']})" if g.get("due_date") else ""
             parts.append(g["goal"] + due)
         return "Active goals: " + "; ".join(parts)
