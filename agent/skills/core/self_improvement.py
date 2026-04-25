@@ -159,7 +159,15 @@ def _load_error_patterns() -> Dict:
         except (IOError, OSError):
             pass
 
-    # Populate cache before returning
+    # Write recomputed counts back so autoimprove's direct file readers stay in sync.
+    try:
+        PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(PATTERNS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(patterns, f, indent=2)
+    except (IOError, OSError):
+        pass
+
+    # Populate cache after writing so the cached mtime matches the file we just wrote.
     try:
         _patterns_cache["patterns_mtime"] = PATTERNS_FILE.stat().st_mtime if PATTERNS_FILE.exists() else None
         _patterns_cache["lessons_mtime"] = LESSONS_FILE.stat().st_mtime if LESSONS_FILE.exists() else None
@@ -548,7 +556,7 @@ def analyze_skill_code(skill_name: str) -> Dict:
     health = max(0, 100 - penalty)
     
     for issue in analyzer.issues:
-        learned_fix = check_for_learned_fix(skill_name, issue["type"])
+        learned_fix = check_for_learned_fix(skill_name, issue["type"], skill_path=str(path))
         if learned_fix:
             issue["learned_fix"] = learned_fix
             issue["auto_applicable"] = True
@@ -789,7 +797,7 @@ def get_skill_health_report(skill_name: str) -> str:
     
     return "\n".join(lines)
 
-_TESTS_DIR = Path("/app/tests")
+_TESTS_DIR = Path("/app/memory/tests")
 
 
 def _generate_pytest_source(skill_name: str, skill_path: Path, functions: list) -> str:
@@ -1488,6 +1496,7 @@ __all__ = [
     "prevent",
     "report",
     "suggest_tests",
+    "run_tests",
     "learn_from_feedback",
     "status",
     # Aliases

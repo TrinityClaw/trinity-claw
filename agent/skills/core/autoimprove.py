@@ -971,6 +971,7 @@ def _run_smoke_test(skill_name: str, ce) -> tuple:
     """
     # ── Layer 1: status() or import check ─────────────────────────────────────
     test_result = ce.test_skill(skill_name, "status", "[]", timeout=10)
+    used_fallback = False
     if not test_result.startswith("✅"):
         test_result = ce.run_snippet(
             "import sys\n"
@@ -979,7 +980,14 @@ def _run_smoke_test(skill_name: str, ce) -> tuple:
             f"print(getattr({skill_name}, 'NAME', 'loaded ok'))",
             timeout=10,
         )
-    if not test_result.startswith("✅"):
+        used_fallback = True
+
+    if used_fallback:
+        # run_snippet returns raw stdout — pass if no error markers present
+        _err_markers = ("error", "exception", "traceback", "❌", "syntaxerror", "importerror")
+        if any(m in test_result.lower() for m in _err_markers):
+            return False, f"layer 1 failed: {test_result[:150]}"
+    elif not test_result.startswith("✅"):
         return False, f"layer 1 failed: {test_result[:150]}"
 
     # ── Layer 2: skill-defined scenarios (optional) ────────────────────────────
@@ -1773,7 +1781,7 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
                 try:
                     lesson = json.loads(line)
                     et  = lesson.get("error_type") or lesson.get("type", "")
-                    msg = lesson.get("error_msg") or lesson.get("message", "")
+                    msg = lesson.get("error_message") or lesson.get("message", "")
                     if et and msg:
                         lessons_by_type.setdefault(et, []).append(str(msg)[:120])
                     # Runtime pair tracking — one counter per (skill, error_type) combo
@@ -2320,7 +2328,7 @@ def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) ->
             except json.JSONDecodeError:
                 continue
             et  = (lesson.get("error_type") or lesson.get("type", "")).strip()
-            msg = (lesson.get("error_msg")  or lesson.get("message", "")).strip()
+            msg = (lesson.get("error_message") or lesson.get("message", "")).strip()
             if not et or et in known_types:
                 continue
             unknown_counts.setdefault(et, []).append(msg[:200])
@@ -2504,7 +2512,7 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
             "end_ts":   datetime.now().isoformat(),
             "elapsed":  round(time.time() - loop_start_t, 1),
         })
-        time.sleep(2)
+        time.sleep(0.5)
 
     # Single log read — filter in memory per loop instead of one read per loop.
     all_new_entries = _load_log(1)
@@ -2949,8 +2957,6 @@ def design(task: str) -> str:
     Returns:
         Structured design brief: existing coverage, open questions, 2-3 approaches.
     """
-    import os
-
     task = str(task).strip()
     if not task:
         return "❌ task cannot be empty."
