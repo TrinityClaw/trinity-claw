@@ -44,7 +44,8 @@ DOC = (
     "list_ingested()→show all indexed documents with chunk/word counts; "
     "delete_document(filename)→remove a document and its chunks from the index; "
     "prune_stale(days=90, dry_run=True)→list (or remove) index entries not re-ingested within N days; dry_run=True just lists them, dry_run=False deletes from index and ChromaDB; "
-    "export_index(path?)→export all indexed chunks to a JSONL file; "
+    "export_index(path?)→export all indexed chunks to a JSONL file (paginated, safe for large collections); "
+    "reconcile(fix?)→compare index against ChromaDB and report (or remove) ghost entries; pass 'fix' to auto-remove; "
     "status()→show collection stats and ChromaDB health."
 )
 
@@ -81,6 +82,8 @@ def _get_collection():
 
 # ── Index (tracks ingested files by content hash) ─────────────────────────────
 
+_INDEX_LOCK_FILE = _KNOWLEDGE_DIR.parent / ".index.lock"
+
 def _load_index() -> dict:
     """Load the ingestion index from disk. Returns an empty dict if missing or corrupt."""
     _KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -92,9 +95,50 @@ def _load_index() -> dict:
     return {}
 
 def _save_index(index: dict):
-    """Persist the ingestion index to disk."""
+    """Persist the ingestion index to disk atomically via a temp file + rename."""
     _KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    _INDEX_FILE.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    tmp = _INDEX_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    tmp.replace(_INDEX_FILE)
+
+try:
+    import fcntl as _fcntl
+
+    def _lock_index():
+        _KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+        lf = open(str(_INDEX_LOCK_FILE), "a")
+        _fcntl.flock(lf, _fcntl.LOCK_EX)
+        return lf
+
+    def _unlock_index(lf):
+        _fcntl.flock(lf, _fcntl.LOCK_UN)
+        lf.close()
+
+except ImportError:
+    # Windows — use msvcrt byte-range locking on the lock file
+    try:
+        import msvcrt as _msvcrt
+
+        def _lock_index():
+            _KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+            lf = open(str(_INDEX_LOCK_FILE), "a")
+            _msvcrt.locking(lf.fileno(), _msvcrt.LK_LOCK, 1)
+            return lf
+
+        def _unlock_index(lf):
+            try:
+                lf.seek(0)
+                _msvcrt.locking(lf.fileno(), _msvcrt.LK_UNLCK, 1)
+            except Exception:
+                pass
+            lf.close()
+
+    except ImportError:
+        def _lock_index():
+            return None
+
+        def _unlock_index(lf):
+            pass
 
 def _file_hash(path: Path) -> str:
     """Return the MD5 hex digest of a file's contents (used for change detection)."""
@@ -114,7 +158,16 @@ def _summarize_text(text: str, filename: str) -> str:
     """Call the LLM proxy to produce a concise summary. Returns '' on any failure."""
     if not _HAS_LITELLM:
         return ""
-    snippet = text[:6000]
+    # Sample beginning, middle, and end so long documents are represented fairly
+    length = len(text)
+    if length <= 6000:
+        snippet = text
+    else:
+        head   = text[:2000]
+        mid_s  = (length // 2) - 1000
+        middle = text[mid_s:mid_s + 2000]
+        tail   = text[-2000:]
+        snippet = f"{head}\n\n[...]\n\n{middle}\n\n[...]\n\n{tail}"
     prompt = (
         f"Summarize this document concisely. Document name: {filename}\n\n"
         f"<document>\n{snippet}\n</document>\n\n"
@@ -144,13 +197,15 @@ def _summarize_text(text: str, filename: str) -> str:
 
 def _chunk_text(text: str, rel_path: str, project: str, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = _CHUNK_OVERLAP) -> list:
     """Split text into overlapping chunks. Returns list of (chunk_text, metadata)."""
-    chunks = []
-    start  = 0
-    idx    = 0
+    # Clamp overlap so start always advances by at least 1 character
+    overlap  = min(chunk_overlap, chunk_size - 1)
+    step     = chunk_size - overlap
+    chunks   = []
+    start    = 0
+    idx      = 0
     filename = Path(rel_path).name
     while start < len(text):
-        end   = start + chunk_size
-        chunk = text[start:end]
+        chunk = text[start:start + chunk_size]
         if chunk.strip():
             chunks.append((chunk, {
                 "filename":    filename,
@@ -160,9 +215,7 @@ def _chunk_text(text: str, rel_path: str, project: str, chunk_size: int = _CHUNK
                 "source":      f"{rel_path}#chunk{idx}",
             }))
             idx += 1
-        start = end - chunk_overlap
-        if start >= len(text):
-            break
+        start += step
     return chunks
 
 # ── Core ingestion logic ───────────────────────────────────────────────────────
@@ -195,8 +248,6 @@ def _ingest_one(path: Path, col, index: dict, chunk_size: int = _CHUNK_SIZE) -> 
         text = _extract_text(path)
     except Exception as e:
         return f"  ❌ {rel_path} — extraction raised: {e}"
-    if "[" in text[:20] and "error" in text.lower():
-        return f"  ❌ {rel_path} — extraction failed: {text[:120]}"
 
     word_count = len(text.split())
     if word_count < 5:
@@ -207,7 +258,7 @@ def _ingest_one(path: Path, col, index: dict, chunk_size: int = _CHUNK_SIZE) -> 
         return f"  ⚠️  {rel_path} — no chunks produced"
 
     safe_id  = rel_path.replace("/", "__").replace("\\", "__")
-    col.add(
+    col.upsert(
         ids       =[f"{safe_id}__chunk{i}" for i in range(len(chunks))],
         documents =[c[0] for c in chunks],
         metadatas =[c[1] for c in chunks],
@@ -284,10 +335,15 @@ def ingest_folder(*args) -> str:
 
     ingested = sum(1 for l in lines if "✅" in l and "already current" not in l)
     skipped  = sum(1 for l in lines if "already current" in l)
-    lines.append(
-        f"\nDone — {ingested} ingested, {skipped} already up to date. "
-        f"Collection: '{_COLLECTION}'"
-    )
+    errors   = sum(1 for l in lines if "❌" in l)
+    warnings = sum(1 for l in lines if "⚠️" in l)
+    summary  = f"\nDone — {ingested} ingested, {skipped} already up to date"
+    if errors:
+        summary += f", {errors} error(s)"
+    if warnings:
+        summary += f", {warnings} warning(s)"
+    summary += f". Collection: '{_COLLECTION}'"
+    lines.append(summary)
     return "\n".join(lines)
 
 
@@ -354,7 +410,11 @@ def search(*args) -> str:
 
     where = {"project": project} if project else None
     try:
-        results = col.query(query_texts=[query], n_results=n, where=where)
+        actual_n = min(n, col.count())
+        if actual_n == 0:
+            scope = f" in project '{project}'" if project else ""
+            return f"🔍 No results for: '{query}'{scope}\nHave you run ingest_folder() yet?"
+        results = col.query(query_texts=[query], n_results=actual_n, where=where)
     except Exception as e:
         return f"❌ ChromaDB query error: {e}"
 
@@ -371,10 +431,15 @@ def search(*args) -> str:
     for i, (doc, meta, dist) in enumerate(zip(docs, metas, distances), 1):
         filename = meta.get("filename", "unknown")
         chunk    = meta.get("chunk_index", "?")
-        score    = round(1 - dist, 3) if dist is not None else "?"
+        if dist is not None:
+            # cosine distance → similarity; L2 distance → just show as distance
+            score_val = round(1 - dist, 3)
+            score_label = f"similarity {score_val}" if 0 <= score_val <= 1 else f"distance {round(dist, 3)}"
+        else:
+            score_label = "score ?"
         preview  = _highlight(doc[:400].replace("\n", " "), query)
         lines.append(
-            f"[{i}] {filename} (chunk {chunk}, relevance {score})\n"
+            f"[{i}] {filename} (chunk {chunk}, {score_label})\n"
             f"    {preview}{'…' if len(doc) > 400 else ''}\n"
         )
     return "\n".join(lines)
@@ -488,8 +553,9 @@ def schedule_nightly_kb(run_time: str = "2am") -> str:
     New documents trigger a Telegram notification if the bot is configured.
 
     Args:
-        run_time: Friendly time hint shown in confirmation (default '2am').
-                  The actual schedule is 'every 1 day' via APScheduler.
+        run_time: Label shown in the confirmation message only (default '2am').
+                  The actual cadence is fixed at 'every 1 day' via APScheduler;
+                  pass a custom every= to scheduler.schedule_recurring if you need a different interval.
 
     Returns:
         Confirmation string from scheduler.
@@ -582,10 +648,19 @@ def prune_stale(days: int = 90, dry_run: bool = True) -> str:
         return f"❌ ChromaDB unavailable — index not modified: {e}"
 
     rel_paths = [rp for rp, _ in stale]
+    failed = []
     try:
         col.delete(where={"rel_path": {"$in": rel_paths}})
-    except Exception as e:
-        return f"❌ ChromaDB bulk delete failed — index not modified: {e}"
+    except Exception:
+        # $in may not be supported in older ChromaDB versions — fall back to one-by-one
+        for rp in rel_paths:
+            try:
+                col.delete(where={"rel_path": rp})
+            except Exception as e:
+                failed.append(f"{rp}: {e}")
+
+    if failed:
+        return "❌ Some ChromaDB deletes failed — index not modified:\n" + "\n".join(failed)
 
     for rel_path in rel_paths:
         if rel_path in index:
@@ -625,6 +700,50 @@ def status(*args) -> str:
     return "\n".join(lines)
 
 
+def reconcile(*args) -> str:
+    """
+    Compare the local index against ChromaDB and report (or fix) drift.
+    Entries in the index with no matching chunks in ChromaDB are flagged.
+    Usage: reconcile()            — report only
+           reconcile('fix')       — remove ghost index entries
+    """
+    fix   = len(args) > 0 and str(args[0]).strip().lower() == "fix"
+    index = _load_index()
+    if not index:
+        return "📭 Index is empty — nothing to reconcile."
+
+    try:
+        col = _get_collection()
+    except RuntimeError as e:
+        return f"❌ {e}"
+
+    ghosts = []
+    for rel_path in list(index.keys()):
+        try:
+            result = col.get(where={"rel_path": rel_path}, limit=1)
+            if not result.get("ids"):
+                ghosts.append(rel_path)
+        except Exception:
+            ghosts.append(rel_path)
+
+    if not ghosts:
+        return f"✅ Index and ChromaDB are in sync ({len(index)} documents)."
+
+    lines = [f"⚠️  {len(ghosts)} index entr{'y' if len(ghosts)==1 else 'ies'} with no chunks in ChromaDB:\n"]
+    for rp in ghosts:
+        lines.append(f"  • {rp}")
+
+    if not fix:
+        lines.append("\nRe-run reconcile('fix') to remove ghost entries from the index.")
+        return "\n".join(lines)
+
+    for rp in ghosts:
+        del index[rp]
+    _save_index(index)
+    lines.append(f"\n✅ Removed {len(ghosts)} ghost entr{'y' if len(ghosts)==1 else 'ies'} from index. Call ingest_folder() to re-ingest.")
+    return "\n".join(lines)
+
+
 def export_index(*args) -> str:
     """
     Export all indexed chunks from ChromaDB to a JSONL file (one chunk per line).
@@ -639,25 +758,37 @@ def export_index(*args) -> str:
     if not index:
         return "📭 Nothing to export — index is empty."
 
+    _PAGE = 500
     try:
-        col     = _get_collection()
-        results = col.get(include=["documents", "metadatas"])
+        col = _get_collection()
     except RuntimeError as e:
         return f"❌ {e}"
-    except Exception as e:
-        return f"❌ ChromaDB get error: {e}"
-
-    ids   = results.get("ids",       [])
-    docs  = results.get("documents", [])
-    metas = results.get("metadatas", [])
-
-    if not ids:
-        return "📭 ChromaDB collection is empty — nothing to export."
-
-    lines = []
-    for id_, doc, meta in zip(ids, docs, metas):
-        lines.append(json.dumps({"id": id_, "text": doc, **(meta or {})}, ensure_ascii=False))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines), encoding="utf-8")
-    return f"✅ Exported {len(lines)} chunks to {out_path}"
+    total  = 0
+    offset = 0
+    try:
+        with out_path.open("w", encoding="utf-8") as fh:
+            while True:
+                try:
+                    page = col.get(include=["documents", "metadatas"], limit=_PAGE, offset=offset)
+                except Exception as e:
+                    return f"❌ ChromaDB get error at offset {offset}: {e}"
+                ids   = page.get("ids",       [])
+                docs  = page.get("documents", [])
+                metas = page.get("metadatas", [])
+                if not ids:
+                    break
+                for id_, doc, meta in zip(ids, docs, metas):
+                    fh.write(json.dumps({"id": id_, "text": doc, **(meta or {})}, ensure_ascii=False) + "\n")
+                total  += len(ids)
+                offset += len(ids)
+                if len(ids) < _PAGE:
+                    break
+    except Exception as e:
+        return f"❌ Failed to write {out_path}: {e}"
+
+    if total == 0:
+        out_path.unlink(missing_ok=True)
+        return "📭 ChromaDB collection is empty — nothing to export."
+    return f"✅ Exported {total} chunks to {out_path}"
