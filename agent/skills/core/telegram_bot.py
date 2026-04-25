@@ -17,7 +17,9 @@ DOC = "Telegram integration with connection pooling, retry logic, and async mess
 # Configuration — all secrets loaded from .env, never hardcoded
 _token: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 _chat_id: str = os.environ.get("TELEGRAM_CHAT_ID", "")
-_trinity_url: str = "http://localhost:8001/chat"
+_trinity_base_url: str = "http://localhost:8001"
+_trinity_url: str = f"{_trinity_base_url}/chat"
+_trinity_transcribe_url: str = f"{_trinity_base_url}/transcribe"
 _api_key: str = os.environ.get("TRINITY_API_KEY", "")
 _polling_thread: Optional[threading.Thread] = None
 _message_queue: queue.Queue = queue.Queue()
@@ -27,7 +29,6 @@ _send_thread: Optional[threading.Thread] = None
 _state_lock = threading.Lock()
 _running = False
 _last_update_id = 0
-_error_count = 0
 _max_errors = 5
 
 # Create session with connection pooling
@@ -83,6 +84,20 @@ def _send_with_retry(message: str) -> dict:
     response.raise_for_status()
     return response.json()
 
+def _send_plain(message: str) -> dict:
+    """Internal: Send message without HTML parse_mode (fallback for malformed HTML)."""
+    if len(message) > 4000:
+        message = message[:3997] + "..."
+    url = f"https://api.telegram.org/bot{_token}/sendMessage"
+    response = _session.post(
+        url,
+        json={"chat_id": _chat_id, "text": message},
+        timeout=(10, 30),
+        headers={"Content-Type": "application/json"}
+    )
+    response.raise_for_status()
+    return response.json()
+
 def send(message: str) -> str:
     """
     Send a message immediately (blocking) with retry.
@@ -93,8 +108,13 @@ def send(message: str) -> str:
         result = _send_with_retry(message)
         if result.get("ok"):
             return "✅ Message sent"
-        else:
-            return f"⚠️ Telegram error: {result.get('description', 'Unknown error')}"
+        # Telegram rejects malformed HTML — retry as plain text
+        if "can't parse entities" in result.get("description", "").lower():
+            logger.warning("HTML parse error, retrying as plain text")
+            result = _send_plain(message)
+            if result.get("ok"):
+                return "✅ Message sent (plain text fallback)"
+        return f"⚠️ Telegram error: {result.get('description', 'Unknown error')}"
     except Exception as e:
         logger.error(f"Send failed: {e}")
         return f"❌ Send failed: {type(e).__name__}: {str(e)[:100]}"
@@ -123,7 +143,11 @@ def _send_worker():
             try:
                 result = _send_with_retry(message)
                 if not result.get("ok"):
-                    logger.warning(f"Failed to send: {result}")
+                    if "can't parse entities" in result.get("description", "").lower():
+                        logger.warning("HTML parse error in queue, retrying as plain text")
+                        result = _send_plain(message)
+                    if not result.get("ok"):
+                        logger.warning(f"Failed to send: {result}")
             except Exception as e:
                 logger.error(f"Send worker error: {e}")
                 # Put back in queue to retry later?
@@ -138,7 +162,7 @@ def _send_worker():
 
 def _poll_updates():
     """Main polling loop with exponential backoff"""
-    global _last_update_id, _error_count, _running
+    global _last_update_id, _running
 
     consecutive_errors = 0
     max_backoff = 30  # Max seconds between retries
@@ -153,7 +177,8 @@ def _poll_updates():
             params = {
                 "offset": _last_update_id + 1,
                 "limit": 10,  # Process max 10 at a time
-                "timeout": timeout
+                "timeout": timeout,
+                "allowed_updates": ["message"],
             }
 
             # Make request with connection timeout separate from read timeout
@@ -174,7 +199,8 @@ def _poll_updates():
 
             # Process updates
             for update in updates:
-                _last_update_id = update["update_id"]
+                with _state_lock:
+                    _last_update_id = update["update_id"]
 
                 if "message" in update:
                     message = update["message"]
@@ -284,6 +310,20 @@ def start_polling() -> str:
 
         if not _token or not _chat_id:
             return "❌ Not configured. Call setup(token, chat_id) first."
+
+        # Ensure any lingering threads from a previous session are gone before
+        # starting new ones, so we never end up with duplicate polling loops.
+        if _polling_thread and _polling_thread.is_alive():
+            logger.warning("Previous polling thread still alive — waiting for it to exit")
+            _polling_thread.join(timeout=10)
+            if _polling_thread.is_alive():
+                return "❌ Previous polling thread did not exit. Call stop() and retry."
+
+        if _send_thread and _send_thread.is_alive():
+            logger.warning("Previous send thread still alive — waiting for it to exit")
+            _send_thread.join(timeout=10)
+            if _send_thread.is_alive():
+                return "❌ Previous send thread did not exit. Call stop() and retry."
 
         _running = True
 
@@ -445,6 +485,7 @@ def status() -> str:
     """
     with _state_lock:
         running = _running
+        last_id = _last_update_id
 
     if not _token:
         return "❌ Not configured"
@@ -455,7 +496,7 @@ def status() -> str:
 
     return (
         f"{status_msg}\n"
-        f"Last update ID: {_last_update_id}\n"
+        f"Last update ID: {last_id}\n"
         f"Message queue:  {queue_size} pending\n"
         f"Trinity API key: {key_status}"
     )
@@ -541,6 +582,9 @@ def _handle_incoming_photo(photo_list: list, caption: str, from_chat_id: str):
             queue_message(resp.json().get("reply", "No response"))
         elif resp.status_code == 429:
             queue_message("⏳ I'm being rate-limited by the AI provider. Please wait a few seconds and try again.")
+        elif resp.status_code in (401, 403):
+            logger.error(f"Trinity rejected image request: {resp.status_code} — check TRINITY_API_KEY")
+            queue_message("⚠️ Auth error processing image: check TRINITY_API_KEY is correct.")
         else:
             queue_message(f"⚠️ Error processing image: HTTP {resp.status_code}")
     except Exception as e:
@@ -561,9 +605,8 @@ def _handle_incoming_voice(voice_obj: dict, from_chat_id: str):
         # Transcribe via Trinity /transcribe endpoint.
         # Timeout is long (5 min) because the first call downloads the Whisper model (~150 MB).
         # Subsequent calls are fast (model is cached on disk).
-        transcribe_url = _trinity_url.replace("/chat", "/transcribe")
         resp = _session.post(
-            transcribe_url,
+            _trinity_transcribe_url,
             json={"audio": b64, "filename": f"voice.{ext}"},
             headers={"X-API-Key": _api_key, "Content-Type": "application/json"},
             timeout=(10, 300),
@@ -610,7 +653,8 @@ def send_to_trinity(message: str) -> str:
     try:
         response = _session.post(
             _trinity_url,
-            json={"message": message},
+            json={"message": message, "session_id": "test"},
+            headers={"X-API-Key": _api_key, "Content-Type": "application/json"},
             timeout=(5, 60)
         )
 
