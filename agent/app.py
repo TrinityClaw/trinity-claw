@@ -1865,7 +1865,7 @@ def execute_skill_tags(response_text: str) -> tuple:
 
                 # Design gate: non-trivial new skills require an approved spec
                 _dyn_path = Path("/app/skills/dynamic") / filename
-                if not _dyn_path.exists() and len(code) > 300:
+                if not _dyn_path.exists() and len(code) > 1500:
                     _designs_dir = Path("/app/memory/designs")
                     _slug = re.sub(r"[^a-z0-9]", "", filename.replace(".py", "").lower())
                     _spec_found = any(
