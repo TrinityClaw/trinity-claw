@@ -35,6 +35,8 @@ DOC = (
     "verify_skill(skill_name)→syntax+compile+metadata checks then a model-based VERDICT: PASS/FAIL/PARTIAL with execution trace evidence — call before declaring any fix complete; "
     "daily_review(skill_name?)→scan skill(s), summarize lessons learned, surface recurring patterns; "
     "record_mistake(skill, error_type, error_msg)→save lesson to lessons.jsonl and auto-index into ChromaDB; "
+    "check_for_learned_fix(skill_name, error_type, skill_path?, task?)→check if we've already learned a fix; task parameter allows semantic search; "
+    "check_lessons(skill_name, func_name)→pre-dispatch check for prior failures; "
     "search_lessons_semantic(query, n=5)→semantic ChromaDB search over past lessons — finds relevant failures without exact keyword match; "
     "index_all_lessons()→bulk-index all lessons.jsonl entries into ChromaDB (run once after upgrade); "
     "should_self_improve(threshold=3, window_days=7)→check if recurring failures in recent lessons warrant running autoimprove loops; "
@@ -309,10 +311,14 @@ def index_all_lessons() -> str:
     return f"✅ Indexed {indexed}/{len(lessons)} lessons into ChromaDB '{_LESSONS_COLLECTION}'."
 
 
-def check_for_learned_fix(skill_name: str = "", error_type: str = "", skill_path: str = "") -> Optional[str]:
-    """Check if we've already learned a fix for this error type in this skill.
+def check_for_learned_fix(skill_name: str = "", error_type: str = "", skill_path: str = "", task: str = "") -> Optional[str]:
+    """Check if we've already learned a fix for this error type in this skill or task.
     If skill_path is given, prefer lessons recorded for that exact path to avoid
-    cross-contamination when two skills share the same name across core/dynamic."""
+    cross-contamination when two skills share the same name across core/dynamic.
+    If task is given but skill_name/error_type are missing, performs a semantic search."""
+    if task and not skill_name and not error_type:
+        return search_lessons_semantic(task, n=3)
+
     if not skill_name or not error_type:
         return None
     lessons = _load_lessons()

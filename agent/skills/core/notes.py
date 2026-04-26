@@ -57,7 +57,7 @@ DOC = (
     "delete_tag(title, tags)→remove one or more tags from a note; tags is comma-separated; "
     "list_notes()→all notes with previews and tags; "
     "list_by_tag(tag)→filter notes by a specific tag; "
-    "search(term)→notes matching keyword; "
+    "search(query)→notes matching keyword; "
     "delete(title)→remove note; "
     "export_all()→JSON dump of all notes; "
     "write_daily_entry(summary, learned, user_insights?, next_steps?)→save today's learning journal; "
@@ -325,17 +325,17 @@ def list_by_tag(tag_name: str) -> str:
         return f"❌ Error listing by tag: {e}"
 
 
-def search(keyword: str) -> str:
+def search(query: str) -> str:
     """Search notes by keyword."""
     try:
         notes   = _load_notes()
         results = []
         for title, data in notes.items():
-            if keyword.lower() in data["content"].lower() or keyword.lower() in title.lower():
+            if query.lower() in data["content"].lower() or query.lower() in title.lower():
                 results.append(f"- **{title}**: {data['content'][:100]}...")
         if results:
             return "🔍 Search results:\n" + "\n".join(results)
-        return f"❌ No notes found containing '{keyword}'"
+        return f"❌ No notes found containing '{query}'"
     except Exception as e:
         return f"❌ Error searching notes: {e}"
 
