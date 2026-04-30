@@ -152,6 +152,28 @@ After writing style.css, call `web_builder.read_file("project-name", "style.css"
 
 > ⚠️ `:root` variables alone are NOT CSS. The page is unstyled until selectors use them. Writing only `:root { --primary: #e63946; }` and nothing else means the page renders white. Every color, font, and layout value extracted in Phase 2 MUST appear in a concrete selector rule — `background: var(--primary)`, `color: var(--text)`, `grid-template-columns: repeat(3,1fr)`, etc. — or the clone has failed Phase 3.
 
+**🚨 ANTI-SLOP CSS QUALITY CHECK — run this scan before Phase 3B:**
+
+Before writing any HTML, grep_search your style.css output for these patterns. If any fire, patch them out first:
+
+| Pattern | Replace with |
+|---|---|
+| `font-family: "Inter"` or `'Inter'` | `font-family: 'Outfit', 'Satoshi', 'DM Sans', or 'Plus Jakarta Sans'` |
+| `font-family: arial` or `'Open Sans'` | a distinctive Google Font matching the source style |
+| `justify-content: center` (on containers) | `justify-content: flex-start` + directional asymmetry |
+| `justify-content: space-between` (on nav) | deliberate gap values or `space-around` |
+| `#000000` | `#09090b` (zinc-950) or `#0a0a0a` |
+| `#ffffff` (on body/surface bg) | `#fafaf9` (stone-50) or `#f8fafc` (slate-50) |
+| `linear-gradient(135deg` | remove or replace with a solid brand color from the source |
+| `box-shadow: 0 0 20px` or `0 0 30px` | remove or use subtle inner border `border: 1px solid rgba(0,0,0,0.08)` |
+| `box-shadow: 0 4px 6px` | use the source's actual shadow depth from Phase 2 |
+| `transition: all 0.3s` | `transition: background-color 0.2s ease, transform 0.2s ease` (specific props only) |
+| `text-align: center` (body text) | left-align body text; center only hero headings |
+| `John Doe` / `99%` / `lorem ipsum` | real names and specific values from source |
+| Emojis in HTML | Radix/Phosphor SVG icons or clean SVG primitives |
+
+**Why this matters:** Clones inherit generic patterns from scaffolding. The anti-slop scan catches the 80% of CSS quality problems that come from copying the blank template rather than the source's design intent.
+
 #### 3B — Write index.html
 
 Call `web_builder.write_file("project-name", "index.html", HTML)`.
@@ -199,6 +221,19 @@ browser_session.screenshot()           # screenshot A: above the fold
 browser_session.scroll("bottom")
 browser_session.screenshot()           # screenshot B: footer
 ```
+
+**Run the 5-Dimension Expert Critique alongside visual QA:**
+
+```
+web_builder.validate("project-name")
+```
+
+The `validate()` call produces:
+- **HTML structural checks** — DOCTYPE, viewport, accessibility tags
+- **Anti-slop warnings** — generic fonts, centered layouts, pure black/white, AI glow effects
+- **5-Dimension scores (1–5 each) with ASCII radar chart:** Coherence · Hierarchy · Craft · Functionality · Innovation → overall A–F grade
+
+Use the scores to prioritize fixes. A "D" or "F" grade means the clone reads as generic — focus on Craft and Innovation dimensions first. Address every `⚠️  Anti-Slop` warning before presenting to the user.
 
 Compare against your Phase 1 screenshots. Check each category:
 
