@@ -32,19 +32,24 @@ NAME = "web_builder"
 SHORT_DOC = "Build, preview, and manage HTML/CSS/JS website projects with a live preview server on port 8090."
 DOC = (
     "Build, preview, and manage HTML/CSS/JS website projects with live preview server on port 8090. "
-    "analyze_design_folder(folder,language?,model?)→batch-analyze all design images with vision LLM, returns JSON brief; "
+    "analyze_design_folder(folder,language?,model?,device_frame?)→batch-analyze all design images with vision LLM, returns JSON brief with optional device frame HTML (iPhone|android|macos|browser); "
     "scaffold(name,template)→create project; templates: 'professional'(RECOMMENDED — full styled landing page, 250+ line CSS), 'blank', 'landing', 'dashboard'; "
     "write_file(project,filename,content)→full file write (style.css auto-enhanced if sparse); "
     "patch_file(project,filename,old,new)→targeted edit without rewriting whole file (PREFERRED for content/color updates) — WARNING: match is whitespace-exact, tabs and newlines must match precisely; include 2+ lines of surrounding context to ensure uniqueness; "
     "read_file(project,filename)→read file; delete_file(project,filename)→remove a file; "
     "delete_project(project)→remove entire project; list_projects()→all projects; "
-    "serve(project,port)→live preview; stop_server()→stop preview; server_status()→check if server is running and get its URL (use this, NEVER call 'status' — that function does not exist); validate(project)→HTML checks; "
+    "serve(project,port)→live preview; stop_server()→stop preview; server_status()→check if server is running and get its URL (use this, NEVER call 'status' — that function does not exist); "
+    "validate(project)→HTML structural checks + expanded anti-slop design audit + 5-dimension expert critique with scores; "
     "export_zip(project)→pack project as downloadable zip. "
     "get_design_system(description,project_name?)→generate industry-matched design system (colors, typography, UI style, anti-patterns) using 161 reasoning rules; call BEFORE scaffold() for best results. "
+    "get_design_direction(project_name?,industry?,keywords?)→recommend 3 design directions from 5 schools × 20 philosophies with descriptions and CSS variable hints; "
+    "set_design_tone(project,tone)→apply design preset: 'soft' (premium, airy, spring motion), 'minimalist' (clean, editorial, Linear/Notion), 'brutalist' (Swiss typography, sharp contrast); returns CSS variables and recommendations. "
     "⚠️ CRITICAL RULE: After scaffold(), ALWAYS use patch_file() — NEVER write_file() on index.html or style.css. write_file() overwrites the full professional template and destroys the layout. "
     "TEXT-ONLY BUILD WORKFLOW: scaffold(name,professional) → patch_file×N (update placeholders + :root colors) → serve(). "
     "DESIGN-AWARE BUILD WORKFLOW (RECOMMENDED): get_design_system(description) → scaffold(name,professional) → patch_file×N (apply design system :root variables, fonts, section text) → serve(). "
-    "IMAGE BUILD WORKFLOW: analyze_design_folder() → scaffold(name,professional) → patch_file×N (apply brief colors/text) → serve()."
+    "IMAGE BUILD WORKFLOW: analyze_design_folder(folder,device_frame?) → scaffold(name,professional) → patch_file×N (apply brief colors/text) → serve(). "
+    "PREMIUM BUILD WORKFLOW: scaffold(name,professional) → set_design_tone(name,soft|minimalist|brutalist) → patch_file×N → serve(). "
+    "DIRECTION WORKFLOW: get_design_direction() → pick a school/philosophy → get_design_system() → scaffold() → patch_file×N → serve()."
 )
 
 WEBSITES_DIR = Path("/app/memory/websites")
@@ -1208,15 +1213,219 @@ def export_zip(project: str) -> str:
     return f"📦 Exported '{slug}' → {zip_path} ({size_kb:.1f} KB)"
 
 
+# ── 5-Dimension Expert Critique Framework ────────────────────────────────────
+#
+# Based on the huashu-design 5-dimension evaluation system.
+# Each dimension is scored 1-5 and contributes to a radar-score output.
+#
+
+_5D_DIMENSIONS = {
+    "philosophical_coherence": {
+        "name": "Philosophical Coherence",
+        "description": "Does every design choice serve a clear concept? Consistent mood, voice, and visual logic throughout.",
+        "weights": [
+            "Color palette maps to brand personality",
+            "Typography choices reinforce hierarchy and tone",
+            "Spacing rhythm is intentional and consistent",
+            "No jarring style shifts between sections",
+        ],
+    },
+    "visual_hierarchy": {
+        "name": "Visual Hierarchy",
+        "description": "Is the eye guided naturally from most to least important? Primary CTA is unmissable.",
+        "weights": [
+            "Hero or entry point has clear dominant element",
+            "Section order follows user attention flow",
+            "Contrast between heading/body levels is distinct",
+            "CTAs are visually differentiated from body text",
+        ],
+    },
+    "execution_craft": {
+        "name": "Execution Craft",
+        "description": "Is the code clean, production-quality? No shortcuts, no placeholder feel.",
+        "weights": [
+            "CSS is semantic and maintainable (:root vars used)",
+            "No inline styles on layout elements",
+            "Responsive breakpoints are logical and complete",
+            "Accessibility: alt text, ARIA labels, focus states",
+        ],
+    },
+    "functionality": {
+        "name": "Functionality",
+        "description": "Does it work correctly across devices? Interactions behave as expected.",
+        "weights": [
+            "Navigation is usable and consistent across pages",
+            "Forms and CTAs are functional (not decorative)",
+            "No layout shift on load (CLS-friendly)",
+            "Touch/click targets meet 44px minimum",
+        ],
+    },
+    "innovation": {
+        "name": "Innovation",
+        "description": "Does the design have personality? It avoids generic patterns and brings something ownable.",
+        "weights": [
+            "Avoids generic AI-slop aesthetic (see anti-slop list)",
+            "Has a distinctive visual hook or memorable element",
+            "Motion design adds meaning, not just decoration",
+            "Copy is specific, not templated or vague",
+        ],
+    },
+}
+
+# ── Expanded Anti-Slop Design Vocabulary (huashu-design inspired) ─────────────
+#
+# Based on huashu-design's Anti AI-Slop Rules. Covers font choices,
+# layout anti-patterns, color anti-patterns, copy anti-patterns, and
+# interaction anti-patterns. Also includes 20 design vocabulary signals.
+#
+
+_ANTI_SLOP = [
+    # ── Font anti-patterns ──────────────────────────────────────────────────
+    ("'inter'",                          "Avoid 'Inter' — use Geist, Outfit, Satoshi, DM Sans, or Plus Jakarta Sans for a less-generic feel"),
+    ('font-family: "Inter"',              "Avoid 'Inter' — use Geist, Outfit, Satoshi, DM Sans, or Plus Jakarta Sans"),
+    ("'open sans'",                       "Avoid 'Open Sans' — overused in generic templates"),
+    ("'roboto'",                          "Avoid 'Roboto' — too common in default Material Design usage"),
+    ("'lato'",                            "Avoid 'Lato' — consider DM Sans, Nunito Sans, or Plus Jakarta Sans"),
+    ("font-family: arial",                "Avoid Arial — system-ui or a distinctive Google Font ages better"),
+    ("font-family: 'helvetica neue'",      "Avoid Helvetica Neue defaults — pair it with a purpose-chosen sans"),
+    # ── Layout anti-patterns ────────────────────────────────────────────────
+    ("justify-content: center",           "Centered layouts feel generic — try asymmetric balance (left-heavy or grid-offset)"),
+    ("justify-content: space-between",    "Overused 'space-between' nav — try flex-start with deliberate spacing"),
+    ("display: flex; flex-direction: column; align-items: center",
+     "Column-center flex is a template signal — use grid or directional asymmetry"),
+    ("text-align: center",                 "Excessive centering kills visual rhythm — center only hero text"),
+    ("max-width: 1200px; margin: 0 auto",  "Generic container centering — add personality with offset grids"),
+    # ── Color anti-patterns ────────────────────────────────────────────────
+    ("#000000",                            "Pure black #000000 — use off-black like #09090b (zinc-950) or #0a0a0a"),
+    ("#ffffff",                            "Pure white surfaces — off-white (#fafaf9 stone-50 or #f8fafc slate-50) feels warmer"),
+    ("linear-gradient",                    "Gradients must be used intentionally — avoid the purple-blue AI glow"),
+    ("background: linear-gradient(135deg", "135deg purple→blue gradient is the #1 AI-slop signal — replace with brand-appropriate palette"),
+    ("box-shadow: 0 0 20px",               "Outer glow = AI-slop — use inner borders or tinted layered shadows"),
+    ("box-shadow: 0 0 30px",               "Heavy outer glow — replace with subtle depth (2-4px blur, low opacity)"),
+    ("box-shadow: 0 4px 6px",              "Generic Bootstrap shadow — use custom shadow tokens for your brand"),
+    ("opacity: 0.8",                       "Generic opacity overlay — use a tinted rgba or blend mode instead"),
+    # ── Copy anti-patterns ────────────────────────────────────────────────
+    ("john doe",                           "Placeholder name 'John Doe' — use realistic names (e.g. Maria Chen, Aiden Park)"),
+    ("sarah chan",                         "Generic name 'Sarah Chan' — use names fitting your audience and tone"),
+    ("jack su",                            "Generic name 'Jack Su' — use contextually appropriate names"),
+    ("99%",                                "Stat '99%' is too round — use organic values like 97.3%, 94.7%"),
+    ("100%",                               "Stat '100%' is a trust-signal red flag — use realistic, specific percentages"),
+    ("lorem ipsum",                        "Lorem ipsum present — replace with real content before evaluation"),
+    ("placeholder text",                   "Placeholder text found — use real copy that serves the design"),
+    ("coming soon",                        "'Coming Soon' placeholder — ensure all sections have real or designed content"),
+    # ── Interaction anti-patterns ─────────────────────────────────────────
+    ("h-screen",                           "Tailwind h-screen causes mobile address-bar issues — use min-h-[100dvh]"),
+    ("transition: all 0.3s",              "Unspecific 'transition: all' is wasteful — target specific properties"),
+    ("cursor: pointer",                    "Check: are all cursor:pointer elements actually clickable?"),
+    # ── Structure anti-patterns ───────────────────────────────────────────
+    ("<div><div><div>",                    "Deep nesting (3+ divs) — consider semantic HTML or flat flex/grid"),
+    # ── AI-slop visual signals ────────────────────────────────────────────
+    ("neon",                               "'Neon' aesthetic — use muted, sophisticated color palettes"),
+    ("glassmorphism",                     "Glassmorphism overuse — only use when it genuinely adds depth"),
+    ("background-blend-mode: multiply",    "Blend mode detected — verify it looks correct on all backgrounds"),
+]
+
+# ── Design vocabulary signals (positive — tell us what IS done right) ────────
+_DESIGN_VOCABULARY_SIGNALS = [
+    # Unique/quality fonts
+    ("'outfit'",          "OUTFIT"),
+    ("'satoshi'",         "SATOSHI"),
+    ("'geist'",          "GEIST"),
+    ("'plus jakarta sans'", "PLUS_JAKARTA"),
+    ("'dm sans'",         "DM_SANS"),
+    ("'nunito sans'",     "NUNITO_SANS"),
+    ("'sora'",            "SORA"),
+    ("'space grotesk'",   "SPACE_GROTESK"),
+    # Distinctive color choices
+    ("--stone-",          "STONE_PALETTE"),
+    ("--zinc-",           "ZINC_PALETTE"),
+    ("--amber-",          "WARM_ACCENT"),
+    ("--teal-",           "COOL_TEAL_ACCENT"),
+    ("--indigo-",         "DEEP_INDIGO"),
+    # Intentional spacing
+    ("--space-y-",        "TAILWIND_SPACE_SCALE"),
+    ("--spacing-",        "NAMED_SPACING_SYSTEM"),
+    # Motion
+    ("cubic-bezier",      "CUSTOM_EASING"),
+    ("ease-",             "NAMED_EASING"),
+    # Layout
+    ("grid-template",     "CSS_GRID_LAYOUT"),
+    ("aspect-ratio",      "ASPECT_RATIO"),
+]
+
+def _score_5d(css_content: str, html_content: str, warnings: list) -> dict:
+    """
+    Score the project on 5 dimensions.
+    Each dimension gets a score 1-5 and pass/fail items from its checklist.
+    """
+    combined = (css_content + " " + html_content).lower()
+
+    def check_positive(signals: list) -> int:
+        """Count how many positive vocabulary signals fire (max 5)."""
+        return min(5, sum(1 for s, _ in signals if s in combined))
+
+    def check_negative(patterns: list) -> int:
+        """Count how many anti-slop patterns fire (max 10)."""
+        return min(10, sum(1 for pat, _ in patterns if pat.lower() in combined))
+
+    scores = {}
+    for dim_key, dim in _5D_DIMENSIONS.items():
+        base = 3  # start at 3 (adequate)
+        # Penalise anti-patterns
+        base -= check_negative(_ANTI_SLOP) * 0.3
+        # Reward vocabulary signals
+        base += check_positive(_DESIGN_VOCABULARY_SIGNALS) * 0.2
+        # Reward: semantic CSS vars
+        if "--" in css_content and ":root" in css_content:
+            base += 0.1
+        # Reward: custom easing (not generic ease)
+        if "cubic-bezier" in css_content or "ease-" in css_content:
+            base += 0.1
+        # Penalty: generic shadow
+        if "box-shadow: 0 4px 6px" in css_content.lower():
+            base -= 0.3
+        # Penalty: pure black/white
+        if "#000000" in css_content.lower() or "#ffffff" in css_content.lower():
+            base -= 0.2
+        # Clamp 1-5
+        score = max(1, min(5, round(base, 1)))
+        scores[dim_key] = score
+
+    avg = round(sum(scores.values()) / len(scores), 1)
+    return {
+        "scores": scores,
+        "average": avg,
+        "grade": "A" if avg >= 4.5 else "B" if avg >= 3.5 else "C" if avg >= 2.5 else "D" if avg >= 1.5 else "F",
+        "dimensions": _5D_DIMENSIONS,
+    }
+
+
+def _render_radar_ascii(scores: dict) -> str:
+    """Render a simple ASCII radar chart for the 5 dimensions."""
+    dim_names = {
+        "philosophical_coherence": "Coherence ",
+        "visual_hierarchy":         "Hierarchy  ",
+        "execution_craft":          "Craft      ",
+        "functionality":            "Functionality",
+        "innovation":                "Innovation  ",
+    }
+    labels = []
+    for key, score in scores.items():
+        bar = "■" * int(score) + "□" * (5 - int(score))
+        labels.append(f"  {dim_names[key]}| {bar} {score}/5")
+    return "\n".join(labels)
+
+
 def validate(project: str) -> str:
     """
-    Check index.html for common structural issues.
+    Check index.html for common structural issues, run an expanded anti-slop
+    design audit, and produce a 5-dimension expert critique with ASCII radar chart.
 
     Args:
         project: Project slug
 
     Returns:
-        Validation report.
+        Validation report with HTML checks, anti-slop warnings, and 5D critique.
 
     Example:
         <skill:web_builder.validate>my-site</skill:web_builder.validate>
@@ -1249,6 +1458,24 @@ def validate(project: str) -> str:
     if "script.js" not in content and "<script" not in lower:
         warnings.append("  ⚠️  No script linked (script.js or <script>)")
 
+    # ── Expanded Anti-Slop Design Audit (huashu-design inspired) ───────────
+    css_path = WEBSITES_DIR / slug / "style.css"
+    css_content = ""
+    if css_path.exists():
+        css_content = css_path.read_text(encoding="utf-8")
+
+    for pattern, msg in _ANTI_SLOP:
+        if pattern.lower() in (content + css_content).lower():
+            warnings.append(f"  ⚠️  {msg}")
+
+    # Emoji detection (huashu-design anti-emoji policy)
+    emoji_pattern = re.compile(r'[\U0001F300-\U0001F9FF]')
+    if emoji_pattern.search(content):
+        warnings.append("  ⚠️  Emojis detected — replace with high-quality icons (Radix, Phosphor) or clean SVG primitives")
+
+    # ── 5-Dimension Expert Critique ─────────────────────────────────────────
+    result_5d = _score_5d(css_content, content, warnings)
+
     # Try HTML parsing
     class _Checker(HTMLParser):
         def __init__(self):
@@ -1265,17 +1492,164 @@ def validate(project: str) -> str:
     except Exception as e:
         issues.append(f"  ❌ Parse failed: {e}")
 
+    # ── Assemble report ────────────────────────────────────────────────────
     lines = [f"🔍 Validating {slug}/index.html ({len(content)} chars)"]
     if issues:
         lines.append("\nErrors:")
         lines.extend(issues)
     if warnings:
-        lines.append("\nWarnings:")
+        lines.append("\nWarnings (Anti-Slop):")
         lines.extend(warnings)
+
+    lines.append("\n" + "─" * 56)
+    lines.append(f"  🎯 5-DIMENSION EXPERT CRITIQUE  (Grade: {result_5d['grade']})")
+    lines.append("─" * 56)
+    lines.append(_render_radar_ascii(result_5d["scores"]))
+    lines.append(f"  {'─' * 48}")
+    lines.append(f"  Average score: {result_5d['average']}/5.0")
+    lines.append("")
+    lines.append("  Dimension guidance:")
+    for dim_key, dim in result_5d["dimensions"].items():
+        score = result_5d["scores"][dim_key]
+        quality = "✅ Strong" if score >= 4 else "⚠️  Needs work" if score >= 2.5 else "❌ Weak"
+        lines.append(f"    • {dim['name']}: {score}/5 — {quality}")
+        lines.append(f"      {dim['description']}")
+
     if not issues and not warnings:
         lines.append("\n  ✅ All checks passed!")
     elif not issues:
         lines.append("\n  ✅ No errors (review warnings above)")
+
+    return "\n".join(lines)
+
+
+# ── Design Tone Presets (taste-skill inspired) ─────────────────────────────────
+
+_DESIGN_TONES = {
+    "soft": {
+        "description": "Premium, airy, expensive-looking with softer contrast, more whitespace, and smooth spring motion",
+        "css_vars": {
+            "--radius": "1.5rem",
+            "--shadow-sm": "0 2px 8px rgba(0,0,0,0.04)",
+            "--shadow-md": "0 8px 24px rgba(0,0,0,0.06)",
+            "--shadow-lg": "0 16px 48px rgba(0,0,0,0.08)",
+            "--ease-spring": "cubic-bezier(0.34, 1.56, 0.64, 1)",
+            "--ease-smooth": "cubic-bezier(0.16, 1, 0.3, 1)",
+            "--transition": "all 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
+        },
+        "anti_patterns": [
+            "Avoid harsh borders — use subtle shadows instead",
+            "Avoid tight padding — favor generous whitespace",
+            "Avoid saturated colors — keep accents muted and elegant",
+        ],
+    },
+    "minimalist": {
+        "description": "Clean editorial product UI inspired by Notion/Linear — restrained palette, crisp structure",
+        "css_vars": {
+            "--radius": "0.5rem",
+            "--shadow-sm": "none",
+            "--shadow-md": "0 1px 2px rgba(0,0,0,0.05)",
+            "--shadow-lg": "none",
+            "--ease-spring": "cubic-bezier(0.25, 0.46, 0.45, 0.94)",
+            "--ease-smooth": "cubic-bezier(0.25, 1, 0.5, 1)",
+            "--transition": "all 0.2s ease",
+        },
+        "anti_patterns": [
+            "Avoid decorative elements — every visual must have purpose",
+            "Avoid multiple accent colors — use only black and one highlight",
+            "Avoid heavy shadows — let content breathe through spacing",
+        ],
+    },
+    "brutalist": {
+        "description": "Swiss typography, sharp contrast, raw structure, experimental composition",
+        "css_vars": {
+            "--radius": "0px",
+            "--shadow-sm": "4px 4px 0px #000",
+            "--shadow-md": "6px 6px 0px #000",
+            "--shadow-lg": "8px 8px 0px #000",
+            "--ease-spring": "cubic-bezier(0.68, -0.55, 0.265, 1.55)",
+            "--ease-smooth": "cubic-bezier(0.19, 1, 0.22, 1)",
+            "--transition": "all 0.15s step-end",
+        },
+        "anti_patterns": [
+            "Avoid rounded corners — sharp edges only",
+            "Avoid subtle shadows — use hard offset shadows",
+            "Avoid gradient text — solid colors, high contrast",
+        ],
+    },
+}
+
+
+def set_design_tone(project: str, tone: str) -> str:
+    """
+    Apply a design tone preset to an existing project.
+
+    Injects CSS variables and provides anti-pattern guidance to achieve
+    a specific visual style: soft (premium), minimalist (clean), or brutalist (bold).
+
+    Args:
+        project: Project slug
+        tone:    "soft" | "minimalist" | "brutalist"
+
+    Returns:
+        Status with injected CSS variables and recommendations.
+
+    Example:
+        <skill:web_builder.set_design_tone>my-site,soft</skill:web_builder.set_design_tone>
+    """
+    tone = tone.lower().strip()
+    if tone not in _DESIGN_TONES:
+        return f"❌ Unknown tone '{tone}'. Available: {list(_DESIGN_TONES.keys())}"
+
+    slug = _slugify(project)
+    css_path = WEBSITES_DIR / slug / "style.css"
+    if not css_path.exists():
+        return f"❌ Project '{slug}' has no style.css"
+
+    preset = _DESIGN_TONES[tone]
+    css_vars_block = "\n".join(f"  {k}: {v};" for k, v in preset["css_vars"].items())
+
+    existing = css_path.read_text(encoding="utf-8")
+
+    # Find :root block with proper brace matching
+    root_start = re.search(r":root\s*\{", existing)
+    if not root_start:
+        return "❌ Could not find :root in style.css"
+
+    brace_start = root_start.end() - 1
+    depth = 0
+    root_end = brace_start
+    for i, char in enumerate(existing[brace_start:], start=brace_start):
+        if char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                root_end = i
+                break
+
+    root_match = existing[brace_start:root_end + 1]
+
+    new_root = root_match.rstrip()
+    if not new_root.endswith(";"):
+        new_root += ";"
+    new_root += "\n" + css_vars_block
+
+    new_css = existing[:brace_start] + new_root + "\n" + existing[root_end + 1:]
+
+    css_path.write_text(new_css, encoding="utf-8")
+
+    lines = [
+        f"✅ Applied '{tone}' design tone to '{slug}'",
+        f"\nStyle: {preset['description']}",
+        f"\nInjected CSS variables:",
+    ]
+    for k, v in preset["css_vars"].items():
+        lines.append(f"  --{k}: {v}")
+
+    lines.append("\nAnti-patterns to avoid:")
+    for ap in preset["anti_patterns"]:
+        lines.append(f"  • {ap}")
 
     return "\n".join(lines)
 
@@ -1307,16 +1681,21 @@ def _img_to_b64(path: Path) -> tuple:
         return base64.b64encode(f.read()).decode(), mime
 
 
-def analyze_design_folder(folder: str, language: str = "English", model: str = None) -> str:
+def analyze_design_folder(folder: str, language: str = "English", model: str = None, device_frame: str = None) -> str:
     """
     Analyze all design images in a folder with ONE batched vision LLM call.
     Returns a JSON brief with section descriptions, colors, layout and typography.
+    Optionally wraps the preview in a device frame (iPhone, android, macos, browser).
     Use this as the FIRST step of any website build — it replaces N separate image_viewer calls.
 
     Args:
-        folder:   path to design images (absolute, or relative to /app/memory/knowledge/)
-        language: language for website content (default: English)
-        model:    vision model override (default: OLLAMA_MODEL env var)
+        folder:       path to design images (absolute, or relative to /app/memory/knowledge/)
+        language:     language for website content (default: English)
+        model:        vision model override (default: OLLELLM_MODEL env var)
+        device_frame: optional — wrap server URL in a device frame:
+                      "iphone" | "android" | "macos" | "browser"
+                      Saves the frame HTML to [folder]/device-frame-[type].html
+                      and includes it in the JSON under `device_frame_html`.
     """
     if not HAS_LITELLM:
         return json.dumps({"error": "litellm not available"})
@@ -1487,20 +1866,566 @@ def analyze_design_folder(folder: str, language: str = "English", model: str = N
                 brief["source_folder"] = str(p)
                 brief["image_files"]   = [f.name for f in images]
                 brief["language"]      = language
+                # Attach device frame HTML if requested (saves to folder + includes in JSON)
+                if device_frame:
+                    frame_path = p / f"device-frame-{device_frame}.html"
+                    frame_html = _device_frame(device_frame.lower(), "http://localhost:8090")
+                    try:
+                        frame_path.write_text(frame_html, encoding="utf-8")
+                        brief["device_frame"]       = device_frame
+                        brief["device_frame_file"]  = str(frame_path)
+                        brief["device_frame_types"] = ["iphone", "android", "macos", "browser"]
+                    except Exception:
+                        pass
                 return json.dumps(brief, indent=2, ensure_ascii=False)
             except json.JSONDecodeError:
                 pass
-        return json.dumps({"raw_analysis": raw, "source_folder": str(p), "image_files": [f.name for f in images], "language": language}, indent=2, ensure_ascii=False)
+        raw_output = {"raw_analysis": raw, "source_folder": str(p), "image_files": [f.name for f in images], "language": language}
+        if device_frame:
+            frame_path = p / f"device-frame-{device_frame}.html"
+            frame_html = _device_frame(device_frame.lower(), "http://localhost:8090")
+            try:
+                frame_path.write_text(frame_html, encoding="utf-8")
+                raw_output["device_frame"]       = device_frame
+                raw_output["device_frame_file"]  = str(frame_path)
+                raw_output["device_frame_types"] = ["iphone", "android", "macos", "browser"]
+            except Exception:
+                pass
+        return json.dumps(raw_output, indent=2, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e), "model_used": model})
+
+
+# ── Device Frames (huashu-design inspired) ────────────────────────────────────
+#
+# Self-contained HTML/CSS frames for presenting websites in realistic contexts.
+# Each frame includes the bezel, status bar, and a scrollable content area.
+#
+
+def _device_frame(frame_type: str, content_url: str) -> str:
+    """
+    Return a self-contained HTML page that shows content_url inside a
+    realistic device frame (iPhone, Android, macOS, browser).
+
+    Args:
+        frame_type: "iphone" | "android" | "macos" | "browser"
+        content_url: URL or path to the website (e.g. http://localhost:8090)
+
+    Returns:
+        HTML string for the framed device.
+    """
+    frames = {
+        "iphone": {
+            "width": "390",
+            "height": "844",
+            "css": """
+  .frame {
+    background: #1a1a1a;
+    border-radius: 54px;
+    padding: 12px;
+    display: inline-block;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);
+    position: relative;
+  }
+  .screen {
+    background: #fff;
+    border-radius: 44px;
+    overflow: hidden;
+    width: 366px;
+    height: 820px;
+    position: relative;
+  }
+  .screen iframe { border: none; width: 100%; height: 100%; }
+  .status-bar {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 54px; background: transparent;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 28px 0;
+    font-family: -apple-system, sans-serif;
+    font-size: 14px; font-weight: 600; color: #fff;
+    z-index: 10;
+  }
+  .dynamic-island {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    width: 126px; height: 36px;
+    background: #000;
+    border-radius: 20px;
+    z-index: 20;
+  }
+  .home-indicator {
+    position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+    width: 134px; height: 5px;
+    background: rgba(255,255,255,0.35);
+    border-radius: 3px;
+  }
+  .label { text-align:center; color:#6b7280; font-size:12px; margin-top:8px; font-family: -apple-system, sans-serif; }
+            """,
+            "html": """
+    <div class="frame">
+      <div class="screen">
+        <div class="status-bar">
+          <span>9:41</span><span>●●●●●</span><span>86%</span>
+        </div>
+        <div class="dynamic-island"></div>
+        <iframe src="{url}" allow="fullscreen"></iframe>
+        <div class="home-indicator"></div>
+      </div>
+    </div>
+    <div class="label">iPhone 15 Pro</div>""",
+        },
+        "android": {
+            "width": "412",
+            "height": "915",
+            "css": """
+  .frame {
+    background: #1f1f1f;
+    border-radius: 44px;
+    padding: 8px;
+    display: inline-block;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.35);
+    position: relative;
+  }
+  .screen {
+    background: #fff;
+    border-radius: 36px;
+    overflow: hidden;
+    width: 396px;
+    height: 899px;
+  }
+  .screen iframe { border: none; width: 100%; height: 100%; }
+  .status-bar {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 24px; background: transparent;
+    display: flex; justify-content: flex-end; align-items: center;
+    padding: 0 16px;
+    font-size: 12px; color: #fff;
+    z-index: 10;
+  }
+  .camera-dot {
+    position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+    width: 10px; height: 10px; background: #111; border-radius: 50%;
+    z-index: 20;
+  }
+  .label { text-align:center; color:#6b7280; font-size:12px; margin-top:8px; font-family: sans-serif; }
+            """,
+            "html": """
+    <div class="frame">
+      <div class="screen">
+        <div class="status-bar"><span style="font-size:11px">11:52</span><span>●●●●</span><span>92%</span></div>
+        <div class="camera-dot"></div>
+        <iframe src="{url}" allow="fullscreen"></iframe>
+      </div>
+    </div>
+    <div class="label">Android</div>""",
+        },
+        "macos": {
+            "width": "960",
+            "height": "680",
+            "css": """
+  .frame {
+    background: #2a2a2a;
+    border-radius: 12px 12px 0 0;
+    padding: 0;
+    display: inline-block;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.35);
+    overflow: hidden;
+    width: 960px;
+  }
+  .titlebar {
+    background: #3a3a3a;
+    height: 28px;
+    display: flex; align-items: center; padding: 0 12px;
+    gap: 6px;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-r { background: #ff5f57; }
+  .dot-y { background: #febc2e; }
+  .dot-g { background: #28c840; }
+  .toolbar {
+    background: #3a3a3a;
+    height: 38px;
+    border-top: 1px solid #2a2a2a;
+    display: flex; align-items: center; padding: 0 12px; gap: 12px;
+    font-size: 12px; color: #aaa;
+    font-family: -apple-system, sans-serif;
+  }
+  .screen {
+    background: #fff;
+    height: 614px;
+    overflow: hidden;
+  }
+  .screen iframe { border: none; width: 100%; height: 100%; }
+  .label { text-align:center; color:#6b7280; font-size:12px; margin-top:8px; font-family: -apple-system, sans-serif; background:#1a1a1a; padding:6px; border-radius:0 0 12px 12px; }
+            """,
+            "html": """
+    <div class="frame">
+      <div class="titlebar">
+        <div class="dot dot-r"></div>
+        <div class="dot dot-y"></div>
+        <div class="dot dot-g"></div>
+      </div>
+      <div class="toolbar">‹ › ↺ &nbsp;&nbsp; ─ &nbsp;&nbsp; macOS Desktop</div>
+      <div class="screen">
+        <iframe src="{url}" allow="fullscreen"></iframe>
+      </div>
+    </div>
+    <div class="label">macOS Safari</div>""",
+        },
+        "browser": {
+            "width": "1280",
+            "height": "760",
+            "css": """
+  .frame {
+    background: #e5e5e5;
+    border-radius: 8px;
+    padding: 16px 16px 0;
+    display: inline-block;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+    width: 1280px;
+  }
+  .toolbar {
+    background: #f3f3f3;
+    border: 1px solid #d0d0d0;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    height: 42px;
+    display: flex; align-items: center; padding: 0 8px; gap: 8px;
+  }
+  .url-bar {
+    flex: 1;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    height: 26px;
+    display: flex; align-items: center;
+    padding: 0 10px;
+    font-size: 12px; color: #666;
+    font-family: system-ui, sans-serif;
+  }
+  .screen {
+    background: #fff;
+    border: 1px solid #d0d0d0;
+    border-top: none;
+    height: 718px;
+    overflow: hidden;
+  }
+  .screen iframe { border: none; width: 100%; height: 100%; }
+  .label { text-align:center; color:#6b7280; font-size:12px; margin-top:8px; font-family: system-ui, sans-serif; }
+            """,
+            "html": """
+    <div class="frame">
+      <div class="toolbar">
+        <div style="color:#888; font-size:16px;">‹ ›</div>
+        <div class="url-bar">{url}</div>
+        <div style="color:#888; font-size:14px;">↻</div>
+      </div>
+      <div class="screen">
+        <iframe src="{url}" allow="fullscreen"></iframe>
+      </div>
+    </div>
+    <div class="label">Browser Window</div>""",
+        },
+    }
+
+    if frame_type not in frames:
+        return json.dumps({
+            "error": f"Unknown frame type '{frame_type}'",
+            "available": list(frames.keys()),
+        })
+
+    frame = frames[frame_type]
+    html_body = frame["html"].replace("{url}", content_url)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Device Frame — {frame_type}</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      background: #f0f0f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }}
+{frame['css']}
+  </style>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
+
+
+# ── Design Direction Advisor (huashu-design inspired) ─────────────────────────
+#
+# Based on the huashu-design 5 schools × 20 philosophies framework.
+# Recommends 3 distinct design directions from different schools.
+#
+
+_DESIGN_SCHOOLS = {
+    "swiss_international": {
+        "name": "Swiss International",
+        "description": "Grid-based, typographic precision, mathematical layout. Helvetica-era hierarchy refined for the web. Clean, trustworthy, institutional.",
+        "philosophies": {
+            "grid_rigor": {
+                "name": "Grid Rigor",
+                "description": "12-column grid, consistent gutters, mathematical whitespace. Everything aligns. The grid is the design.",
+                "css_hints": "--cols: repeat(12,1fr); --gap: 1.5rem; --max-w: 1200px;",
+                "mood_keywords": ["structured", "precise", "professional", "academic"],
+            },
+            "typographic_hierarchy": {
+                "name": "Typographic Hierarchy",
+                "description": "Type is the hero. Bold headlines, generous leading, restrained body. Numbers and headings do the visual work.",
+                "css_hints": "--font-display: 'Playfair Display', serif; --font-body: 'DM Sans', sans-serif; --fs-h1: clamp(3rem,6vw,6rem); --lh-heading: 1.05;",
+                "mood_keywords": ["editorial", "authoritative", "refined"],
+            },
+            "neutral_functional": {
+                "name": "Neutral Functional",
+                "description": "Colors are tools, not decoration. Black, white, one accent. Form follows function. Bauhaus meets modern SaaS.",
+                "css_hints": "--color-primary: #000; --color-accent: #e63946; --color-bg: #fff; --radius: 0; --shadow: none;",
+                "mood_keywords": ["minimal", "functional", "no-nonsense"],
+            },
+            "corporate_clarity": {
+                "name": "Corporate Clarity",
+                "description": "High-trust visual language. Blue primary, clear hierarchy, generous white space. Enterprise-quality feel without being boring.",
+                "css_hints": "--color-primary: #1d4ed8; --color-bg: #f8fafc; --radius: 0.375rem; --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);",
+                "mood_keywords": ["trustworthy", "enterprise", "stable", "serious"],
+            },
+        },
+    },
+    "warm_organic": {
+        "name": "Warm Organic",
+        "description": "Curves, warmth, handcrafted feeling. Earth tones, natural textures, soft light. Feels human, approachable, and crafted by hand.",
+        "philosophies": {
+            "earthy_rustic": {
+                "name": "Earthy Rustic",
+                "description": "Forest greens, warm wood tones, natural linen textures. Feels like a craft shop, a farmers market, a warm cabin.",
+                "css_hints": "--color-primary: #4a6741; --color-accent: #c8956c; --color-bg: #faf6f0; --font-display: 'Fraunces', serif; --radius: 1rem;",
+                "mood_keywords": ["natural", "handcrafted", "earthy", "cozy"],
+            },
+            "soft_pastoral": {
+                "name": "Soft Pastoral",
+                "description": "Sage green, warm cream, dusty rose. Soft shadows, rounded forms, organic shapes. Calm like a countryside morning.",
+                "css_hints": "--color-primary: #7c9a6e; --color-accent: #d4a574; --color-bg: #fdf8f0; --color-surface: #f5ede0; --radius: 1.5rem; --shadow-md: 0 8px 24px rgba(0,0,0,0.05);",
+                "mood_keywords": ["gentle", "calm", "pastoral", "warm"],
+            },
+            "artisan_handcrafted": {
+                "name": "Artisan Handcrafted",
+                "description": "Visible imperfection as a feature. Texture overlays, slightly irregular shapes, warm photography. Digital craft with analog soul.",
+                "css_hints": "--color-primary: #8b4513; --color-accent: #d2691e; --color-bg: #faf7f2; --radius: 0.25rem; --shadow: 4px 4px 0px rgba(0,0,0,0.1); --texture: url(grain.png);",
+                "mood_keywords": ["handmade", "artisanal", "tactile", "unique"],
+            },
+            "boutique_luxury": {
+                "name": "Boutique Luxury",
+                "description": "Understated elegance. Cream backgrounds, gold accents, serif headlines, generous negative space. The quiet confidence of high-end.",
+                "css_hints": "--color-primary: #1a1a1a; --color-accent: #c9a84c; --color-bg: #faf9f5; --font-display: 'Cormorant Garamond', serif; --radius: 0; --shadow: 0 0 40px rgba(0,0,0,0.06);",
+                "mood_keywords": ["elegant", "sophisticated", "premium", "quiet"],
+            },
+        },
+    },
+    "digital_modern": {
+        "name": "Digital Modern",
+        "description": "Dark mode by default, neon accents, glassmorphism, futuristic. Feels like the next-generation product. Bold, confident, tech-forward.",
+        "philosophies": {
+            "dark_glass": {
+                "name": "Dark Glass",
+                "description": "Dark surfaces with frosted glass layers. Subtle glow, depth through blur. The UI feels like it exists in 3D space.",
+                "css_hints": "--color-bg: #0a0a0f; --color-surface: rgba(255,255,255,0.05); --color-accent: #7c3aed; --shadow-md: 0 8px 32px rgba(124,58,237,0.15); --radius: 1rem;",
+                "mood_keywords": ["futuristic", "sleek", "tech", "dark"],
+            },
+            "cyberpunk_neon": {
+                "name": "Cyberpunk Neon",
+                "description": "High contrast, electric color pops. Glow effects, sharp edges. Bold, loud, unapologetically digital.",
+                "css_hints": "--color-bg: #050505; --color-primary: #00f5d4; --color-accent: #ff2d78; --shadow-glow: 0 0 20px rgba(0,245,212,0.4); --radius: 0; --font-display: 'Orbitron', monospace;",
+                "mood_keywords": ["edgy", "electric", "bold", "urban"],
+            },
+            "neo_bauhaus": {
+                "name": "Neo-Bauhaus",
+                "description": "Red, yellow, blue primaries on white. Geometric shapes, strong black type. Reimagined modernist logic for the screen.",
+                "css_hints": "--color-primary: #0050ef; --color-accent: #e63329; --color-accent2: #f5c400; --color-bg: #ffffff; --radius: 0; --shadow: 4px 4px 0 #000; --font-display: 'Archivo Black', sans-serif;",
+                "mood_keywords": ["geometric", "bold", "primary", "structured"],
+            },
+            "motion_forward": {
+                "name": "Motion Forward",
+                "description": "Animation-first design. Scrolling reveals, parallax, spring physics. The page feels alive. Interaction is the aesthetic.",
+                "css_hints": "--ease-spring: cubic-bezier(0.34,1.56,0.64,1); --ease-smooth: cubic-bezier(0.16,1,0.3,1); --transition: all 0.5s cubic-bezier(0.16,1,0.3,1); --shadow-md: 0 16px 48px rgba(0,0,0,0.12);",
+                "mood_keywords": ["dynamic", "energetic", "alive", "playful"],
+            },
+        },
+    },
+    "editorial_storytelling": {
+        "name": "Editorial Storytelling",
+        "description": "Magazine-quality layout. Photography dominates, text breathes, sections feel like pages. Long-form content is a feature, not a bug.",
+        "philosophies": {
+            "editorial_magazine": {
+                "name": "Editorial Magazine",
+                "description": "Large hero photography, multi-column text, pull quotes, issue-style section breaks. The layout tells the story before you read.",
+                "css_hints": "--font-display: 'Playfair Display', serif; --font-body: 'Lora', serif; --fs-h1: clamp(3rem,7vw,7rem); --max-w: 1400px; --color-bg: #fafaf8; --lh-body: 1.8;",
+                "mood_keywords": ["magazine", "journalistic", "prestige", "long-form"],
+            },
+            "narrative_scroll": {
+                "name": "Narrative Scroll",
+                "description": "Single-column, long-scroll storytelling. Large type on dark backgrounds alternates with image sections. Like a beautifully printed annual report.",
+                "css_hints": "--font-display: 'DM Serif Display', serif; --color-bg: #1a1a1a; --color-text: #f5f5f5; --fs-h1: clamp(2.5rem,6vw,6rem); --max-w: 680px; --lh-body: 1.9;",
+                "mood_keywords": ["cinematic", "immersive", "story-driven", "evocative"],
+            },
+            "photo_first": {
+                "name": "Photo First",
+                "description": "Photography is 80% of the layout. Text is minimal, integrated into images via overlays and captions. The photo does the heavy lifting.",
+                "css_hints": "--font-display: 'Space Grotesk', sans-serif; --font-weight: 700; --text-on-image: rgba(0,0,0,0.65); --overlay-gradient: linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 60%);",
+                "mood_keywords": ["visual", "immersive", "photo-driven", "bold"],
+            },
+            "vintage_print": {
+                "name": "Vintage Print",
+                "description": "Serif everything, two-column body, drop caps, ornate section dividers. Feels like a beautifully printed book. Tactile nostalgia for the screen.",
+                "css_hints": "--font-display: 'EB Garamond', serif; --font-body: 'EB Garamond', serif; --color-bg: #f5f0e8; --color-text: #2c2416; --max-w: 700px; --lh-body: 1.85; --drop-cap: 3;",
+                "mood_keywords": ["classic", "literary", "nostalgic", "timeless"],
+            },
+        },
+    },
+    "neo_botanical": {
+        "name": "Neo-Botanical",
+        "description": "Nature meets technology. Deep greens, organic shapes, botanical illustration, living texture. The digital space feels rooted, alive, and growing.",
+        "philosophies": {
+            "forest_tech": {
+                "name": "Forest Tech",
+                "description": "Deep forest greens paired with precise sans-serif type. Organic layouts with sharp typography. Nature's logic applied to UI.",
+                "css_hints": "--color-primary: #1a3a2a; --color-accent: #4ade80; --color-bg: #0d1f15; --font-display: 'Space Grotesk', sans-serif; --radius: 0.5rem; --shadow-glow: 0 0 30px rgba(74,222,128,0.1);",
+                "mood_keywords": ["deep", "rooted", "tech-nature", "premium"],
+            },
+            "botanical_illustration": {
+                "name": "Botanical Illustration",
+                "description": "Hand-drawn botanical elements, natural color palette, textured backgrounds. Each section has an illustrated accent — a leaf, a branch, a vine.",
+                "css_hints": "--color-primary: #3d6b4f; --color-accent: #8b6914; --color-bg: #f8f4ef; --font-display: 'Cormorant Garamond', serif; --border: 1px solid rgba(61,107,79,0.2); --radius: 0;",
+                "mood_keywords": ["illustrated", "botanical", "organic", "crafted"],
+            },
+            "verdant_minimal": {
+                "name": "Verdant Minimal",
+                "description": "Generous whitespace with a single botanical focal point. Restraint meets nature. The emptiness is the design.",
+                "css_hints": "--color-primary: #2d5a3f; --color-bg: #fafcfb; --color-surface: #f0f7f2; --radius: 2rem; --shadow-sm: 0 2px 8px rgba(45,90,63,0.06); --font-body: 'DM Sans', sans-serif;",
+                "mood_keywords": ["spacious", "clean", "natural", "tranquil"],
+            },
+            "living_texture": {
+                "name": "Living Texture",
+                "description": "Grain, paper, linen, living moss textures layered under clean layouts. Tactile surfaces in a digital space. Everything feels made, not generated.",
+                "css_hints": "--color-primary: #4a6741; --color-bg: #f9f6f0; --texture-noise: url(noise.png); --border: 1px solid rgba(74,103,65,0.15); --radius: 0.75rem; --shadow-md: 0 12px 32px rgba(0,0,0,0.07);",
+                "mood_keywords": ["textured", "tactile", "layered", "material"],
+            },
+        },
+    },
+}
+
+
+def get_design_direction(project_name: str = None, industry: str = None, keywords: str = None) -> str:
+    """
+    Recommend 3 design directions from 5 schools × 20 philosophies.
+    Picks the most relevant directions based on project name, industry, and keywords.
+
+    Each recommendation includes: school name, philosophy name, description,
+    CSS variable hints, and mood keywords.
+
+    Args:
+        project_name:  Name of the project (used for relevance scoring)
+        industry:     Optional industry hint (e.g. "education", "saas", "restaurant")
+        keywords:     Optional comma-separated style keywords (e.g. "warm, minimal, premium")
+
+    Returns:
+        Markdown-formatted recommendation with 3 directions and CSS hints.
+
+    Example:
+        <skill:web_builder.get_design_direction>Carden School,education,warm,premium,trustworthy</skill:web_builder.get_design_direction>
+    """
+    # Score each philosophy by relevance
+    all_philosophies = []
+    for school_key, school in _DESIGN_SCHOOLS.items():
+        for phil_key, phil in school["philosophies"].items():
+            score = 0
+            # Project name scoring
+            if project_name:
+                pn = project_name.lower()
+                for kw in phil.get("mood_keywords", []):
+                    if kw in pn:
+                        score += 2
+                for word in phil["name"].lower().split():
+                    if word in pn:
+                        score += 1
+            # Industry keyword scoring
+            if industry:
+                ind = industry.lower()
+                for kw in phil.get("mood_keywords", []):
+                    if kw in ind:
+                        score += 3
+            # Explicit keywords scoring
+            if keywords:
+                for kw in keywords.lower().replace(",", " ").split():
+                    kw = kw.strip()
+                    if kw in phil.get("mood_keywords", []):
+                        score += 3
+                    if kw in phil["name"].lower():
+                        score += 2
+                    if kw in phil.get("description", "").lower():
+                        score += 1
+            # Boost by school (favor diversity)
+            score += hash(school_key) % 3
+            all_philosophies.append({
+                "school": school_key,
+                "school_name": school["name"],
+                "school_description": school["description"],
+                "philosophy_key": phil_key,
+                **phil,
+                "score": score,
+            })
+
+    # Sort by score, pick top 3 from different schools
+    all_philosophies.sort(key=lambda x: x["score"], reverse=True)
+    selected = []
+    used_schools = set()
+    for p in all_philosophies:
+        if p["school"] not in used_schools:
+            selected.append(p)
+            used_schools.add(p["school"])
+        if len(selected) >= 3:
+            break
+
+    # Render
+    lines = [f"## 🎨 Design Direction Advisor"]
+    if project_name:
+        lines.append(f"**Project:** {project_name}")
+    if industry:
+        lines.append(f"**Industry:** {industry}")
+    if keywords:
+        lines.append(f"**Keywords:** {keywords}")
+    lines.append("")
+    lines.append("Recommended 3 directions (from different schools):\n")
+
+    for i, p in enumerate(selected, 1):
+        emoji = ["🌿", "📐", "✨", "📖", "🌱"][list(_DESIGN_SCHOOLS.keys()).index(p["school"])]
+        lines.append(f"### {i}. {emoji} {p['name']}  _(from {p['school_name']})_")
+        lines.append(f"> {p['description']}")
+        lines.append(f"- **Mood keywords:** {', '.join(p.get('mood_keywords', []))}")
+        lines.append(f"- **CSS variable hints:**\n  ```css\n  {p.get('css_hints', '# no hints available')}\n  ```")
+        lines.append("")
+
+    lines.append("─" * 56)
+    lines.append("**Next step:** Pick a direction → call `get_design_system()` with the mood keywords")
+    lines.append("or your project description → scaffold() → build with the CSS hints above.")
+
+    return "\n".join(lines)
 
 
 __all__ = [
     "NAME", "DOC",
     "get_design_system",
+    "get_design_direction",
     "analyze_design_folder",
     "scaffold", "write_file", "patch_file", "read_file",
     "delete_file", "delete_project", "export_zip",
     "list_projects", "serve", "stop_server",
-    "server_status", "validate",
+    "server_status", "validate", "set_design_tone",
 ]
