@@ -416,7 +416,8 @@ def _run():
                             continue  # not due yet
                         # ── Missed run: advance forward, don't fire ─────────────────
                         if t['type'] == 'once':
-                            # One-time task already missed — delete it silently
+                            # One-time task already missed — delete it silently.
+                            # Don't add to to_fire so it never fires late.
                             del tasks[name]
                             continue
                         elif t.get('recur_kind') == 'calendar':
@@ -432,14 +433,19 @@ def _run():
                         else:
                             # Interval-based: advance one interval at a time until future
                             secs = t.get('interval_seconds')
-                            if secs:
+                            if secs and secs > 0:
+                                prev_run = None
                                 while True:
                                     prev = datetime.fromisoformat(t['next_run'])
+                                    # Guard: if next_run didn't advance, break to avoid infinite loop
+                                    if prev_run is not None and prev.isoformat() == prev_run:
+                                        prev = datetime.now()
                                     ideal = prev + timedelta(seconds=secs)
                                     _now2 = datetime.now(prev.tzinfo) if prev.tzinfo else datetime.now()
                                     if ideal > _now2:
                                         t['next_run'] = ideal.isoformat()
                                         break
+                                    prev_run = prev.isoformat()
                                     t['next_run'] = ideal.isoformat()
                             to_advance[name] = t
                     except (ValueError, KeyError) as e:
@@ -498,6 +504,8 @@ def _run():
                                     ).isoformat()
                                 else:
                                     secs = t.get('interval_seconds') or interval_secs
+                                    if not secs or secs <= 0:
+                                        secs = 3600  # fallback to 1h if corrupted
                                     prev = datetime.fromisoformat(t['next_run'])
                                     t['next_run'] = (prev + timedelta(seconds=secs)).isoformat()
                             except Exception as e:
@@ -642,7 +650,9 @@ def schedule_recurring(name: str, every: str = None, prompt: str = None, *, when
         display = spec['label']
         next_str = next_run.strftime('%Y-%m-%d %H:%M')
     else:
-        secs     = spec['seconds']
+        secs = spec['seconds']
+        if not secs or secs <= 0:
+            return f"❌ Interval '{every}' resolves to {secs}s — must be > 0."
         next_run = datetime.now() + timedelta(seconds=secs)
         task = {
             "type":             "recurring",
@@ -807,7 +817,9 @@ def edit_task_when(name: str, new_when: str) -> str:
             t['next_run']         = next_run.isoformat()
             display = spec['label']
         else:
-            secs     = spec['seconds']
+            secs = spec['seconds']
+            if not secs or secs <= 0:
+                return f"❌ Interval '{new_when}' resolves to {secs}s — must be > 0."
             next_run = datetime.now() + timedelta(seconds=secs)
             t['recur_kind']       = 'interval'
             t['interval_seconds'] = secs
