@@ -405,18 +405,50 @@ def _run():
             with _lock:
                 tasks = _load()
                 to_fire = []
+                to_advance = {}       # name -> updated task dict (skipped runs only)
                 for name, t in tasks.items():
                     if name in _firing_tasks:
                         continue  # already dispatching — skip to prevent double-fire
                     try:
                         next_run_dt = datetime.fromisoformat(t['next_run'])
                         _now = datetime.now(next_run_dt.tzinfo) if next_run_dt.tzinfo else now
-                        if _now >= next_run_dt:
-                            to_fire.append((name, t['prompt'], t['type'],
-                                            t.get('interval_seconds')))
-                            _firing_tasks.add(name)
+                        if _now < next_run_dt:
+                            continue  # not due yet
+                        # ── Missed run: advance forward, don't fire ─────────────────
+                        if t['type'] == 'once':
+                            # One-time task already missed — delete it silently
+                            del tasks[name]
+                            continue
+                        elif t.get('recur_kind') == 'calendar':
+                            # Advance to the next calendar slot after now
+                            try:
+                                t['next_run'] = _next_calendar_run(
+                                    t.get('cal_weekdays'), t['cal_hour'], t['cal_minute'],
+                                    after=datetime.now()
+                                ).isoformat()
+                                to_advance[name] = t
+                            except Exception as e:
+                                print(f"[scheduler] calendar advance error for '{name}': {e}")
+                        else:
+                            # Interval-based: advance one interval at a time until future
+                            secs = t.get('interval_seconds')
+                            if secs:
+                                while True:
+                                    prev = datetime.fromisoformat(t['next_run'])
+                                    ideal = prev + timedelta(seconds=secs)
+                                    _now2 = datetime.now(prev.tzinfo) if prev.tzinfo else datetime.now()
+                                    if ideal > _now2:
+                                        t['next_run'] = ideal.isoformat()
+                                        break
+                                    t['next_run'] = ideal.isoformat()
+                            to_advance[name] = t
                     except (ValueError, KeyError) as e:
                         print(f"[scheduler] skipping malformed task '{name}': {e}")
+                # Apply silent advances before Phase 3 save
+                for name, t in to_advance.items():
+                    tasks[name] = t
+                if to_advance:
+                    _save(tasks)
 
             # Phase 2: dispatch concurrently outside the lock (capped thread pool)
             results = []
@@ -455,28 +487,21 @@ def _run():
                         t['run_count']   = t.get('run_count', 0) + 1
                         _append_activity(f"scheduler:{name}", prompt, result)
                         if kind == 'once':
-                            del tasks[name]
-                        elif t.get('recur_kind') == 'calendar':
-                            # Advance to the next calendar-aligned occurrence
-                            try:
-                                t['next_run'] = _next_calendar_run(
-                                    t.get('cal_weekdays'), t['cal_hour'], t['cal_minute'],
-                                    after=datetime.now()
-                                ).isoformat()
-                            except Exception as e:
-                                print(f"[scheduler] calendar advance error for '{name}': {e}")
+                            del tasks[name]   # one-time: remove after running
                         else:
-                            # Advance from the stored next_run (not dispatch time)
-                            # to preserve schedule alignment (e.g. always at :00).
-                            # Cap to now so next_run is never in the past if
-                            # dispatch exceeded the interval.
-                            # Use interval_seconds from the fresh disk load so that
-                            # edit_task_when() changes made during dispatch take effect.
-                            fresh_secs = t.get('interval_seconds') or interval_secs
-                            prev_next = datetime.fromisoformat(t['next_run'])
-                            ideal = prev_next + timedelta(seconds=fresh_secs)
-                            now_cmp = datetime.now(ideal.tzinfo) if ideal.tzinfo else datetime.now()
-                            t['next_run'] = max(ideal, now_cmp).isoformat()
+                            # Recurring: advance next_run to the next occurrence
+                            try:
+                                if t.get('recur_kind') == 'calendar':
+                                    t['next_run'] = _next_calendar_run(
+                                        t.get('cal_weekdays'), t['cal_hour'], t['cal_minute'],
+                                        after=datetime.now()
+                                    ).isoformat()
+                                else:
+                                    secs = t.get('interval_seconds') or interval_secs
+                                    prev = datetime.fromisoformat(t['next_run'])
+                                    t['next_run'] = (prev + timedelta(seconds=secs)).isoformat()
+                            except Exception as e:
+                                print(f"[scheduler] advance error for '{name}': {e}")
                     _save(tasks)
         except Exception as e:
             print(f"[scheduler] loop error: {e}")
