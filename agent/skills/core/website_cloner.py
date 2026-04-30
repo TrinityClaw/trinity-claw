@@ -1099,8 +1099,29 @@ def _generate_section_css(structure: dict) -> str:
 
     if not rules:
         return ""
+
+    # ── Quality CSS hints injected into every clone's section CSS ─────────────
+    # These nudge the agent toward professional, non-generic CSS from the start.
+    # Based on huashu-design 20 design vocabularies.
+    quality_header = """\
+/* ── Design Quality Hints (huashu-design inspired) ────────────────────────
+ * Follow these rules when writing section CSS below:
+ *   ✓ Use CSS custom properties (var(--name)) for all colors — not raw hex in selectors
+ *   ✓ Use cubic-bezier() easing for transitions — not 'ease' or 'linear'
+ *   ✓ Avoid 'Inter', 'Open Sans', 'Roboto' — use Outfit, Satoshi, DM Sans, Plus Jakarta Sans
+ *   ✓ Use off-black (#09090b zinc-950 or #0a0a0a) instead of pure #000000
+ *   ✓ Use off-white (#fafaf9 or #f8fafc) instead of pure #ffffff for surfaces
+ *   ✓ Avoid 'justify-content: center' — use asymmetric flex or grid offset
+ *   ✓ Avoid 'box-shadow: 0 0 20px' — use subtle inner shadows or tinted depth
+ *   ✓ Specify transition properties explicitly — not 'transition: all 0.3s'
+ *   ✓ Use CSS Grid (grid-template-columns) for multi-column layouts over floats
+ *   ✓ Keep class names semantic: .s-hero, .s-features, .s-testimonials — not .blue-box
+ */
+
+"""
     return (
         "\n/* ── Per-section color overrides (auto-extracted from source) ── */\n"
+        + quality_header
         + "\n".join(rules)
     )
 
