@@ -44,15 +44,20 @@ DOC = (
     "get_design_system(description,project_name?)→generate industry-matched design system (colors, typography, UI style, anti-patterns) using 161 reasoning rules; call BEFORE scaffold() for best results. "
     "get_design_direction(project_name?,industry?,keywords?)→recommend 3 design directions from 5 schools × 20 philosophies with descriptions and CSS variable hints; "
     "set_design_tone(project,tone)→apply design preset: 'soft' (premium, airy, spring motion), 'minimalist' (clean, editorial, Linear/Notion), 'brutalist' (Swiss typography, sharp contrast); returns CSS variables and recommendations. "
+    "load_design(name)→load a design.md file from memory/knowledgebase/designs/, parse colors/fonts/sections, return build-ready specs and CSS variables; use AFTER scaffold() to apply design; "
+    "build_from_design(name,template?,serve?)→ONE-STEP: scaffold + parse design.md + apply CSS variables + auto-start preview (optional); use this instead of scaffold() when you have a design.md; "
     "⚠️ CRITICAL RULE: After scaffold(), ALWAYS use patch_file() — NEVER write_file() on index.html or style.css. write_file() overwrites the full professional template and destroys the layout. "
     "TEXT-ONLY BUILD WORKFLOW: scaffold(name,professional) → patch_file×N (update placeholders + :root colors) → serve(). "
     "DESIGN-AWARE BUILD WORKFLOW (RECOMMENDED): get_design_system(description) → scaffold(name,professional) → patch_file×N (apply design system :root variables, fonts, section text) → serve(). "
     "IMAGE BUILD WORKFLOW: analyze_design_folder(folder,device_frame?) → scaffold(name,professional) → patch_file×N (apply brief colors/text) → serve(). "
+    "DESIGN-MD WORKFLOW (FASTEST): build_from_design(name) → patch_file×N (refine content) → serve(). "
+    "DESIGN-MD WORKFLOW (2-STEP): load_design(name) → scaffold(name,professional) → patch_file×N (apply parsed colors, fonts, section content) → serve(). "
     "PREMIUM BUILD WORKFLOW: scaffold(name,professional) → set_design_tone(name,soft|minimalist|brutalist) → patch_file×N → serve(). "
     "DIRECTION WORKFLOW: get_design_direction() → pick a school/philosophy → get_design_system() → scaffold() → patch_file×N → serve()."
 )
 
 WEBSITES_DIR = Path("/app/memory/websites")
+DESIGNS_DIR = Path("/app/memory/knowledgebase/designs")
 ALLOWED_EXTENSIONS = {
     ".html", ".css", ".js", ".json", ".svg", ".txt",
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico",
@@ -1211,6 +1216,586 @@ def export_zip(project: str) -> str:
 
     size_kb = zip_path.stat().st_size / 1024
     return f"📦 Exported '{slug}' → {zip_path} ({size_kb:.1f} KB)"
+
+
+# ── Design.md Loading ─────────────────────────────────────────────────────────
+
+def load_design(design_name: str = None) -> str:
+    """
+    Load a design.md file from the knowledgebase to use for building a website.
+
+    Args:
+        design_name: Name of the design file (without .md extension)
+                    e.g. "my-site-design" → loads "my-site-design.md"
+                    If None, lists all available designs.
+
+    The design.md should follow this format:
+
+    # Project Name
+    ## Colors
+    - Primary: #1a2e4a
+    - Accent: #c9a84c
+    - Background: #ffffff
+    - Text: #1f2937
+
+    ## Typography
+    - Headings: Playfair Display
+    - Body: Inter
+
+    ## Sections
+    - Hero (with headline, subheadline, CTA text)
+    - About
+    - Services
+    - Testimonials
+    - Contact
+
+    ## Layout
+    - Modern / Minimalist / Brutalist
+
+    ## Notes
+    - Any additional design instructions
+
+    Returns:
+        Parsed design specs with CSS variables ready to apply via patch_file().
+
+    Example:
+        <skill:web_builder.load_design>my-client-design</skill:web_builder.load_design>
+    """
+    # Try multiple paths for design files
+    local_designs = Path(__file__).parent.parent.parent / "memory" / "knowledgebase" / "designs"
+
+    # Try multiple paths
+    search_paths = [
+        DESIGNS_DIR,
+        local_designs,
+        Path("/app/memory/designs"),
+        Path("/app/knowledgebase/designs"),
+    ]
+
+    if design_name is None:
+        # List available designs
+        available = []
+        for base_path in search_paths:
+            if base_path.exists():
+                available.extend([f.stem for f in base_path.glob("*.md")])
+
+        if not available:
+            return (
+                "📁 No design files found.\n\n"
+                "Upload your design.md to one of:\n"
+                + "\n".join(f"  - {p}" for p in search_paths)
+                + "\n\nThen use: load_design('your-design-name')"
+            )
+
+        return f"📐 Available designs:\n" + "\n".join(f"  - {d}" for d in sorted(set(available)))
+
+    design_file = None
+    for base_path in search_paths:
+        candidate = base_path / f"{design_name}.md"
+        if candidate.exists():
+            design_file = candidate
+            break
+
+    if not design_file:
+        return (
+            f"❌ Design '{design_name}' not found.\n"
+            f"Upload your design.md to one of:\n"
+            + "\n".join(f"  - {p}" for p in search_paths)
+            + "\n\nThen use: load_design('" + design_name + "')"
+        )
+
+    content = design_file.read_text(encoding="utf-8")
+
+    # Parse design.md
+    specs = _parse_design_md(content)
+
+    # Build CSS variables string
+    primary = specs['colors'].get('primary', '#1a2e4a')
+    accent = specs['colors'].get('accent', '#c9a84c')
+    bg = specs['colors'].get('background', '#ffffff')
+    text = specs['colors'].get('text', '#1f2937')
+    font_heading = specs['fonts'].get('heading', 'Playfair Display')
+    font_body = specs['fonts'].get('body', 'Inter')
+
+    css_vars = f"""\
+  --primary:      {primary};
+  --primary-lt:   {primary}ee; /* lighter variant */
+  --accent:       {accent};
+  --accent-dk:    {accent}dd; /* darker variant */
+  --text:         {text};
+  --bg:           {bg};
+  --font-heading: '{font_heading}', Georgia, serif;
+  --font-body:    '{font_body}', system-ui, sans-serif;"""
+
+    return f"""✅ Design loaded: {design_file.name}
+
+---
+
+## 📐 Design Specs
+
+### Colors
+| Role | Value |
+|------|-------|
+| Primary | {primary} |
+| Accent | {accent} |
+| Background | {bg} |
+| Text | {text} |
+
+### Typography
+- **Headings:** {font_heading}
+- **Body:** {font_body}
+
+### Layout Style
+{specs['layout']}
+
+### Sections
+""" + "\n".join(f"- {s}" for s in specs['sections']) + f"""
+
+---
+
+## 🎨 Ready-to-Use CSS Variables
+
+Copy these into your style.css :root block via patch_file():
+
+```css
+:root {{
+{css_vars}
+}}
+```
+
+---
+
+## 🚀 Build Instructions
+
+1. **Scaffold the project:**
+   scaffold('{specs['name']}', professional)
+
+2. **Apply CSS variables** (replace existing :root block in style.css):
+   patch_file(project, style.css, old_root_block, new_root_block_with_design_vars)
+
+3. **Update Google Fonts import** in style.css if using different fonts
+
+4. **Apply section content** via patch_file() on index.html:
+   - Hero headline: "{specs['hero'].get('headline', '')}"
+   - Hero subheadline: "{specs['hero'].get('subheadline', '')}"
+   - Hero CTA: "{specs['hero'].get('cta', 'Get Started')}"
+   - About text, Services content, Testimonials, etc.
+
+5. **Serve and preview:**
+   serve(project)
+
+"""
+
+
+def build_from_design(design_name: str, template: str = "professional", serve_preview: bool = False) -> str:
+    """
+    Auto-scaffold and apply a design from a design.md file in one step.
+
+    This combines scaffold() + load_design() + auto-patching into a single call.
+
+    Args:
+        design_name: Name of the design file (without .md extension)
+        template: Template to use (default: "professional")
+        serve_preview: If True, starts the preview server automatically
+
+    Returns:
+        Status with project name, applied design details, and preview URL if serve_preview=True
+
+    Example:
+        <skill:web_builder.build_from_design>raycast-style</skill:web_builder.build_from_design>
+    """
+    # Step 1: Load the design
+    local_designs = Path(__file__).parent.parent.parent / "memory" / "knowledgebase" / "designs"
+    search_paths = [
+        DESIGNS_DIR,
+        local_designs,
+        Path("/app/memory/designs"),
+        Path("/app/knowledgebase/designs"),
+    ]
+
+    design_file = None
+    for base_path in search_paths:
+        candidate = base_path / f"{design_name}.md"
+        if candidate.exists():
+            design_file = candidate
+            break
+
+    if not design_file:
+        return (
+            f"❌ Design '{design_name}' not found.\n"
+            f"Upload your design.md to one of:\n"
+            + "\n".join(f"  - {p}" for p in search_paths)
+        )
+
+    content = design_file.read_text(encoding="utf-8")
+    specs = _parse_design_md(content)
+    project_name = _slugify(specs['name'])
+
+    # Step 2: Scaffold the project
+    if template not in _TEMPLATES:
+        template = "professional"
+
+    project_dir = WEBSITES_DIR / project_name
+    if project_dir.exists():
+        return f"⚠️ Project '{project_name}' already exists. Use patch_file() to edit it, or delete_project('{project_name}') first."
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+    for filename, file_content in _TEMPLATES[template].items():
+        (project_dir / filename).write_text(
+            file_content.replace("{name}", specs['name']),
+            encoding="utf-8"
+        )
+
+    results = [f"✅ Project '{project_name}' scaffolded with {template} template"]
+
+    # Step 3: Build CSS variables to apply
+    if specs['format'] == 'complex' and specs['css_code_block']:
+        # Use the full CSS code block from the design
+        css_vars = specs['css_code_block']
+
+        # Try to patch the style.css with the design's CSS variables
+        try:
+            style_file = project_dir / "style.css"
+            style_content = style_file.read_text(encoding="utf-8")
+
+            # Find and replace the :root block
+            root_pattern = r':root\s*\{[^}]+\}'
+            if re.search(root_pattern, style_content, re.DOTALL):
+                new_content = re.sub(root_pattern, css_vars, style_content, count=1, flags=re.DOTALL)
+                style_file.write_text(new_content, encoding="utf-8")
+                results.append("✅ Applied design CSS variables from :root block")
+            else:
+                # Prepend the CSS variables at the start of the file
+                style_file.write_text(css_vars + "\n\n" + style_content, encoding="utf-8")
+                results.append("✅ Prepended design CSS variables to style.css")
+        except Exception as e:
+            results.append(f"⚠️ Could not apply CSS variables: {e}")
+
+    else:
+        # Build CSS variables from parsed specs
+        primary = specs['colors'].get('primary', '#1a2e4a')
+        accent = specs['colors'].get('accent', '#c9a84c')
+        bg = specs['colors'].get('background', '#ffffff')
+        text = specs['colors'].get('text', '#1f2937')
+        font_heading = specs['fonts'].get('heading', specs['fonts'].get('headings', 'Playfair Display'))
+        font_body = specs['fonts'].get('body', specs['fonts'].get('Body', 'Inter'))
+
+        css_vars = f""":root {{
+  --primary:      {primary};
+  --accent:       {accent};
+  --text:         {text};
+  --bg:           {bg};
+  --font-heading: '{font_heading}', Georgia, serif;
+  --font-body:    '{font_body}', system-ui, sans-serif;
+}}"""
+
+        # Dark mode support if theme is dark
+        if specs['theme'] == 'dark':
+            # Swap light/dark values for dark theme
+            css_vars = f""":root {{
+  --primary:      {primary};
+  --accent:       {accent};
+  --text:         {bg};
+  --bg:           {primary};
+  --surface:      {text};
+  --font-heading: '{font_heading}', Georgia, serif;
+  --font-body:    '{font_body}', system-ui, sans-serif;
+}}"""
+
+        results.append(f"🎨 Parsed {len(specs['colors'])} colors, {len(specs['fonts'])} fonts")
+
+    # Step 4: Apply Google Fonts import if fonts are specified
+    if specs['fonts']:
+        font_list = list(specs['fonts'].values())
+        unique_fonts = []
+        for f in font_list:
+            if f and f not in unique_fonts:
+                unique_fonts.append(f)
+
+        if unique_fonts:
+            # Build Google Fonts URL
+            font_names = '+'.join(f.replace(' ', '+') for f in unique_fonts if f not in ('Inter', 'system-ui', 'sans-serif'))
+            if font_names:
+                font_import = f"@import url('https://fonts.googleapis.com/css2?family={font_names}&display=swap');\n\n"
+                try:
+                    style_file = project_dir / "style.css"
+                    style_content = style_file.read_text(encoding="utf-8")
+                    if '@import' not in style_content:
+                        style_file.write_text(font_import + style_content, encoding="utf-8")
+                        results.append(f"✅ Added Google Fonts import: {', '.join(unique_fonts)}")
+                except Exception:
+                    pass
+
+    # Step 5: Summary
+    results.append(f"\n📐 Design: {design_file.name}")
+    results.append(f"🎭 Theme: {specs['theme']}")
+    results.append(f"📝 Format: {specs['format']}")
+
+    if specs['sections']:
+        results.append(f"📄 Sections: {', '.join(specs['sections'][:5])}")
+
+    results.append(f"\n📁 Project: {project_name}")
+    results.append(f"⚠️ Use patch_file() to refine content and colors")
+
+    # Step 6: Optionally start preview
+    if serve_preview:
+        port = "8090"
+        import http.server
+        import functools
+
+        global _httpd, _server_thread, _serving_project
+
+        if _httpd:
+            try:
+                _httpd.shutdown()
+            except Exception:
+                pass
+
+        class _NoListHandler(http.server.SimpleHTTPRequestHandler):
+            def list_directory(self, _path):
+                self.send_error(403, "Directory listing disabled")
+                return None
+
+        handler = functools.partial(_NoListHandler, directory=str(project_dir))
+        try:
+            _httpd = http.server.HTTPServer(("0.0.0.0", int(port)), handler)
+            _server_thread = threading.Thread(target=_httpd.serve_forever, daemon=True)
+            _server_thread.start()
+            _serving_project = project_name
+            results.append(f"\n🟢 Preview: http://localhost:{port}")
+        except OSError as e:
+            results.append(f"\n⚠️ Could not start preview: {e}")
+
+    return "\n".join(results)
+
+
+def _parse_design_md(content: str) -> dict:
+    """
+    Parse a design.md file into structured specs dict.
+    Supports both simple format (key: value lists) and complex format
+    (markdown tables, CSS code blocks, component specs).
+    """
+    specs = {
+        'name': 'My Website',
+        'theme': 'light',
+        'colors': {},
+        'fonts': {},
+        'font_sizes': {},
+        'spacing': {},
+        'shadows': {},
+        'sections': [],
+        'layout': 'Modern',
+        'hero': {},
+        'components': {},
+        'css_variables': '',
+        'css_code_block': '',
+        'do_donts': [],
+        'agent_prompts': [],
+        'format': 'simple',
+    }
+
+    lines = content.split('\n')
+    current_section = None
+    current_subsection = None
+    table_headers = []
+    in_table = False
+    in_code_block = False
+    code_block_content = []
+    code_block_lang = None
+
+    for i, line in enumerate(lines):
+        # Track code blocks
+        if line.strip().startswith('```'):
+            if in_code_block:
+                # End code block
+                if code_block_lang in ('css', 'css-variables'):
+                    specs['css_code_block'] = '\n'.join(code_block_content)
+                    specs['format'] = 'complex'
+                code_block_content = []
+                in_code_block = False
+                code_block_lang = None
+            else:
+                # Start code block
+                in_code_block = True
+                code_block_lang = line.strip()[3:].strip()
+                code_block_content = []
+            continue
+
+        if in_code_block:
+            code_block_content.append(line)
+            continue
+
+        # Title (project name)
+        if line.startswith('# ') and current_section is None:
+            specs['name'] = line[2:].strip()
+            continue
+
+        # Check for theme indicator
+        if '**Theme:**' in line:
+            theme_match = line.split('**Theme:**')[1].strip()
+            specs['theme'] = theme_match.lower()
+            continue
+
+        # Section headers
+        if line.startswith('## '):
+            section_name = line[3:].strip().lower()
+            # Map common section names
+            if 'color' in section_name and 'token' in section_name:
+                current_section = 'colors'
+            elif 'typograph' in section_name and 'token' in section_name:
+                current_section = 'typography'
+            elif 'spacing' in section_name and 'shape' in section_name:
+                current_section = 'spacing'
+            elif 'shadow' in section_name:
+                current_section = 'shadows'
+            elif 'component' in section_name:
+                current_section = 'components'
+            elif 'quick start' in section_name or 'css custom' in section_name:
+                current_section = 'css_block'
+            elif 'do' in section_name and ('dont' in section_name or "'" in section_name or 'avoid' in section_name):
+                current_section = 'do_donts'
+            elif 'agent prompt' in section_name or 'layout' in section_name:
+                current_section = 'agent_prompts'
+            elif 'section' in section_name or 'hero' in section_name:
+                current_section = 'sections'
+            elif 'gradient' in section_name:
+                current_section = 'gradients'
+            else:
+                current_section = section_name
+            current_subsection = None
+            continue
+
+        # Subsection headers
+        if line.startswith('### '):
+            current_subsection = line[4:].strip().lower()
+            continue
+
+        # Parse markdown tables (| Name | Value | Token |)
+        if '|' in line and line.strip().startswith('|'):
+            parts = [p.strip() for p in line.split('|')]
+            parts = [p for p in parts if p]  # Remove empty
+
+            # Header row
+            if all(p.replace('-', '').replace(':', '').strip().isalpha() or p.lower() in ('value', 'name', 'token', 'role') for p in parts if p):
+                table_headers = [p.lower() for p in parts]
+                in_table = True
+                continue
+
+            # Separator row (|---|---|)
+            if all(set(p.strip()) <= {'-', ':', '|', ' '} for p in parts):
+                continue
+
+            # Data row
+            if in_table and parts:
+                row_data = {table_headers[j]: parts[j] for j in range(min(len(parts), len(table_headers)))}
+
+                # Colors table: | Name | Value | Token | Role |
+                if 'value' in row_data and 'token' in row_data and 'name' in row_data:
+                    color_name = row_data.get('name', '').lower().replace(' ', '-')
+                    color_value = row_data.get('value', '').strip()
+                    if color_value.startswith('#') or color_value.startswith('rgb') or color_value.startswith('rgba') or color_value.startswith('linear') or color_value.startswith('radial'):
+                        # Skip gradient values in main colors (they go in gradients section)
+                        if 'gradient' not in color_value[:20]:
+                            specs['colors'][color_name] = color_value
+                            specs['format'] = 'complex'
+
+                # Font sizes table: | Role | Size | Line Height | Letter Spacing |
+                if 'size' in row_data and 'role' in row_data:
+                    role = row_data.get('role', '').lower().strip()
+                    size = row_data.get('size', '').strip()
+                    if size:
+                        specs['font_sizes'][role] = size
+                        specs['format'] = 'complex'
+
+                # Spacing table
+                if 'value' in row_data and 'token' in row_data and 'name' not in row_data:
+                    token = row_data.get('token', '').strip()
+                    value = row_data.get('value', '').strip()
+                    if token.startswith('--') and value:
+                        specs['spacing'][token] = value
+                        specs['format'] = 'complex'
+            continue
+        else:
+            in_table = False
+
+        # Parse content based on current section
+        if current_section == 'colors':
+            if line.strip().startswith('- '):
+                parts = line.strip()[2:].split(':', 1)
+                if len(parts) == 2:
+                    specs['colors'][parts[0].strip().lower()] = parts[1].strip()
+
+        elif current_section == 'typography':
+            if line.strip().startswith('- '):
+                parts = line.strip()[2:].split(':', 1)
+                if len(parts) == 2:
+                    key = parts[0].strip().lower()
+                    specs['fonts'][key] = parts[1].strip()
+            # Also capture font mentions like "Inter" with weights
+            elif '—' in line and ('font' in line.lower() or 'Font' in line):
+                # Font definition line: "### Inter — Universal UI font..."
+                font_match = line.split('—')[0].strip().lstrip('#* ')
+                if font_match and len(font_match) < 50:
+                    specs['fonts'][font_match.lower()] = font_match
+
+        elif current_section in ('sections', 'section'):
+            if line.strip().startswith('- '):
+                section = line.strip()[2:].strip()
+                specs['sections'].append(section)
+            elif line.strip().startswith('**'):
+                # Component/section name in bold
+                name = line.strip().replace('**', '').strip()
+                if name and len(name) < 100:
+                    specs['sections'].append(name)
+
+        elif current_section == 'layout':
+            if line.strip() and not line.startswith('-') and not line.startswith('**'):
+                specs['layout'] = line.strip()
+            elif 'max-width' in line.lower() or 'max width' in line.lower():
+                specs['layout'] = line.strip()
+
+        elif current_section == 'hero':
+            if line.strip().startswith('- '):
+                parts = line.strip()[2:].split(':', 1)
+                if len(parts) == 2:
+                    specs['hero'][parts[0].strip().lower()] = parts[1].strip()
+
+        elif current_section == 'components':
+            # Capture component names as section titles
+            if line.strip().startswith('### '):
+                component_name = line.strip()[4:].strip().lower().replace(' ', '-')
+                specs['components'][component_name] = {}
+            # Capture component properties
+            elif line.strip().startswith('- ') or line.strip().startswith('**'):
+                prop_line = line.strip().lstrip('-* ').replace('**', '')
+                parts = prop_line.split(':', 1)
+                if len(parts) == 2:
+                    specs['components'].setdefault(current_subsection or 'general', {})[parts[0].strip()] = parts[1].strip()
+
+        elif current_section == 'do_donts':
+            if line.strip().startswith('### Do'):
+                specs['do_donts'].append(('do', []))
+            elif line.strip().startswith('### Don\'t') or line.strip().startswith('### Do Not'):
+                specs['do_donts'].append(('dont', []))
+            elif line.strip().startswith('- '):
+                action = 'do_dont'
+                if specs['do_donts'] and len(specs['do_donts'][-1]) == 2:
+                    action = specs['do_donts'][-1][0]
+                    specs['do_donts'][-1][1].append(line.strip()[2:].strip())
+
+        elif current_section == 'agent_prompts':
+            # Capture example component prompts
+            if line.strip().startswith('**') and '**:' in line:
+                specs['agent_prompts'].append(line.strip())
+
+    # Extract CSS variables from code blocks if present
+    if specs['css_code_block']:
+        # Find the :root block
+        root_match = re.search(r':root\s*\{([^}]+)\}', specs['css_code_block'], re.DOTALL)
+        if root_match:
+            specs['css_variables'] = root_match.group(0)
+
+    return specs
 
 
 # ── 5-Dimension Expert Critique Framework ────────────────────────────────────
