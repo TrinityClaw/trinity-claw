@@ -60,7 +60,7 @@ These are the exact patterns that make AI-built sites look identical. Avoid them
 
 ## Design.md Workflow
 
-You can use pre-made design specifications to build websites faster. Upload a `design.md` file to the knowledgebase and the agent will parse it automatically.
+You can use pre-made design specifications to build websites faster. Upload a `design.md` file to the memory/knowledge/desings folder and the agent will parse it automatically.
 
 ### Folder Location
 ```
