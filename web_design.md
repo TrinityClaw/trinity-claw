@@ -58,8 +58,74 @@ These are the exact patterns that make AI-built sites look identical. Avoid them
 
 ---
 
+## Design.md Workflow
+
+You can use pre-made design specifications to build websites faster. Upload a `design.md` file to the knowledgebase and the agent will parse it automatically.
+
+### Folder Location
+```
+agent/memory/knowledgebase/designs/your-design-name.md
+```
+
+### Design.md Format
+Your design.md can be simple or complex. Examples:
+
+**Simple format:**
+```markdown
+# Project Name
+## Colors
+- Primary: #1a2e4a
+- Accent: #c9a84c
+- Background: #ffffff
+## Typography
+- Headings: Playfair Display
+- Body: Inter
+## Sections
+- Hero (headline: "...", cta: "Get Started")
+- About
+- Services
+- Contact
+## Layout
+Modern, clean, professional
+```
+
+**Complex format (like Raycast style):**
+Supports markdown tables, CSS code blocks, component specs, typography scales, spacing tokens, shadows, gradients, and agent prompt guides.
+
+### Functions
+
+- **`load_design(name)`** → Load and parse a design.md, returns CSS variables + section specs to apply via `patch_file()`. Use when you want manual control.
+
+- **`build_from_design(name)`** → ONE-STEP auto-apply: scaffolds project + parses design + applies CSS variables automatically. Fastest option when you have a design.md ready.
+
+### Workflows
+
+```
+# FASTEST (one-step)
+build_from_design("your-design-name")
+
+# STEP-BY-STEP (more control)
+load_design("your-design-name")
+scaffold(project_name, "professional")
+patch_file()... (apply colors/content)
+serve(project_name)
+```
+
+### Auto-Apply Behavior
+
+When using `build_from_design()`:
+1. Loads and parses the design.md from knowledgebase
+2. Scaffolds the project with the `professional` template
+3. Extracts CSS variables from `:root` blocks or parses color tables
+4. Auto-applies Google Fonts imports if fonts are specified
+5. Applies the full :root CSS block for complex designs
+6. Starts preview server (optional: add `true` as third parameter)
+
+---
+
 ## Self-Verification Checklist — New Sites Only (Before Reporting Done)
 
+- [ ] Did I use the appropriate workflow? (`build_from_design()` for design.md, `scaffold()` + `patch_file()` for manual, `analyze_design_folder()` for images)
 - [ ] Did I call `web_builder.serve()` and provide the preview URL?
 - [ ] Did I update the default template colors to match the user's brand (or ask for them)?
 - [ ] Is the site responsive (checked via `web_builder` template structure)?
