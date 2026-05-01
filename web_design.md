@@ -64,7 +64,7 @@ You can use pre-made design specifications to build websites faster. Upload a `d
 
 ### Folder Location
 ```
-agent/memory/knowledgebase/designs/your-design-name.md
+trinity-claw/memory/knowledge/designs/your-design-name.md
 ```
 
 ### Design.md Format
