@@ -44,7 +44,7 @@ DOC = (
     "get_design_system(description,project_name?)→generate industry-matched design system (colors, typography, UI style, anti-patterns) using 161 reasoning rules; call BEFORE scaffold() for best results. "
     "get_design_direction(project_name?,industry?,keywords?)→recommend 3 design directions from 5 schools × 20 philosophies with descriptions and CSS variable hints; "
     "set_design_tone(project,tone)→apply design preset: 'soft' (premium, airy, spring motion), 'minimalist' (clean, editorial, Linear/Notion), 'brutalist' (Swiss typography, sharp contrast); returns CSS variables and recommendations. "
-    "load_design(name)→load a design.md file from memory/knowledgebase/designs/, parse colors/fonts/sections, return build-ready specs and CSS variables; use AFTER scaffold() to apply design; "
+    "load_design(name)→load a design.md file from memory/knowledge/designs/, parse colors/fonts/sections, return build-ready specs and CSS variables; use AFTER scaffold() to apply design; "
     "build_from_design(name,template?,serve?)→ONE-STEP: scaffold + parse design.md + use LLM to intelligently generate matching HTML/CSS + apply tokens + preview (optional); BEST for complex designs; "
     "⚠️ CRITICAL RULE: After scaffold(), ALWAYS use patch_file() — NEVER write_file() on index.html or style.css. write_file() overwrites the full professional template and destroys the layout. "
     "TEXT-ONLY BUILD WORKFLOW: scaffold(name,professional) → patch_file×N (update placeholders + :root colors) → serve(). "
@@ -99,8 +99,7 @@ def _get_designs_dir() -> Path:
     # Try in order of likelihood
     candidates = [
         base / "memory" / "knowledge" / "designs",      # memory/knowledge/designs (PRIMARY)
-        base / "memory" / "knowledgebase" / "designs",  # memory/knowledgebase/designs (ALTERNATIVE)
-        base / "knowledgebase" / "designs",
+        base / "knowledge" / "designs",
         base / "designs",
     ]
 
@@ -1283,15 +1282,14 @@ def _get_design_search_paths() -> list:
     return [
         DESIGNS_DIR,  # Primary: use the smart-resolved path
         base / "memory" / "knowledge" / "designs",       # memory/knowledge/designs
-        base / "memory" / "knowledgebase" / "designs",  # memory/knowledgebase/designs
-        base / "knowledgebase" / "designs",
+        base / "knowledge" / "designs",
         base / "designs",
     ]
 
 
 def load_design(design_name: str = None) -> str:
     """
-    Load a design.md file from the knowledgebase to use for building a website.
+    Load a design.md file from the knowledge to use for building a website.
 
     Args:
         design_name: Name of the design file (without .md extension)
