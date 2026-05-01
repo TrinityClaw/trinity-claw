@@ -56,8 +56,64 @@ DOC = (
     "DIRECTION WORKFLOW: get_design_direction() → pick a school/philosophy → get_design_system() → scaffold() → patch_file×N → serve()."
 )
 
-WEBSITES_DIR = Path("/app/memory/websites")
-DESIGNS_DIR = Path("/app/memory/knowledgebase/designs")
+# ── Smart Path Resolution (works in Docker AND local Windows) ─────────────────
+def _get_base_path() -> Path:
+    """
+    Detect environment and return the correct base path.
+    - Docker: /app/
+    - Windows local: relative to this file's location
+    """
+    # If /app/ exists, we're in Docker
+    if Path("/app").exists():
+        return Path("/app")
+
+    # Otherwise, we're running locally - use parent dirs from this file
+    # web_builder.py is at: agent/skills/core/web_builder.py
+    # Base should be: agent/ (parent of skills/)
+    skill_file = Path(__file__).resolve()
+    return skill_file.parent.parent.parent
+
+def _get_websites_dir() -> Path:
+    """Get websites directory, trying multiple locations."""
+    base = _get_base_path()
+
+    # Try in order of likelihood
+    candidates = [
+        base / "memory" / "websites",
+        base / "memory" / "website_projects",
+        Path.home() / "websites",
+    ]
+
+    for p in candidates:
+        if p.exists() or p.parent.exists():
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+
+    # Default to Docker path (will be created if not exists)
+    return Path("/app/memory/websites")
+
+def _get_designs_dir() -> Path:
+    """Get designs directory, trying multiple locations."""
+    base = _get_base_path()
+
+    # Try in order of likelihood
+    candidates = [
+        base / "memory" / "knowledgebase" / "designs",
+        base / "knowledgebase" / "designs",
+        base / "designs",
+    ]
+
+    for p in candidates:
+        if p.exists() or p.parent.exists():
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+
+    # Default to Docker path
+    return Path("/app/memory/knowledgebase/designs")
+
+WEBSITES_DIR = _get_websites_dir()
+DESIGNS_DIR = _get_designs_dir()
+
 ALLOWED_EXTENSIONS = {
     ".html", ".css", ".js", ".json", ".svg", ".txt",
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico",
@@ -1220,6 +1276,18 @@ def export_zip(project: str) -> str:
 
 # ── Design.md Loading ─────────────────────────────────────────────────────────
 
+def _get_design_search_paths() -> list:
+    """Get all possible design paths (works in Docker AND Windows)."""
+    base = _get_base_path()
+    return [
+        DESIGNS_DIR,  # Primary: use the smart-resolved path
+        base / "memory" / "knowledgebase" / "designs",
+        base / "knowledgebase" / "designs",
+        base / "designs",
+        _get_base_path() / "memory" / "designs",
+    ]
+
+
 def load_design(design_name: str = None) -> str:
     """
     Load a design.md file from the knowledgebase to use for building a website.
@@ -1261,16 +1329,7 @@ def load_design(design_name: str = None) -> str:
     Example:
         <skill:web_builder.load_design>my-client-design</skill:web_builder.load_design>
     """
-    # Try multiple paths for design files
-    local_designs = Path(__file__).parent.parent.parent / "memory" / "knowledgebase" / "designs"
-
-    # Try multiple paths
-    search_paths = [
-        DESIGNS_DIR,
-        local_designs,
-        Path("/app/memory/designs"),
-        Path("/app/knowledgebase/designs"),
-    ]
+    search_paths = _get_design_search_paths()
 
     if design_name is None:
         # List available designs
@@ -1282,9 +1341,9 @@ def load_design(design_name: str = None) -> str:
         if not available:
             return (
                 "📁 No design files found.\n\n"
-                "Upload your design.md to one of:\n"
+                "Searched in:\n"
                 + "\n".join(f"  - {p}" for p in search_paths)
-                + "\n\nThen use: load_design('your-design-name')"
+                + "\n\nUpload your design.md to one of these folders, then use: load_design('your-design-name')"
             )
 
         return f"📐 Available designs:\n" + "\n".join(f"  - {d}" for d in sorted(set(available)))
@@ -1298,10 +1357,12 @@ def load_design(design_name: str = None) -> str:
 
     if not design_file:
         return (
-            f"❌ Design '{design_name}' not found.\n"
-            f"Upload your design.md to one of:\n"
+            f"❌ Design '{design_name}' not found.\n\n"
+            f"Searched in:\n"
             + "\n".join(f"  - {p}" for p in search_paths)
-            + "\n\nThen use: load_design('" + design_name + "')"
+            + f"\n\nCreate folder if needed:\n"
+            + f"  mkdir -p {_get_designs_dir().parent}\n"
+            + f"Then use: load_design('" + design_name + "')"
         )
 
     content = design_file.read_text(encoding="utf-8")
@@ -1449,13 +1510,7 @@ def build_from_design(design_name: str, template: str = "professional", serve_pr
         <skill:web_builder.build_from_design>raycast-style</skill:web_builder.build_from_design>
     """
     # Step 1: Load the design
-    local_designs = Path(__file__).parent.parent.parent / "memory" / "knowledgebase" / "designs"
-    search_paths = [
-        DESIGNS_DIR,
-        local_designs,
-        Path("/app/memory/designs"),
-        Path("/app/knowledgebase/designs"),
-    ]
+    search_paths = _get_design_search_paths()
 
     design_file = None
     for base_path in search_paths:
@@ -1466,9 +1521,12 @@ def build_from_design(design_name: str, template: str = "professional", serve_pr
 
     if not design_file:
         return (
-            f"❌ Design '{design_name}' not found.\n"
-            f"Upload your design.md to one of:\n"
+            f"❌ Design '{design_name}' not found.\n\n"
+            f"Searched in:\n"
             + "\n".join(f"  - {p}" for p in search_paths)
+            + f"\n\nCreate folder if needed:\n"
+            + f"  mkdir -p {_get_designs_dir().parent}\n"
+            + f"Upload your design.md, then use: build_from_design('{design_name}')"
         )
 
     content = design_file.read_text(encoding="utf-8")
