@@ -98,7 +98,8 @@ def _get_designs_dir() -> Path:
 
     # Try in order of likelihood
     candidates = [
-        base / "memory" / "knowledgebase" / "designs",
+        base / "memory" / "knowledge" / "designs",      # memory/knowledge/designs (PRIMARY)
+        base / "memory" / "knowledgebase" / "designs",  # memory/knowledgebase/designs (ALTERNATIVE)
         base / "knowledgebase" / "designs",
         base / "designs",
     ]
@@ -108,8 +109,8 @@ def _get_designs_dir() -> Path:
             p.mkdir(parents=True, exist_ok=True)
             return p
 
-    # Default to Docker path
-    return Path("/app/memory/knowledgebase/designs")
+    # Default to memory/knowledge/designs
+    return base / "memory" / "knowledge" / "designs"
 
 WEBSITES_DIR = _get_websites_dir()
 DESIGNS_DIR = _get_designs_dir()
@@ -1281,10 +1282,10 @@ def _get_design_search_paths() -> list:
     base = _get_base_path()
     return [
         DESIGNS_DIR,  # Primary: use the smart-resolved path
-        base / "memory" / "knowledgebase" / "designs",
+        base / "memory" / "knowledge" / "designs",       # memory/knowledge/designs
+        base / "memory" / "knowledgebase" / "designs",  # memory/knowledgebase/designs
         base / "knowledgebase" / "designs",
         base / "designs",
-        _get_base_path() / "memory" / "designs",
     ]
 
 
