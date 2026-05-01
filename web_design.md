@@ -94,9 +94,13 @@ Supports markdown tables, CSS code blocks, component specs, typography scales, s
 
 ### Functions
 
-- **`load_design(name)`** → Load and parse a design.md, returns CSS variables + section specs to apply via `patch_file()`. Use when you want manual control.
+- **`load_design(name)`** → Load and parse a design.md from `memory/knowledge/designs/`, returns CSS variables + section specs to apply via `patch_file()`. Use when you want manual control.
 
-- **`build_from_design(name)`** → ONE-STEP auto-apply: scaffolds project + parses design + applies CSS variables automatically. Fastest option when you have a design.md ready.
+- **`build_from_design(name)`** → ONE-STEP auto-apply: scaffolds project + parses design + uses LLM to intelligently generate matching HTML/CSS + applies tokens automatically. **BEST for complex designs.**
+
+- **`load_from_tmp(filename)`** → Read a file from `/tmp/` (files you upload in chat). Returns content or image path.
+
+- **`save_to_tmp(filename, content)`** → Save generated content to `/tmp/` for easy download.
 
 ### Workflows
 
