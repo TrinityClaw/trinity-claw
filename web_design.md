@@ -101,7 +101,7 @@ Supports markdown tables, CSS code blocks, component specs, typography scales, s
 ### Workflows
 
 ```
-# FASTEST (one-step)
+# BEST FOR COMPLEX DESIGNS (LLM generates matching HTML/CSS)
 build_from_design("your-design-name")
 
 # STEP-BY-STEP (more control)
@@ -109,17 +109,29 @@ load_design("your-design-name")
 scaffold(project_name, "professional")
 patch_file()... (apply colors/content)
 serve(project_name)
+
+# MANUAL (no design.md)
+scaffold(project_name, "professional")
+patch_file()... (build from scratch)
+serve(project_name)
 ```
 
-### Auto-Apply Behavior
+### Auto-Apply Behavior (LLM-Powered)
 
-When using `build_from_design()`:
-1. Loads and parses the design.md from knowledgebase
-2. Scaffolds the project with the `professional` template
-3. Extracts CSS variables from `:root` blocks or parses color tables
-4. Auto-applies Google Fonts imports if fonts are specified
-5. Applies the full :root CSS block for complex designs
-6. Starts preview server (optional: add `true` as third parameter)
+When using `build_from_design()` with a **complex design.md** (like Raycast-style):
+
+1. Parses the full design.md including all tokens, tables, and CSS
+2. **Sends complete design spec to LLM** (Claude/GPT-4)
+3. LLM **intelligently generates HTML/CSS** that properly applies:
+   - Dark theme backgrounds (#040506, #07080a, etc.)
+   - Radial gradients as atmosphere backdrops
+   - Layered shadows for depth
+   - Correct typography scale and tracking
+   - Component styles
+4. Overwrites template with LLM-generated code
+5. Starts preview server (optional: add `true` as third parameter)
+
+**Fallback:** If LLM is unavailable or fails, falls back to basic CSS variable injection.
 
 ---
 
