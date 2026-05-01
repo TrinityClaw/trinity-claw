@@ -45,7 +45,7 @@ DOC = (
     "get_design_direction(project_name?,industry?,keywords?)→recommend 3 design directions from 5 schools × 20 philosophies with descriptions and CSS variable hints; "
     "set_design_tone(project,tone)→apply design preset: 'soft' (premium, airy, spring motion), 'minimalist' (clean, editorial, Linear/Notion), 'brutalist' (Swiss typography, sharp contrast); returns CSS variables and recommendations. "
     "load_design(name)→load a design.md file from memory/knowledgebase/designs/, parse colors/fonts/sections, return build-ready specs and CSS variables; use AFTER scaffold() to apply design; "
-    "build_from_design(name,template?,serve?)→ONE-STEP: scaffold + parse design.md + apply CSS variables + auto-start preview (optional); use this instead of scaffold() when you have a design.md; "
+    "build_from_design(name,template?,serve?)→ONE-STEP: scaffold + parse design.md + use LLM to intelligently generate matching HTML/CSS + apply tokens + preview (optional); BEST for complex designs; "
     "⚠️ CRITICAL RULE: After scaffold(), ALWAYS use patch_file() — NEVER write_file() on index.html or style.css. write_file() overwrites the full professional template and destroys the layout. "
     "TEXT-ONLY BUILD WORKFLOW: scaffold(name,professional) → patch_file×N (update placeholders + :root colors) → serve(). "
     "DESIGN-AWARE BUILD WORKFLOW (RECOMMENDED): get_design_system(description) → scaffold(name,professional) → patch_file×N (apply design system :root variables, fonts, section text) → serve(). "
@@ -1387,6 +1387,50 @@ Copy these into your style.css :root block via patch_file():
 """
 
 
+def _inject_basic_css(project_dir: Path, specs: dict, results: list) -> None:
+    """Helper to inject basic CSS variables into style.css."""
+    primary = specs['colors'].get('primary', '#1a2e4a')
+    accent = specs['colors'].get('accent', '#c9a84c')
+    bg = specs['colors'].get('background', '#ffffff')
+    text = specs['colors'].get('text', '#1f2937')
+    font_heading = specs['fonts'].get('heading', specs['fonts'].get('headings', 'Playfair Display'))
+    font_body = specs['fonts'].get('body', specs['fonts'].get('body', 'Inter'))
+
+    # Dark mode support if theme is dark
+    if specs['theme'] == 'dark':
+        css_vars = f""":root {{
+  --primary:      {primary};
+  --accent:       {accent};
+  --text:         {bg};
+  --bg:           {primary};
+  --surface:      {text};
+  --font-heading: '{font_heading}', Georgia, serif;
+  --font-body:    '{font_body}', system-ui, sans-serif;
+}}"""
+    else:
+        css_vars = f""":root {{
+  --primary:      {primary};
+  --accent:       {accent};
+  --text:         {text};
+  --bg:           {bg};
+  --font-heading: '{font_heading}', Georgia, serif;
+  --font-body:    '{font_body}', system-ui, sans-serif;
+}}"""
+
+    try:
+        style_file = project_dir / "style.css"
+        style_content = style_file.read_text(encoding="utf-8")
+        root_pattern = r':root\s*\{[^}]+\}'
+        if re.search(root_pattern, style_content, re.DOTALL):
+            new_content = re.sub(root_pattern, css_vars, style_content, count=1, flags=re.DOTALL)
+            style_file.write_text(new_content, encoding="utf-8")
+        else:
+            style_file.write_text(css_vars + "\n\n" + style_content, encoding="utf-8")
+        results.append(f"🎨 Parsed {len(specs['colors'])} colors, {len(specs['fonts'])} fonts")
+    except Exception as e:
+        results.append(f"⚠️ CSS injection error: {e}")
+
+
 def build_from_design(design_name: str, template: str = "professional", serve_preview: bool = False) -> str:
     """
     Auto-scaffold and apply a design from a design.md file in one step.
@@ -1448,64 +1492,25 @@ def build_from_design(design_name: str, template: str = "professional", serve_pr
 
     results = [f"✅ Project '{project_name}' scaffolded with {template} template"]
 
-    # Step 3: Build CSS variables to apply
-    if specs['format'] == 'complex' and specs['css_code_block']:
-        # Use the full CSS code block from the design
-        css_vars = specs['css_code_block']
+    # Step 3: Apply design intelligently using LLM (for complex designs)
+    if specs['format'] == 'complex':
+        # Use LLM to generate matching HTML/CSS from the full design spec
+        llm_result = _apply_design_with_llm(project_name, specs, project_dir)
+        results.append(llm_result)
 
-        # Try to patch the style.css with the design's CSS variables
-        try:
-            style_file = project_dir / "style.css"
-            style_content = style_file.read_text(encoding="utf-8")
-
-            # Find and replace the :root block
-            root_pattern = r':root\s*\{[^}]+\}'
-            if re.search(root_pattern, style_content, re.DOTALL):
-                new_content = re.sub(root_pattern, css_vars, style_content, count=1, flags=re.DOTALL)
-                style_file.write_text(new_content, encoding="utf-8")
-                results.append("✅ Applied design CSS variables from :root block")
-            else:
-                # Prepend the CSS variables at the start of the file
-                style_file.write_text(css_vars + "\n\n" + style_content, encoding="utf-8")
-                results.append("✅ Prepended design CSS variables to style.css")
-        except Exception as e:
-            results.append(f"⚠️ Could not apply CSS variables: {e}")
-
+        # If LLM succeeded, skip the basic CSS injection
+        if "✅ LLM" in llm_result:
+            results.append(f"🎨 Applied {len(specs['colors'])} colors, {len(specs['fonts'])} fonts via LLM")
+        else:
+            # Fallback: still inject CSS variables
+            _inject_basic_css(project_dir, specs, results)
     else:
-        # Build CSS variables from parsed specs
-        primary = specs['colors'].get('primary', '#1a2e4a')
-        accent = specs['colors'].get('accent', '#c9a84c')
-        bg = specs['colors'].get('background', '#ffffff')
-        text = specs['colors'].get('text', '#1f2937')
-        font_heading = specs['fonts'].get('heading', specs['fonts'].get('headings', 'Playfair Display'))
-        font_body = specs['fonts'].get('body', specs['fonts'].get('Body', 'Inter'))
+        # Simple format: build basic CSS variables
+        _inject_basic_css(project_dir, specs, results)
 
-        css_vars = f""":root {{
-  --primary:      {primary};
-  --accent:       {accent};
-  --text:         {text};
-  --bg:           {bg};
-  --font-heading: '{font_heading}', Georgia, serif;
-  --font-body:    '{font_body}', system-ui, sans-serif;
-}}"""
-
-        # Dark mode support if theme is dark
-        if specs['theme'] == 'dark':
-            # Swap light/dark values for dark theme
-            css_vars = f""":root {{
-  --primary:      {primary};
-  --accent:       {accent};
-  --text:         {bg};
-  --bg:           {primary};
-  --surface:      {text};
-  --font-heading: '{font_heading}', Georgia, serif;
-  --font-body:    '{font_body}', system-ui, sans-serif;
-}}"""
-
-        results.append(f"🎨 Parsed {len(specs['colors'])} colors, {len(specs['fonts'])} fonts")
-
-    # Step 4: Apply Google Fonts import if fonts are specified
-    if specs['fonts']:
+    # Step 4: Apply Google Fonts import if LLM didn't handle it
+    llm_succeeded = any("✅ LLM" in r for r in results)
+    if not llm_succeeded and specs['fonts']:
         font_list = list(specs['fonts'].values())
         unique_fonts = []
         for f in font_list:
@@ -1522,14 +1527,18 @@ def build_from_design(design_name: str, template: str = "professional", serve_pr
                     style_content = style_file.read_text(encoding="utf-8")
                     if '@import' not in style_content:
                         style_file.write_text(font_import + style_content, encoding="utf-8")
-                        results.append(f"✅ Added Google Fonts import: {', '.join(unique_fonts)}")
+                        results.append(f"✅ Added Google Fonts: {', '.join(unique_fonts)}")
                 except Exception:
                     pass
 
     # Step 5: Summary
     results.append(f"\n📐 Design: {design_file.name}")
-    results.append(f"🎭 Theme: {specs['theme']}")
-    results.append(f"📝 Format: {specs['format']}")
+    results.append(f"🎭 Theme: {specs['theme']} | Format: {specs['format']}")
+
+    if llm_succeeded:
+        results.append("🧠 LLM intelligently generated matching HTML/CSS")
+    else:
+        results.append("⚠️ Using basic CSS injection (LLM failed or unavailable)")
 
     if specs['sections']:
         results.append(f"📄 Sections: {', '.join(specs['sections'][:5])}")
@@ -1567,6 +1576,96 @@ def build_from_design(design_name: str, template: str = "professional", serve_pr
             results.append(f"\n⚠️ Could not start preview: {e}")
 
     return "\n".join(results)
+
+
+def _apply_design_with_llm(project_name: str, specs: dict, project_dir: Path) -> str:
+    """
+    Use the LLM to intelligently generate HTML/CSS/JS from parsed design specs.
+
+    This is the key improvement: instead of just injecting CSS variables,
+    it feeds the FULL design spec to the LLM which then generates matching
+    HTML/CSS that properly applies all design tokens.
+    """
+    if not HAS_LITELLM:
+        return "⚠️ litellm not available, falling back to basic CSS injection"
+
+    # Build the prompt for intelligent HTML/CSS generation
+    sections = specs.get('sections', ['Hero', 'About', 'Features', 'Contact'])
+
+    prompt = f"""Generate a complete website based on this design specification:
+
+## Project: {specs['name']}
+## Theme: {specs['theme']} (use dark colors if dark, light colors if light)
+
+## Design Tokens:
+- Colors: {json.dumps(specs['colors'])}
+- Fonts: {json.dumps(specs['fonts'])}
+- Font Sizes: {json.dumps(specs.get('font_sizes', {}))}
+
+## Sections to include:
+{', '.join(sections)}
+
+## CSS from design.md:
+{specs.get('css_code_block', 'N/A')[:3000]}
+
+## Instructions:
+1. Generate complete HTML with embedded CSS (or separate CSS file)
+2. Use CSS custom properties matching the design tokens where possible
+3. For DARK themes:
+   - Body background: #040506 or similar dark color
+   - Section backgrounds: #07080a, #111214 for depth layers
+   - Primary text: #FFFFFF
+   - Secondary text: #9C9C9D
+   - Buttons: #E6E6E6 background with dark text
+   - Add radial gradients as atmosphere backdrops
+4. Apply the shadows from the design (layered shadows create depth)
+5. Use Inter font with specified weights
+6. Include realistic content, NO lorem ipsum
+7. Responsive design (mobile-first)
+8. Include subtle hover animations
+
+Return ONLY a JSON object, no other text:
+{{
+  "html": "complete HTML with embedded CSS or link to style.css",
+  "css": "complete CSS (if separate from HTML)",
+  "js": "minimal JS for interactions"
+}}"""
+
+    try:
+        # Call the LLM
+        response = _litellm.completion(
+            model=os.getenv("LLM_MODEL", "claude-3-5-sonnet"),
+            messages=[{"role": "user", "content": prompt}],
+            timeout=SKILL_TIMEOUT,
+        )
+
+        # Parse the response
+        response_text = response.choices[0].message.content
+
+        # Extract JSON from response
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+
+        if json_match:
+            generated = json.loads(json_match.group(1))
+
+            # Write the generated files
+            if 'html' in generated and generated['html']:
+                (project_dir / "index.html").write_text(generated['html'], encoding="utf-8")
+
+            if 'css' in generated and generated['css']:
+                (project_dir / "style.css").write_text(generated['css'], encoding="utf-8")
+
+            if 'js' in generated and generated['js']:
+                (project_dir / "script.js").write_text(generated['js'], encoding="utf-8")
+
+            return f"✅ LLM intelligently applied {specs['theme']} design"
+
+        return f"⚠️ Could not parse LLM response"
+
+    except Exception as e:
+        return f"⚠️ LLM error: {str(e)[:100]}"
 
 
 def _parse_design_md(content: str) -> dict:
