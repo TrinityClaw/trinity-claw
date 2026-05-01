@@ -46,6 +46,8 @@ DOC = (
     "set_design_tone(project,tone)→apply design preset: 'soft' (premium, airy, spring motion), 'minimalist' (clean, editorial, Linear/Notion), 'brutalist' (Swiss typography, sharp contrast); returns CSS variables and recommendations. "
     "load_design(name)→load a design.md file from memory/knowledge/designs/, parse colors/fonts/sections, return build-ready specs and CSS variables; use AFTER scaffold() to apply design; "
     "build_from_design(name,template?,serve?)→ONE-STEP: scaffold + parse design.md + use LLM to intelligently generate matching HTML/CSS + apply tokens + preview (optional); BEST for complex designs; "
+    "load_from_tmp(filename)→read a file from /tmp/ (uploaded in chat); returns content; "
+    "save_to_tmp(filename,content)→save content to /tmp/ for download; "
     "⚠️ CRITICAL RULE: After scaffold(), ALWAYS use patch_file() — NEVER write_file() on index.html or style.css. write_file() overwrites the full professional template and destroys the layout. "
     "TEXT-ONLY BUILD WORKFLOW: scaffold(name,professional) → patch_file×N (update placeholders + :root colors) → serve(). "
     "DESIGN-AWARE BUILD WORKFLOW (RECOMMENDED): get_design_system(description) → scaffold(name,professional) → patch_file×N (apply design system :root variables, fonts, section text) → serve(). "
@@ -89,8 +91,10 @@ def _get_websites_dir() -> Path:
             p.mkdir(parents=True, exist_ok=True)
             return p
 
-    # Default to Docker path (will be created if not exists)
-    return Path("/app/memory/websites")
+    # Fallback: create memory/websites under base
+    fallback = base / "memory" / "websites"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 def _get_designs_dir() -> Path:
     """Get designs directory, trying multiple locations."""
@@ -124,6 +128,63 @@ ALLOWED_EXTENSIONS = {
 _httpd = None
 _server_thread = None
 _serving_project = None
+
+# ── Temp Files (for chat uploads) ─────────────────────────────────────────────
+
+def _get_tmp_dir() -> Path:
+    """Get temp directory for chat uploads."""
+    tmp = Path("/tmp")
+    tmp.mkdir(exist_ok=True)
+    return tmp
+
+def load_from_tmp(filename: str) -> str:
+    """
+    Load a file from /tmp/ (files uploaded in chat).
+
+    Args:
+        filename: Name of the file in /tmp/ (e.g., "design.md", "image.png")
+
+    Returns:
+        File content if text file, or instructions if binary file.
+
+    Example:
+        <skill:web_builder.load_from_tmp>design.md</skill:web_builder.load_from_tmp>
+    """
+    tmp = _get_tmp_dir()
+    file_path = tmp / filename
+
+    if not file_path.exists():
+        return f"❌ File '{filename}' not found in /tmp/\n\nFiles in /tmp/:\n" + "\n".join(f"  - {f.name}" for f in tmp.iterdir())
+
+    # Check file type
+    if file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico']:
+        return f"📷 Image file detected: {filename}\nPath: {file_path}\n\nUse this path in your HTML: <img src='{file_path}'>"
+
+    # Text files - return content
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        return f"📄 Content from /tmp/{filename}:\n\n{content}"
+    except Exception as e:
+        return f"❌ Could not read {filename}: {e}"
+
+def save_to_tmp(filename: str, content: str) -> str:
+    """
+    Save content to /tmp/ (for files you want to keep).
+
+    Args:
+        filename: Name for the file (e.g., "generated.html")
+        content: Content to save
+
+    Returns:
+        Path where file was saved.
+
+    Example:
+        <skill:web_builder.save_to_tmp>output.html,<html>...</html></skill:web_builder.save_to_tmp>
+    """
+    tmp = _get_tmp_dir()
+    file_path = tmp / filename
+    file_path.write_text(content, encoding="utf-8")
+    return f"✅ Saved to /tmp/{filename} ({len(content)} bytes)"
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
