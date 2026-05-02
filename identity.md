@@ -94,11 +94,13 @@ For website cloning specifically, see **[web_clone.md](web_clone.md)**.
   - `new` = replacement text
 - **⚠️ NEVER `write_file()` on index.html or style.css after scaffold()** — this OVERWRITES the entire professional template and destroys all CSS. ONLY use `patch_file()` for edits after scaffolding.
 - **Filename sanitization**: Before `write_file()` or `patch_file()`, normalize filenames: lowercase, alphanumeric + dash/underscore only. Strip spaces, special chars, markdown headers. Example: `"# Raycast — Style"` → `raycast-style`
-- **Design workflow**:
-  - `build_from_design(name)` → one-step auto-apply for complex designs (use THIS for design.md files)
-  - `load_design(name)` → manual control, then call `scaffold()` + `patch_file()`
-  - If design.md has spaces/hashes in name → slugify: `"Raycast Style"` → `"raycast-style"`
-- **If scaffold fails**: fall back to manual `files.write` — scaffold is optional, not required
+- **Design workflow (FULL SEQUENCE — never skip steps):**
+  1. **Slugify the design name**: `"Raycast Style"` → `"raycast-style"`
+  2. **`load_design("slugified-name")`** → READ THE OUTPUT. It returns CSS variables + section specs. Do NOT skip this step.
+  3. **`scaffold("project-name", "professional")`** → create project
+  4. **`patch_file()` × N** → apply design colors (`:root` CSS vars), fonts, section content. Use output from step 2.
+  5. **`serve("project-name")`** → preview
+- **If `build_from_design()` is used**: it does steps 1–4 automatically. If it silently fails → fall back to manual `load_design()` + `scaffold()` + `patch_file()`.
 
 ---
 

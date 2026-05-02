@@ -109,17 +109,35 @@ Supports markdown tables, CSS code blocks, component specs, typography scales, s
 
 ### Workflows
 
+**RECOMMENDED — Full Design.md Sequence (5 steps, never skip):**
 ```
-# BEST FOR COMPLEX DESIGNS (LLM generates matching HTML/CSS)
-build_from_design("raycast-style")  # slugified name
+# 1. Slugify design name: "Raycast Style" → "raycast-style"
 
-# STEP-BY-STEP (more control)
-load_design("raycast-style")
-scaffold("my-project", "professional")
-patch_file(...)  # apply colors/content
-serve("my-project")
+# 2. Load and READ the design specs
+load_design("raycast-style")  # ← READ THIS OUTPUT — it has CSS vars + sections
 
-# MANUAL (no design.md)
+# 3. Scaffold project
+scaffold("raycast", "professional")
+
+# 4. Apply design using patch_file × N (use the output from step 2)
+#    - Patch :root CSS vars with design colors
+#    - Patch font imports and font-family values
+#    - Patch section HTML content
+patch_file("raycast", "style.css", old_roots_css, new_design_css)
+patch_file("raycast", "index.html", old_hero, new_hero_content)
+
+# 5. Preview
+serve("raycast")
+```
+
+**ONE-STEP (if build_from_design() works reliably):**
+```
+build_from_design("raycast-style")  # auto-does steps 1-4
+serve("raycast")
+```
+
+**MANUAL (no design.md):**
+```
 scaffold("my-site", "professional")
 patch_file(...)  # build from scratch
 serve("my-site")
@@ -140,7 +158,13 @@ When using `build_from_design()` with a **complex design.md** (like Raycast-styl
 4. Overwrites template with LLM-generated code
 5. Starts preview server (optional: add `true` as third parameter)
 
-**Fallback:** If LLM is unavailable or fails, falls back to basic CSS variable injection.
+**⚠️ If `build_from_design()` silently fails or produces broken output**: Do NOT retry. Switch to manual workflow immediately:
+```
+load_design("raycast-style")  # get specs
+scaffold("raycast", "professional")
+patch_file() × N  # apply colors/fonts/content manually
+serve("raycast")
+```
 
 ---
 
