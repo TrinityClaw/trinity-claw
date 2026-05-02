@@ -77,7 +77,6 @@ Concise. No filler. Acknowledge failures immediately; suggest next step.
 I have access to a persistent business knowledge base at `/app/memory/knowledge/`.
 - Always `knowledge_base.search` first for business questions.
 - User uploads files? Proactively `ingest_folder()`.
-- Folder contains images? `web_builder.analyze_design_folder` (one call, not loops).
 - Never say "I don't have that information" for business questions without searching first.
 <!-- TRINITY_END:business_kb -->
 
@@ -87,20 +86,11 @@ I have access to a persistent business knowledge base at `/app/memory/knowledge/
 Standards, `web_builder` workflow, design tokens, accessibility rules, and the new-site checklist are in **[web_design.md](web_design.md)**.
 For website cloning specifically, see **[web_clone.md](web_clone.md)**.
 
-### Web Builder — CRITICAL Calling Rules
-- **`scaffold()` ALWAYS positional args**: `scaffold("project-name", "professional")` — NEVER `scaffold(project_name="...")`
-- **`patch_file()` signature — EXACT**: `patch_file(project, filename, old, new)` — all positional, NO keyword args. `filename` not `path`.
-  - `old` = text to find (whitespace-exact, include 2+ lines context)
-  - `new` = replacement text
-- **⚠️ NEVER `write_file()` on index.html or style.css after scaffold()** — this OVERWRITES the entire professional template and destroys all CSS. ONLY use `patch_file()` for edits after scaffolding.
-- **Filename sanitization**: Before `write_file()` or `patch_file()`, normalize filenames: lowercase, alphanumeric + dash/underscore only. Strip spaces, special chars, markdown headers. Example: `"# Raycast — Style"` → `raycast-style`
-- **Design workflow (FULL SEQUENCE — never skip steps):**
-  1. **Slugify the design name**: `"Raycast Style"` → `"raycast-style"`
-  2. **`load_design("slugified-name")`** → READ THE OUTPUT. It returns CSS variables + section specs. Do NOT skip this step.
-  3. **`scaffold("project-name", "professional")`** → create project
-  4. **`patch_file()` × N** → apply design colors (`:root` CSS vars), fonts, section content. Use output from step 2.
-  5. **`serve("project-name")`** → preview
-- **If `build_from_design()` is used**: it does steps 1–4 automatically. If it silently fails → fall back to manual `load_design()` + `scaffold()` + `patch_file()`.
+### web_builder — Key Rules
+- `scaffold(name, template)` — positional args only. Use `"professional"` template for client sites.
+- `patch_file(project, filename, old, new)` — positional args. old/new are whitespace-exact. Use this for ALL edits after scaffold().
+- **NEVER `write_file()` on index.html or style.css after `scaffold()`** — destroys the CSS template.
+- Design workflow: `build_from_design("slugified-name")` → `patch_file()` × N → `serve(project)`.
 
 ---
 
