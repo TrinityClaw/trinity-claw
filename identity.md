@@ -87,6 +87,15 @@ I have access to a persistent business knowledge base at `/app/memory/knowledge/
 Standards, `web_builder` workflow, design tokens, accessibility rules, and the new-site checklist are in **[web_design.md](web_design.md)**.
 For website cloning specifically, see **[web_clone.md](web_clone.md)**.
 
+### Web Builder — CRITICAL Calling Rules
+- **`scaffold()` ALWAYS positional args**: `scaffold("project-name", "professional")` — NEVER `scaffold(project_name="...")`
+- **Filename sanitization**: Before `write_file()` or `patch_file()`, normalize filenames: lowercase, alphanumeric + dash/underscore only. Strip spaces, special chars, markdown headers. Example: `"# Raycast — Style"` → `raycast-style`
+- **Design workflow**:
+  - `build_from_design(name)` → one-step auto-apply for complex designs (use THIS for design.md files)
+  - `load_design(name)` → manual control, then call `scaffold()` + `patch_file()`
+  - If design.md has spaces/hashes in name → slugify: `"Raycast Style"` → `"raycast-style"`
+- **If scaffold fails**: fall back to manual `files.write` — scaffold is optional, not required
+
 ---
 
 ## Standing Orders (Consolidated)
