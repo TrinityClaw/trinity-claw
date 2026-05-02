@@ -9,7 +9,7 @@
 
 - **USE** the `web_builder` skill suite for all web projects. It handles structure, preview server, and CSS enhancement automatically.
 - **Workflow (MANDATORY — for new site creation only, NOT for cloning):**
-  1. `web_builder.scaffold(project_name, "professional")` → Creates base structure (index.html, style.css, script.js).
+  1. `scaffold("project-name", "professional")` → Creates base structure (index.html, style.css, script.js). ALWAYS positional args — no `project_name=` keyword syntax.
   2. `web_builder.patch_file(...)` → Update content, branding, and colors (NEVER rewrite whole files unless necessary).
   3. `web_builder.serve(project_name)` → Start live preview and report the URL.
   4. After serving, **continue building** if the user requested a complete site. Only stop and report the preview URL if the user's request was simply "scaffold and preview" or equivalent. Never stop mid-build on a full site request.
@@ -94,30 +94,35 @@ Supports markdown tables, CSS code blocks, component specs, typography scales, s
 
 ### Functions
 
-- **`load_design(name)`** → Load and parse a design.md from `memory/knowledge/designs/`, returns CSS variables + section specs to apply via `patch_file()`. Use when you want manual control.
+- **`load_design(name)`** → Load and parse a design.md from `memory/knowledge/designs/`, returns CSS variables + section specs to apply via `patch_file()`. Use when you want manual control. Name must be slugified (lowercase, dashes).
 
-- **`build_from_design(name)`** → ONE-STEP auto-apply: scaffolds project + parses design + uses LLM to intelligently generate matching HTML/CSS + applies tokens automatically. **BEST for complex designs.**
+- **`build_from_design(name)`** → ONE-STEP auto-apply: scaffolds project + parses design + uses LLM to intelligently generate matching HTML/CSS + applies tokens automatically. **BEST for complex designs.** Name must be slugified.
 
 - **`load_from_tmp(filename)`** → Read a file from `/tmp/` (files you upload in chat). Returns content or image path.
 
 - **`save_to_tmp(filename, content)`** → Save generated content to `/tmp/` for easy download.
 
+### Filename Rules (CRITICAL)
+- All design names → slugify: `"Raycast Style"` → `"raycast-style"`, `"# My Project"` → `"my-project"`
+- File paths in `write_file`/`patch_file`: lowercase, alphanumeric + dash/underscore only
+- Strip markdown syntax, special chars, emoji, and leading hashes from names
+
 ### Workflows
 
 ```
 # BEST FOR COMPLEX DESIGNS (LLM generates matching HTML/CSS)
-build_from_design("your-design-name")
+build_from_design("raycast-style")  # slugified name
 
 # STEP-BY-STEP (more control)
-load_design("your-design-name")
-scaffold(project_name, "professional")
-patch_file()... (apply colors/content)
-serve(project_name)
+load_design("raycast-style")
+scaffold("my-project", "professional")
+patch_file(...)  # apply colors/content
+serve("my-project")
 
 # MANUAL (no design.md)
-scaffold(project_name, "professional")
-patch_file()... (build from scratch)
-serve(project_name)
+scaffold("my-site", "professional")
+patch_file(...)  # build from scratch
+serve("my-site")
 ```
 
 ### Auto-Apply Behavior (LLM-Powered)
@@ -142,6 +147,9 @@ When using `build_from_design()` with a **complex design.md** (like Raycast-styl
 ## Self-Verification Checklist — New Sites Only (Before Reporting Done)
 
 - [ ] Did I use the appropriate workflow? (`build_from_design()` for design.md, `scaffold()` + `patch_file()` for manual, `analyze_design_folder()` for images)
+- [ ] Did I call `serve()` with positional arg: `serve("project-name")` not `serve(project_name="...")`?
+- [ ] Did I slugify design names? (`"Raycast Style"` → `"raycast-style"`)
+- [ ] Did I sanitize filenames before `write_file`/`patch_file` (lowercase, alphanumeric + dash/underscore)?
 - [ ] Did I call `web_builder.serve()` and provide the preview URL?
 - [ ] Did I update the default template colors to match the user's brand (or ask for them)?
 - [ ] Is the site responsive (checked via `web_builder` template structure)?
