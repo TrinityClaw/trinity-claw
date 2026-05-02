@@ -89,6 +89,10 @@ For website cloning specifically, see **[web_clone.md](web_clone.md)**.
 
 ### Web Builder — CRITICAL Calling Rules
 - **`scaffold()` ALWAYS positional args**: `scaffold("project-name", "professional")` — NEVER `scaffold(project_name="...")`
+- **`patch_file()` signature — EXACT**: `patch_file(project, filename, old, new)` — all positional, NO keyword args. `filename` not `path`.
+  - `old` = text to find (whitespace-exact, include 2+ lines context)
+  - `new` = replacement text
+- **⚠️ NEVER `write_file()` on index.html or style.css after scaffold()** — this OVERWRITES the entire professional template and destroys all CSS. ONLY use `patch_file()` for edits after scaffolding.
 - **Filename sanitization**: Before `write_file()` or `patch_file()`, normalize filenames: lowercase, alphanumeric + dash/underscore only. Strip spaces, special chars, markdown headers. Example: `"# Raycast — Style"` → `raycast-style`
 - **Design workflow**:
   - `build_from_design(name)` → one-step auto-apply for complex designs (use THIS for design.md files)
