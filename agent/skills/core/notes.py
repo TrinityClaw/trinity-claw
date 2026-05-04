@@ -385,15 +385,34 @@ def append(title: str, content: str, tags: str = "") -> str:
 
 # ── Session Logs ───────────────────────────────────────────────────────────────
 
-def get_last_logs(n: int = 10) -> str:
-    """Retrieve the last N entries from session logs."""
+def get_last_logs(n: int = 10, hours: int = None) -> str:
+    """Retrieve the last N entries from session logs, optionally filtered to the last `hours`."""
     n = int(n)
+    cutoff = None
+    if hours is not None:
+        try:
+            cutoff = datetime.now() - timedelta(hours=int(hours))
+        except (ValueError, TypeError):
+            pass
     if not _LOGS_FILE.exists():
         return "❌ No session logs found."
     try:
         lines   = _LOGS_FILE.read_text().splitlines()
-        entries = [json.loads(l) for l in lines[-n:] if l.strip()]
-        return json.dumps(entries, indent=2)
+        entries = []
+        for l in reversed(lines):
+            if not l.strip():
+                continue
+            try:
+                e = json.loads(l)
+                ts = datetime.fromisoformat(e["timestamp"])
+                if cutoff is not None and ts < cutoff:
+                    break
+                entries.append(e)
+                if len(entries) >= n:
+                    break
+            except Exception:
+                continue
+        return json.dumps(list(reversed(entries)), indent=2)
     except Exception as e:
         return f"❌ Error reading logs: {e}"
 

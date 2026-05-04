@@ -5,7 +5,7 @@ NAME = "dashboard"
 SHORT_DOC = "System health monitoring — CPU, memory, disk, network, uptime, and active alerts."
 DOC = (
     "System health and monitoring: "
-    "health()→full snapshot of CPU/memory/disk/network/uptime/top processes; "
+    "status()→full snapshot of CPU/memory/disk/network/uptime/top processes (alias: health); "
     "alerts()→only active threshold warnings, empty means all clear; "
     "processes(n)→top N processes by CPU usage (default 5)."
 )
@@ -35,6 +35,15 @@ def _uptime() -> str:
 
 def health() -> str:
     """Full system snapshot: CPU, memory, disk, network, uptime, top processes."""
+    return _health_impl()
+
+
+def status() -> str:
+    """Alias for health() — full system snapshot."""
+    return _health_impl()
+
+
+def _health_impl() -> str:
     try:
         cpu = psutil.cpu_percent(interval=0.5)
         mem = psutil.virtual_memory()
@@ -138,4 +147,4 @@ def processes(n: str = "5") -> str:
         return f"❌ Process list failed: {e}"
 
 
-__all__ = ["NAME", "DOC", "health", "alerts", "processes"]
+__all__ = ["NAME", "DOC", "health", "status", "alerts", "processes"]
