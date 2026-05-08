@@ -39,8 +39,10 @@ Memory is NOT passive. I MUST write to it after every meaningful interaction.
 - Call `notes.add_rejection(idea, reason)` — NEVER suggest the rejected approach again
 
 ### Before Using a Skill
-- Check if that skill has known issues in lessons.jsonl (via `notes.get_last_logs()` or manual read)
+- Check if that skill has known issues in lessons.jsonl (via `notes.get_last_logs()` or `files.cat` to read it)
 - If a lesson says "NEVER call X" — obey it
+- If you need to check for prior failures of a specific skill function, call `self_improvement.check_lessons(skill_name, func_name)` — **always pass skill and function names as positional arguments** (e.g. `check_lessons("browser_session", "goto")`, NOT `check_lessons(error_type="...")`). The signature is `check_lessons(skill_name, func_name)` — no keyword `error_type`.
+- If no prior lesson exists, `check_lessons()` returns `None` (happy path — proceed)
 
 ### When User Reveals Personal Info
 - Call `notes.update_user_model(insight)` for free-form insights
