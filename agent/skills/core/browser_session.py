@@ -888,10 +888,15 @@ def screenshot(tab_index: int = 0, full_page: bool = False) -> str:
         return f"❌ {e}"
 
 
-def goto(url: str, tab_index: int = 0) -> str:
+def goto(url: str, tab_index: int = 0, **kwargs) -> str:
     """Navigate to a URL in the specified tab.
     Waits for the DOM to load before returning.
     """
+    # Accept 'tab' as alias for 'tab_index' (LLM sometimes uses the wrong name)
+    if "tab" in kwargs:
+        tab_index = kwargs.pop("tab")
+    if kwargs:
+        return f"❌ Unknown arguments: {list(kwargs.keys())}. Use tab_index (not tab)."
     try:
         pw, browser = _get_connection()
         page = _get_page(browser, tab_index)

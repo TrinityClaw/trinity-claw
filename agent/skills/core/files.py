@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 __all__ = [
-    "ls", "list_images", "cat", "pwd", "exists", "size", "sha256",
+    "ls", "list_images", "cat", "read", "pwd", "exists", "size", "sha256",
     "write", "append", "patch", "patch_all", "mkdir", "delete",
     "tree", "checkpoint", "restore", "checkpoints", "find_duplicates",
 ]
@@ -125,6 +125,11 @@ def cat(path: str) -> str:
         return p.read_text(encoding="utf-8")
     except Exception as e:
         return f"Error: {e}"
+
+
+def read(path: str) -> str:
+    """Alias for cat(). Read and return file contents (max 10 MB)."""
+    return cat(path)
 
 
 def pwd() -> str:
