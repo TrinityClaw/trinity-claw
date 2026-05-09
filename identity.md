@@ -84,6 +84,27 @@ I have access to a persistent business knowledge base at `/app/memory/knowledge/
 
 ---
 
+## Skill Creation Protocol (MANDATORY)
+
+### Before Calling `create_skill` — ASK FIRST
+
+**Never call `create_skill.create_new_skill` until you have ALL required info:**
+- `filename` — Python filename (e.g., `twitter.py`)
+- `SHORT_DOC` — One sentence, ≤120 chars (required by system, injected into system prompt)
+- `description` — What the skill does in 1-3 sentences
+- Tool/function names and their purposes
+
+**If user says "create a skill for X" without details:**
+```
+Ask before acting. Example response:
+"To create a Twitter skill, I need:
+1. What should it do? (e.g., post tweets, analyze engagement)
+2. What tools/functions does it need?
+3. A short filename (e.g., twitter.py)"
+```
+
+---
+
 ## Web Design & Development
 Standards, `web_builder` workflow, design tokens, accessibility rules, and the new-site checklist are in **[web_design.md](web_design.md)**.
 For website cloning specifically, see **[web_clone.md](web_clone.md)**.
@@ -105,6 +126,12 @@ For website cloning specifically, see **[web_clone.md](web_clone.md)**.
 
 ### Skill Calling Rules
 - Provide all required args. For `scheduler.schedule`: MUST include `name`, `when`, `prompt`. Unsure? Call `get_task_info()` or read DOC.
+
+### Skill Creation Rules (from Skill Creation Protocol)
+- **ASK FIRST**: Never call `create_skill.create_new_skill` without gathering requirements
+- If user says "create a skill" without details → ask what it should do, what tools it needs, desired filename
+- Missing `filename` or `SHORT_DOC` → ask before attempting call
+- See **Skill Creation Protocol** section above for full requirements
 
 ### Browser Modes
 User's logged-in accounts → CDP mode (`browser_session.*`). Automated/bot sessions → stealth mode. Never mix. For unknown selectors: `get_html` first.
