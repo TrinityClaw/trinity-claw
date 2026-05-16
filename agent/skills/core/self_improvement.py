@@ -28,6 +28,7 @@ from typing import List, Dict, Optional
 # ============================================================================
 
 NAME = "self_improvement"  # Must match filename: self_improvement.py
+SKILL_TIMEOUT = 120  # index_all_lessons needs extra time for ChromaDB bulk upserts
 SHORT_DOC = "Analyze, patch, and health-check skill files; record mistakes and surface recurring error patterns."
 DOC = (
     "Self-healing and learning: analyze skills, record mistakes, auto-fix code, prevent repeat errors. "
@@ -381,12 +382,18 @@ def search_lessons_semantic(query: str, n: int = 5) -> str:
         return f"⚠️ Semantic search failed: {e}"
 
 
-def index_all_lessons() -> str:
+def index_all_lessons(batch_size: int = 100) -> str:
     """Index (or re-index) all lessons from lessons.jsonl into ChromaDB.
 
     Safe to run repeatedly — uses upsert so existing entries are updated,
     not duplicated. Run this once after upgrading to enable semantic search
     on historical lessons.
+
+    Uses batched upserts (batch_size at a time) instead of one HTTP call per
+    lesson — dramatically faster for large lesson files.
+
+    Args:
+        batch_size: Number of lessons per upsert call (default 100).
 
     Returns:
         Summary of how many lessons were indexed.
@@ -397,13 +404,49 @@ def index_all_lessons() -> str:
     lessons = _load_lessons()
     if not lessons:
         return "📭 No lessons to index."
+
     indexed = 0
+    batch_ids: List[str] = []
+    batch_docs: List[str] = []
+    batch_metas: List[Dict] = []
+
     for lesson in lessons:
         try:
-            _index_lesson_in_chroma(lesson)
+            doc_id = lesson.get("hash", hashlib.md5(json.dumps(lesson, sort_keys=True).encode()).hexdigest()[:12])
+            skill = lesson.get("skill", "unknown")
+            etype = lesson.get("error_type", "error")
+            emsg = lesson.get("error_message", "")[:200]
+            fix = lesson.get("fix_applied", "")[:200]
+            doc_text = f"{skill} {etype}: {emsg}" + (f" [fix: {fix}]" if fix else "")
+            batch_ids.append(doc_id)
+            batch_docs.append(doc_text)
+            batch_metas.append({
+                "skill": skill,
+                "error_type": etype,
+                "timestamp": lesson.get("timestamp", ""),
+                "has_fix": bool(fix),
+            })
             indexed += 1
         except Exception:
             pass
+
+        # Flush batch
+        if len(batch_ids) >= batch_size:
+            try:
+                col.upsert(ids=batch_ids, documents=batch_docs, metadatas=batch_metas)
+            except Exception:
+                pass
+            batch_ids = []
+            batch_docs = []
+            batch_metas = []
+
+    # Flush remainder
+    if batch_ids:
+        try:
+            col.upsert(ids=batch_ids, documents=batch_docs, metadatas=batch_metas)
+        except Exception:
+            pass
+
     return f"✅ Indexed {indexed}/{len(lessons)} lessons into ChromaDB '{_LESSONS_COLLECTION}'."
 
 
