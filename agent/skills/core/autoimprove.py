@@ -373,6 +373,10 @@ def list_ideas(status: str = "open") -> str:
     if not filtered:
         return f"📭 No '{status}' ideas. Try list_ideas('all') to see everything."
 
+    # Sort open ideas by priority (highest first) if scores exist
+    if status == "open" and any(i.get("priority") is not None for i in filtered):
+        filtered.sort(key=lambda x: x.get("priority", 0), reverse=True)
+
     icons = {"open": "💡", "dismissed": "—"}
     lines = [f"💡 Improvement ideas — {status} ({len(filtered)} of {len(all_ideas)} total):"]
 
@@ -382,7 +386,9 @@ def list_ideas(status: str = "open") -> str:
         src    = idea.get("source", "?")
         text   = idea.get("idea", "?")
         iid    = idea.get("id", "?")
-        lines.append(f"\n  {icon} [{ts}] ({src})  id={iid}")
+        pri    = idea.get("priority")
+        pri_str = f"  priority={pri}" if pri is not None else ""
+        lines.append(f"\n  {icon} [{ts}] ({src})  id={iid}{pri_str}")
         lines.append(f"     {text}")
 
     if status == "open" and filtered:
@@ -435,6 +441,443 @@ def dismiss_idea(idea_id: str) -> str:
         f"❌ Idea '{idea_id}' not found.\n"
         f"Open idea IDs: {open_ids or 'none'}"
     )
+
+
+# ── Idea priority scoring ─────────────────────────────────────────────────────
+
+# Sources ordered by trust: user requests > systemic analysis > auto-detected noise
+_SOURCE_WEIGHT: Dict[str, int] = {
+    "user":           30,
+    "user_request":   30,
+    "daily_review":   25,
+    "self_reflection": 20,
+    "auto_detect":    10,
+    "discover_patterns": 5,
+    "pattern_mining": 15,
+}
+
+_ACTIONABLE_SOURCES = frozenset({"user", "user_request", "daily_review", "self_reflection", "pattern_mining"})
+_NOISE_SOURCES = frozenset({"discover_patterns"})
+
+
+def _score_idea(idea: Dict) -> int:
+    """Calculate a 0-100 priority score for an idea.
+
+    Scoring factors:
+    - Source trustworthiness (5-30 points)
+    - Age decay: newer ideas score higher (0-20 points)
+    - Recurrence: if similar ideas appear multiple times, boost (0-30 points)
+    - Actionability: ideas from trusted sources get bonus (0-20 points)
+
+    Returns:
+        Integer score 0-100. Higher = more important.
+    """
+    score = 0
+
+    # 1. Source weight (5-30)
+    source = (idea.get("source") or "").lower().strip()
+    score += _SOURCE_WEIGHT.get(source, 5)
+
+    # 2. Age decay (0-20): ideas older than 30 days get 0, fresh ideas get 20
+    ts = idea.get("timestamp", "")
+    if ts:
+        try:
+            age_days = (datetime.now() - datetime.fromisoformat(ts)).days
+            if age_days <= 0:
+                score += 20
+            elif age_days < 30:
+                score += max(0, 20 - int(age_days * 20 / 30))
+        except (ValueError, TypeError):
+            pass
+
+    # 3. Actionability bonus (0-20)
+    if source in _ACTIONABLE_SOURCES:
+        score += 20
+    elif source in _NOISE_SOURCES:
+        score -= 10
+
+    # 4. Recurrence bonus (0-30): check if similar ideas exist
+    idea_text = (idea.get("idea") or "").lower()[:80]
+    if idea_text:
+        all_ideas = _load_ideas()
+        similar_count = 0
+        for other in all_ideas:
+            if other.get("id") == idea.get("id"):
+                continue
+            other_text = (other.get("idea") or "").lower()[:80]
+            if other_text and (idea_text in other_text or other_text in idea_text):
+                similar_count += 1
+        score += min(30, similar_count * 10)
+
+    return max(0, min(100, score))
+
+
+def review_ideas(auto_cleanup: bool = True, max_actions: int = 3) -> str:
+    """Auto-review all open ideas: score them, clean noise, surface top priorities.
+
+    This is the core function that prevents ideas from becoming a graveyard.
+    Called by daily_review() automatically, or manually at any time.
+
+    Actions performed:
+    1. Score all open ideas (priority 0-100)
+    2. Auto-dismiss noise patterns (discover_patterns spam)
+    3. Auto-dismiss historical auto_detect entries older than 14 days
+    4. Surface top 5 ideas by priority
+    5. Attempt to act on top idea if conditions are met
+
+    Args:
+        auto_cleanup: Auto-dismiss noise and stale ideas (default True)
+        max_actions:  Max ideas to attempt acting on per review (default 3)
+
+    Returns:
+        Formatted review summary.
+    """
+    from datetime import timedelta
+
+    ideas = _load_ideas()
+    open_ideas = [i for i in ideas if i.get("status") == "open"]
+
+    if not open_ideas:
+        return "✅ No open ideas to review."
+
+    # 1. Score all open ideas
+    scored: List[Dict] = []
+    for idea in open_ideas:
+        priority = _score_idea(idea)
+        idea["priority"] = priority
+        idea["scored_at"] = datetime.now().isoformat()
+        scored.append(idea)
+
+    # 2. Auto-cleanup noise
+    dismissed_count = 0
+    if auto_cleanup:
+        for idea in scored:
+            src = (idea.get("source") or "").lower()
+            iid = idea.get("id", "")
+
+            # Dismiss discover_patterns noise (re-reported counts)
+            if src == "discover_patterns":
+                idea["status"] = "dismissed"
+                idea["dismissed_at"] = datetime.now().isoformat()
+                idea["dismissed_reason"] = "auto: noise — recurring pattern report, not actionable"
+                dismissed_count += 1
+                continue
+
+            # Dismiss stale auto_detect entries older than 14 days
+            if src == "auto_detect":
+                ts = idea.get("timestamp", "")
+                try:
+                    if ts and datetime.fromisoformat(ts) < (datetime.now() - timedelta(days=14)):
+                        idea["status"] = "dismissed"
+                        idea["dismissed_at"] = datetime.now().isoformat()
+                        idea["dismissed_reason"] = "auto: stale task context — no longer actionable"
+                        dismissed_count += 1
+                except (ValueError, TypeError):
+                    pass
+
+        _save_ideas(ideas)
+
+    # 3. Re-load after cleanup and sort by priority
+    ideas = _load_ideas()
+    open_ideas = [i for i in ideas if i.get("status") == "open"]
+    open_ideas.sort(key=lambda x: x.get("priority", 0), reverse=True)
+
+    # 4. Build report
+    lines = [
+        "🔍 Idea Review",
+        "=" * 40,
+        f"Total open ideas    : {len(open_ideas)}",
+        f"Auto-dismissed      : {dismissed_count}",
+        "",
+    ]
+
+    # Top 5 by priority
+    top = open_ideas[:5]
+    if top:
+        lines.append("📊 Top priorities:")
+        for i, idea in enumerate(top, 1):
+            p = idea.get("priority", 0)
+            src = idea.get("source", "?")
+            text = idea.get("idea", "?")[:100]
+            iid = idea.get("id", "?")
+            ts = idea.get("timestamp", "")[:10]
+            icon = "🔴" if p >= 60 else "🟡" if p >= 30 else "🟢"
+            lines.append(f"  {i}. {icon} [{iid}] priority={p} src={src} ({ts})")
+            lines.append(f"     {text}")
+        lines.append("")
+
+    # 5. Attempt to act on top ideas
+    acted = 0
+    for idea in open_ideas[:max_actions]:
+        result = _try_act_on_idea(idea)
+        if result:
+            acted += 1
+            lines.append(f"  ⚡ Acted: {result}")
+
+    if acted:
+        lines.append(f"\n  ⚡ {acted} idea(s) acted on automatically")
+    else:
+        lines.append("  No ideas ready for automatic action yet.")
+
+    lines.append("\n💡 Tip: review_ideas() runs automatically during daily_review().")
+    return "\n".join(lines)
+
+
+# ── Condition checking and action execution ───────────────────────────────────
+
+_CONDITION_HANDLERS: Dict[str, callable] = {}
+
+
+def _register_condition(key: str, handler: callable) -> None:
+    """Register a condition handler. Handler returns True when condition is met."""
+    _CONDITION_HANDLERS[key] = handler
+
+
+def _cond_has_lessons_for_error(error_type: str) -> bool:
+    """Check if lessons.jsonl has entries for a given error type."""
+    try:
+        lessons_file = MEMORY_DIR / "lessons.jsonl"
+        if not lessons_file.exists():
+            return False
+        for line in lessons_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("error_type") == error_type:
+                    return True
+            except json.JSONDecodeError:
+                continue
+        return False
+    except Exception:
+        return False
+
+
+def _cond_skill_exists(skill_name: str) -> bool:
+    """Check if a skill module exists."""
+    try:
+        for d in (SKILLS_DYNAMIC_DIR, SKILLS_CORE_DIR):
+            if (d / f"{skill_name}.py").exists():
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _cond_error_count_above(error_type: str, threshold: int) -> bool:
+    """Check if an error type appears more than threshold times in lessons."""
+    try:
+        threshold = int(threshold)
+        lessons_file = MEMORY_DIR / "lessons.jsonl"
+        if not lessons_file.exists():
+            return False
+        count = 0
+        for line in lessons_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("error_type") == error_type:
+                    count += 1
+            except json.JSONDecodeError:
+                continue
+        return count >= threshold
+    except Exception:
+        return False
+
+
+_register_condition("has_lessons_for_error", _cond_has_lessons_for_error)
+_register_condition("skill_exists", _cond_skill_exists)
+_register_condition("error_count_above", _cond_error_count_above)
+
+
+def _load_error_patterns() -> Dict:
+    """Load error patterns from memory dir."""
+    path = MEMORY_DIR / "error_patterns.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_error_patterns(patterns: Dict) -> None:
+    """Save error patterns to memory dir."""
+    path = MEMORY_DIR / "error_patterns.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(patterns, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _check_idea_conditions(idea: Dict) -> tuple:
+    """Check if an idea's conditions are met.
+
+    Args:
+        idea: Idea dict with optional "conditions" field.
+              Conditions format: list of strings like "has_lessons_for_error:TypeError"
+              or dict like {"type": "error_count_above", "error_type": "TypeError", "threshold": 10}
+
+    Returns:
+        (all_met: bool, details: List[str])
+    """
+    conditions = idea.get("conditions", [])
+    if not conditions:
+        return True, ["no conditions required"]
+
+    details = []
+    all_met = True
+
+    for cond in conditions:
+        if isinstance(cond, str):
+            parts = cond.split(":", 1)
+            handler_name = parts[0].strip()
+            args = parts[1].strip().split(",") if len(parts) > 1 else []
+        elif isinstance(cond, dict):
+            handler_name = cond.get("type", "")
+            args = [str(v) for k, v in cond.items() if k != "type"]
+        else:
+            details.append(f"unknown condition format: {cond}")
+            all_met = False
+            continue
+
+        handler = _CONDITION_HANDLERS.get(handler_name)
+        if handler is None:
+            details.append(f"unknown condition handler: {handler_name}")
+            all_met = False
+            continue
+
+        try:
+            result = handler(*args)
+            status = "✅" if result else "❌"
+            details.append(f"{status} {handler_name}({', '.join(args)})")
+            if not result:
+                all_met = False
+        except Exception as e:
+            details.append(f"⚠️ {handler_name} error: {e}")
+            all_met = False
+
+    return all_met, details
+
+
+def _try_act_on_idea(idea: Dict) -> str:
+    """Attempt to automatically act on an idea if conditions are met.
+
+    Called by review_ideas() for top-priority ideas.
+    Returns action description if acted, empty string if not ready.
+    """
+    iid = idea.get("id", "?")
+    source = (idea.get("source") or "").lower()
+    text = (idea.get("idea") or "").strip()
+
+    # Check conditions first
+    conditions_met, cond_details = _check_idea_conditions(idea)
+    if not conditions_met:
+        return ""
+
+    # Action: discover_patterns → add to error_patterns.json
+    if source == "discover_patterns":
+        match = re.search(r"'(\w+)'", text)
+        if match:
+            error_type = match.group(1)
+            patterns = _load_error_patterns()
+            if error_type not in patterns:
+                patterns[error_type] = {
+                    "fix": "see lessons.jsonl for examples",
+                    "first_seen": datetime.now().isoformat(),
+                }
+                _save_error_patterns(patterns)
+                idea["status"] = "implemented"
+                idea["implemented_as"] = "error_pattern_added"
+                idea["implemented_at"] = datetime.now().isoformat()
+                _save_ideas(_load_ideas())
+                return f"Added '{error_type}' to error_patterns.json [{iid}]"
+        return ""
+
+    # Action: auto_detect with error_recovery → ensure lesson recorded
+    if source == "auto_detect" and "error_recovery" in text.lower():
+        idea["status"] = "dismissed"
+        idea["dismissed_at"] = datetime.now().isoformat()
+        idea["dismissed_reason"] = "auto: error recovery already captured in lessons.jsonl"
+        _save_ideas(_load_ideas())
+        return f"Dismissed — already in lessons [{iid}]"
+
+    return ""
+
+
+def act_on_idea(idea_id: str) -> str:
+    """Manually attempt to act on a specific idea.
+
+    Args:
+        idea_id: The id field from list_ideas() (e.g. '20260417_35494d').
+
+    Returns:
+        Description of action taken, or why it couldn't be acted on.
+    """
+    ideas = _load_ideas()
+    for i, idea in enumerate(ideas):
+        if idea.get("id") == idea_id:
+            if idea.get("status") != "open":
+                return f"❌ Idea '{idea_id}' is not open (status={idea.get('status')})."
+
+            conditions_met, cond_details = _check_idea_conditions(idea)
+            if not conditions_met:
+                return f"⏳ Conditions not met for '{idea_id}':\n" + "\n".join(f"  {d}" for d in cond_details)
+
+            result = _try_act_on_idea(idea)
+            if result:
+                _save_ideas(ideas)
+                return f"✅ {result}"
+
+            text = idea.get("idea", "")[:200]
+            return (
+                f"⚠️ No automatic action for '{idea_id}'.\n"
+                f"Idea: {text}\n"
+                f"Conditions: {'; '.join(cond_details)}\n"
+                f"Consider: implement a custom handler or dismiss with dismiss_idea('{idea_id}')"
+            )
+
+    open_ids = [i["id"] for i in ideas if i.get("status") == "open"]
+    return f"❌ Idea '{idea_id}' not found.\nOpen IDs: {open_ids or 'none'}"
+
+
+def get_idea_summary(max_ideas: int = 3) -> str:
+    """Return a concise summary of top open ideas for system prompt injection.
+
+    Unlike get_latest_idea() which returns only the most recent, this returns
+    the top N ideas by priority score.
+
+    Args:
+        max_ideas: Number of top ideas to include (default 3).
+
+    Returns:
+        Formatted string or empty string if no open ideas.
+    """
+    ideas = _load_ideas()
+    open_ideas = [i for i in ideas if i.get("status") == "open"]
+
+    if not open_ideas:
+        return ""
+
+    # Score and sort
+    for idea in open_ideas:
+        if idea.get("priority") is None:
+            idea["priority"] = _score_idea(idea)
+
+    open_ideas.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    top = open_ideas[:max_ideas]
+
+    # Only surface ideas with meaningful priority
+    meaningful = [i for i in top if i.get("priority", 0) >= 20]
+    if not meaningful:
+        return ""
+
+    lines = ["🔍 Top improvement ideas:"]
+    for idea in meaningful:
+        p = idea.get("priority", 0)
+        text = idea.get("idea", "")[:120]
+        lines.append(f"  • [priority={p}] {text}")
+
+    return "\n".join(lines)
 
 
 def _suggestion_key(skill_name: str, issue_type: str) -> str:
@@ -2168,7 +2611,15 @@ def _loop_daily_review() -> str:
         "outcome":   "REVIEW",
         "summary":   review[:2000],
     })
-    return f"📋 daily_review:\n{review}{prune_note}{reflection_note}"
+
+    # Idea review
+    try:
+        idea_review = review_ideas(auto_cleanup=True, max_actions=2)
+        idea_review_line = f"\n🔍 idea_review:\n{idea_review}"
+    except Exception as _exc:
+        idea_review_line = f"\n⚠️ idea_review skipped: {_exc}"
+
+    return f"📋 daily_review:\n{review}{prune_note}{reflection_note}{idea_review_line}"
 
 
 def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
@@ -3211,6 +3662,9 @@ __all__ = [
     "list_ideas",
     "get_latest_idea",
     "dismiss_idea",
+    "review_ideas",
+    "act_on_idea",
+    "get_idea_summary",
     "loop_roi",
     "schedule_nightly",
     "report",
