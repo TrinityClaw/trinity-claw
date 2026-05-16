@@ -843,7 +843,7 @@ def _page_state(page) -> str:
 # PUBLIC FUNCTIONS
 # ─────────────────────────────────────────────
 
-def list_tabs() -> str:
+def list_tabs(tab_index: int = 0) -> str:
     """List all open browser tabs with their index, title, and URL."""
     try:
         pw, browser = _get_connection()
@@ -895,6 +895,10 @@ def goto(url: str, tab_index: int = 0, **kwargs) -> str:
     # Accept 'tab' as alias for 'tab_index' (LLM sometimes uses the wrong name)
     if "tab" in kwargs:
         tab_index = kwargs.pop("tab")
+    # Silently ignore non-functional kwargs the agent may pass
+    kwargs.pop("stealth", None)
+    kwargs.pop("wait_until", None)
+    kwargs.pop("timeout", None)
     if kwargs:
         return f"❌ Unknown arguments: {list(kwargs.keys())}. Use tab_index (not tab)."
     try:
@@ -909,14 +913,18 @@ def goto(url: str, tab_index: int = 0, **kwargs) -> str:
         return f"❌ {e}"
 
 
-def get_text(tab_index: int = 0) -> str:
+def get_text(tab_index: int = 0, selector: str = "") -> str:
     """Get the visible text content of the current page.
     Strips empty lines and collapses whitespace. Returns up to 5000 chars.
+    If selector is provided, extracts text only from that element.
     """
     try:
         pw, browser = _get_connection()
         page = _get_page(browser, tab_index)
-        raw = page.locator("body").inner_text()
+        if selector:
+            raw = page.locator(selector).inner_text()
+        else:
+            raw = page.locator("body").inner_text()
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
         result = "\n".join(lines)
         total = len(result)

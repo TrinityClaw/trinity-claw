@@ -297,14 +297,18 @@ def _ingest_one(path: Path, col, index: dict, chunk_size: int = _CHUNK_SIZE) -> 
 # PUBLIC SKILL FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def ingest_folder(*args) -> str:
+def ingest_folder(*args, **kwargs) -> str:
     """
     Scan /app/memory/knowledge/ (or a custom path) and ingest any new or
     changed documents into the business_knowledge ChromaDB collection.
     Already-current files are skipped automatically.
     Usage: ingest_folder()  or  ingest_folder('/app/memory/knowledge/')
+           ingest_folder(path='/app/memory/knowledge/')  or  ingest_folder(folder=...)
     """
-    folder = Path(str(args[0]).strip()) if args else _KNOWLEDGE_DIR
+    folder = Path(str(args[0]).strip()) if args else None
+    if folder is None:
+        folder_val = kwargs.get("path") or kwargs.get("folder") or kwargs.get("source")
+        folder = Path(str(folder_val).strip()) if folder_val else _KNOWLEDGE_DIR
 
     if not folder.exists():
         folder.mkdir(parents=True, exist_ok=True)

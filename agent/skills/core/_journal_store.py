@@ -194,9 +194,10 @@ def get_archive(days: int = 30) -> str:
         return f"❌ Error reading archive: {e}"
 
 
-def end_day(summary: str, next_steps: str = "", user_insights: str = "") -> str:
+def end_day(summary: str = "", next_steps: str = "", user_insights: str = "") -> str:
     """Wrap up the day: writes today's journal entry with a full activity summary.
-    Automatically pulls today's activity log AND extracts user insights so nothing important is missed."""
+    Automatically pulls today's activity log AND extracts user insights so nothing important is missed.
+    If summary is not provided, it is auto-generated from the activity log."""
     try:
         today = date.today().isoformat()
 
