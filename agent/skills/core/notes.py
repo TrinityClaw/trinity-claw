@@ -21,6 +21,7 @@ from _user_model_store import (
 from _journal_store import (
     write_daily_entry, get_journal, get_today, get_archive, compress_journal, end_day,
 )
+from _proactive_engine import suggest_actions as _suggest_actions
 
 # Explicit re-exports: the skill loader resolves functions via getattr() at
 # runtime, so these imports are used — they are not dead code.
@@ -43,6 +44,8 @@ __all__ = [
     "delete_context",
     # journal (re-exported from _journal_store)
     "write_daily_entry", "get_journal", "get_today", "get_archive", "compress_journal", "end_day",
+    # proactive engine (re-exported from _proactive_engine)
+    "suggest_actions",
 ]
 
 NAME = "notes"
@@ -87,7 +90,8 @@ DOC = (
     "complete_goal(goal_text)→mark a goal as completed by case-insensitive substring match; "
     "cancel_goal(goal_text)→mark a goal as cancelled (abandoned/invalid) by case-insensitive substring match; "
     "list_goals(status?)→show goals filtered by status ('open' or 'completed', default 'open'); "
-    "get_goals_for_prompt()→compact active goal list for system prompt injection."
+    "get_goals_for_prompt()→compact active goal list for system prompt injection; "
+    "suggest_actions(current_message?)→proactive memory engine: scans activity for patterns, checks goal deadlines, analyzes journal insights, matches session context, returns anticipatory suggestions — call at session start."
 )
 
 _LOGS_FILE    = Path("/app/memory/session_logs.jsonl")
@@ -515,3 +519,13 @@ def get_activity_log(hours: int = 24) -> str:
         return "\n".join(lines)
     except Exception as ex:
         return f"❌ get_activity_log error: {ex}"
+
+
+# ── Proactive Memory Engine ────────────────────────────────────────────────────
+
+def suggest_actions(current_message: str = "") -> str:
+    """Proactive memory engine — call at session start.
+    Scans activity logs for patterns, checks goal deadlines, analyzes journal insights,
+    matches session context, and returns anticipatory suggestions.
+    current_message: the user's first message (optional, used for context matching)."""
+    return _suggest_actions(current_message)

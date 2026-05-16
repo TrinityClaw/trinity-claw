@@ -17,6 +17,7 @@ import re
 import json
 import hashlib
 import subprocess
+import threading
 import requests as _requests
 from pathlib import Path
 from datetime import datetime
@@ -55,6 +56,7 @@ SKILLS_DIR = Path("/app/skills/dynamic")
 CORE_SKILLS_DIR = Path("/app/skills/core")
 LESSONS_FILE = Path("/app/memory/lessons.jsonl")
 PATTERNS_FILE = Path("/app/memory/error_patterns.json")
+_AUTO_FIX_LOG = Path("/app/memory/auto_fix_log.jsonl")
 
 # ============================================================================
 # MISTAKE MEMORY: Learn from every error
@@ -179,7 +181,7 @@ def _load_error_patterns() -> Dict:
 
     return patterns
 
-def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied: str = "", skill_path: str = "") -> str:
+def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied: str = "", skill_path: str = "", auto_fix: bool = True) -> str:
     """Record a mistake + fix for future learning."""
     lesson = {
         "timestamp": datetime.now().isoformat(),
@@ -198,6 +200,8 @@ def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied
     # a stale count to error_patterns.json that gets overwritten on next load.
     if saved:
         _index_lesson_in_chroma(lesson)  # best-effort — never raises
+    if saved and auto_fix:
+        _try_auto_fix(skill_name, error_type, skill_path)
     return f"✅ Recorded lesson: {error_type} in {skill_name}" if saved else "⚠️ Failed to record lesson"
 
 # ── ChromaDB semantic indexing for lessons ─────────────────────────────────────
@@ -246,6 +250,98 @@ def _index_lesson_in_chroma(lesson: dict) -> None:
         )
     except Exception:
         pass  # ChromaDB down → lessons still saved to JSONL, indexing is best-effort
+
+
+# ── Auto-fix: fire-and-forget background thread ────────────────────────────────
+
+_AUTO_FIXABLE_ISSUES = frozenset({
+    "bare_except",
+    "missing_timeout",
+    "missing_docstring",
+})
+
+_auto_fix_in_flight: set = set()
+
+
+def _log_auto_fix(skill_name: str, error_type: str, outcome: str,
+                  before: int, after: int, patches: int) -> None:
+    """Persist auto-fix outcome for display in check_lessons() and reports."""
+    try:
+        _AUTO_FIX_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _AUTO_FIX_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "timestamp":    datetime.now().isoformat(),
+                "skill":        skill_name,
+                "error_type":   error_type,
+                "outcome":      outcome,
+                "before_score": before,
+                "after_score":  after,
+                "patches":      patches,
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _try_auto_fix(skill_name: str, error_type: str, skill_path: str = "") -> None:
+    """Background auto-fix attempt — fire-and-forget, never raises.
+
+    Called from record_mistake() when the error type is known and auto-fixable.
+    Runs in a daemon thread so it does not block the agent loop.
+
+    Flow:
+      1. Check if error_type is auto-fixable
+      2. Check if we already fixed this recently (dedup window)
+      3. Analyze skill to confirm the issue still exists
+      4. Generate patch → apply → verify
+      5. Log outcome to auto_fix_log.jsonl
+    """
+    if error_type not in _AUTO_FIXABLE_ISSUES:
+        return
+
+    dedup_key = f"{skill_name}:{error_type}"
+    if dedup_key in _auto_fix_in_flight:
+        return
+    _auto_fix_in_flight.add(dedup_key)
+
+    def _worker():
+        try:
+            si_mod = __import__("self_improvement")
+            analysis = si_mod.analyze_skill_code(skill_name)
+            if analysis.get("error"):
+                return
+            matching = [i for i in analysis["issues"] if i["type"] == error_type]
+            if not matching:
+                return
+
+            before_score = analysis["health_score"]
+            applied = 0
+            errors = []
+
+            for issue in sorted(matching, key=lambda x: x["line"], reverse=True):
+                patch = si_mod.generate_patch(skill_name, error_type, issue["line"])
+                if patch.get("safe_to_apply"):
+                    result = si_mod.apply_patch(skill_name, patch)
+                    if result.get("success"):
+                        applied += 1
+                    else:
+                        errors.append(result.get("error", "unknown"))
+
+            if applied == 0:
+                return
+
+            verification = si_mod.verify_skill(skill_name)
+            after = si_mod.analyze_skill_code(skill_name)
+            after_score = after.get("health_score", before_score) if not after.get("error") else 0
+
+            outcome = "AUTO_IMPROVED" if after_score >= before_score else "AUTO_REVERTED"
+            _log_auto_fix(skill_name, error_type, outcome, before_score, after_score, applied)
+            print(f"[auto-fix] {outcome}: {skill_name}.{error_type} ({applied} patch(es), {before_score}->{after_score})")
+        except Exception as e:
+            print(f"[auto-fix] failed for {skill_name}.{error_type}: {e}")
+        finally:
+            _auto_fix_in_flight.discard(dedup_key)
+
+    threading.Thread(target=_worker, daemon=True, name=f"auto-fix-{skill_name}-{error_type}").start()
 
 
 def search_lessons_semantic(query: str, n: int = 5) -> str:
@@ -353,6 +449,23 @@ def check_lessons(skill_name: str = "", func_name: str = "") -> Optional[str]:
     msg = f"⚠️ [lesson] {label} has failed before ({error_type})"
     if fix:
         msg += f" — known fix: {fix[:120]}"
+
+    # Check auto-fix status
+    if _AUTO_FIX_LOG.exists():
+        try:
+            with _AUTO_FIX_LOG.open("r", encoding="utf-8") as f:
+                for line in f:
+                    entry = json.loads(line.strip())
+                    if entry.get("skill") == skill_name and entry.get("error_type") == error_type:
+                        outcome = entry.get("outcome", "")
+                        if outcome == "AUTO_IMPROVED":
+                            msg += f" [auto-fix: ✅ resolved]"
+                        elif outcome == "AUTO_REVERTED":
+                            msg += f" [auto-fix: ⚠️ attempted but reverted]"
+                        break
+        except Exception:
+            pass
+
     return msg
 
 # ============================================================================
@@ -761,6 +874,7 @@ def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
         error_msg=patch.get("original", ""),
         fix_applied=patch.get("proposed_fix", ""),
         skill_path=str(path),
+        auto_fix=False,
     )
 
     return {
@@ -1315,6 +1429,30 @@ def daily_review(skill_name: str = "") -> str:
         for r in critical_skills:
             lines.append(f"  • {r['skill']}  score={r['health_score']}  critical={r['critical_count']}")
         lines.append("")
+
+    # Auto-fix summary from log
+    if _AUTO_FIX_LOG.exists():
+        try:
+            af_entries = []
+            with _AUTO_FIX_LOG.open("r", encoding="utf-8") as f:
+                for line in f:
+                    entry = json.loads(line.strip())
+                    ts = entry.get("timestamp", "")
+                    try:
+                        if datetime.fromisoformat(ts) >= cutoff:
+                            af_entries.append(entry)
+                    except (ValueError, TypeError):
+                        continue
+            if af_entries:
+                improved = sum(1 for e in af_entries if e.get("outcome") == "AUTO_IMPROVED")
+                reverted = sum(1 for e in af_entries if e.get("outcome") == "AUTO_REVERTED")
+                lines.append("🤖 Auto-fix activity (last 7 days):")
+                lines.append(f"  • Attempts: {len(af_entries)}  |  ✅ Resolved: {improved}  |  ⚠️ Reverted: {reverted}")
+                for e in af_entries[-5:]:
+                    lines.append(f"  • {e['skill']}.{e['error_type']} → {e['outcome']} ({e['patches']} patch(es), {e['before_score']}→{e['after_score']})")
+                lines.append("")
+        except Exception:
+            pass
 
     if auto_fixable:
         lines.append("🔧 Auto-fixable right now (run fix(skill,'issue_type','all')):")
