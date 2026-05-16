@@ -5,11 +5,14 @@ Called at session start via suggest_actions() in notes.py.
 """
 import json
 import logging
+import re
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from collections import Counter
 
 logger = logging.getLogger(__name__)
+
+_POST_TASK_RE = re.compile(r"Just completed:\s*(.+?)\.\s*Task type:\s*(\w+)\.?")
 
 _ACTIVITY_LOG = Path("/app/memory/activity_log.jsonl")
 _USER_MODEL_FILE = Path("/app/memory/user_model.json")
@@ -279,10 +282,18 @@ def _match_session_context(current_message: str) -> list:
 
 def suggest_actions(current_message: str = "") -> str:
     """
-    Proactive memory engine — call at session start.
+    Proactive memory engine — call at session start OR after task completion.
     Returns a formatted block of anticipatory suggestions, goal alerts, and insights.
+
+    When current_message contains "Just completed: skill1, skill2..." it generates
+    context-aware follow-up suggestions instead of session-start patterns.
     """
     sections = []
+
+    # Detect post-task context
+    _post_task_match = _POST_TASK_RE.match(current_message) if current_message else None
+    if _post_task_match:
+        return _suggest_post_task_followups(_post_task_match, sections)
 
     # 1. Goal deadline alerts (highest priority)
     goal_alerts = _check_goal_deadlines()
@@ -340,3 +351,77 @@ def _generate_suggestions() -> list:
         suggestions.append("Evening wrap-up: review today's progress, log journal entry?")
 
     return suggestions
+
+
+# ── Post-Task Follow-up Suggestions ───────────────────────────────────────────
+
+_TASK_FOLLOWUPS: dict = {
+    "web_design": [
+        "You just built a website. Want me to schedule a daily health check of it?",
+        "Should I set up a recurring task to monitor the site for broken links?",
+    ],
+    "web_clone": [
+        "The site has been cloned. Want me to schedule periodic re-clones to keep it updated?",
+    ],
+    "email": [
+        "Email sent. Want me to set a reminder to follow up in 2 days?",
+    ],
+    "web": [
+        "Research complete. Want me to save the findings to your knowledge base?",
+    ],
+    "browser_session": [
+        "Browser task done. Want me to screenshot the current state for your records?",
+    ],
+    "autoimprove": [
+        "Self-improvement ran. Want me to schedule a daily review to track progress?",
+    ],
+    "notes": [
+        "Note saved. Want me to set a reminder to review it this week?",
+    ],
+    "scheduler": [
+        "Task scheduled. Want me to list all your active scheduled tasks?",
+    ],
+    "knowledge_base": [
+        "Knowledge base updated. Want me to run a semantic search to verify the new content?",
+    ],
+    "self_improvement": [
+        "Skill health check done. Want me to schedule weekly audits?",
+    ],
+}
+
+_GENERIC_FOLLOW = [
+    "Want me to save what we just did to your knowledge base for future reference?",
+    "Should I schedule this as a recurring task so you don't have to ask again?",
+    "Want me to write a summary of today's work to your journal?",
+]
+
+
+def _suggest_post_task_followups(match: re.Match, sections: list) -> str:
+    """Generate context-aware follow-up suggestions after task completion."""
+    skills_str = match.group(1)
+    task_type = match.group(2)
+
+    skills_used = [s.strip().split(".")[0] for s in skills_str.split(",")]
+
+    followups = _TASK_FOLLOWUPS.get(task_type, [])
+    for skill in skills_used:
+        followups.extend(_TASK_FOLLOWUPS.get(skill, []))
+
+    followups = list(dict.fromkeys(followups))
+
+    if followups:
+        sections.append("💭 Follow-up suggestions:")
+        for f in followups[:3]:
+            sections.append(f"  • {f}")
+    else:
+        sections.append("💭 Follow-up suggestions:")
+        for f in _GENERIC_FOLLOW[:2]:
+            sections.append(f"  • {f}")
+
+    goal_alerts = _check_goal_deadlines()
+    if goal_alerts:
+        sections.append("🎯 Goal Alerts:")
+        for alert in goal_alerts:
+            sections.append(f"  {alert['message']}")
+
+    return "\n\n".join(sections)
