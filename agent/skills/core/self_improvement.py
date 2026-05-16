@@ -472,7 +472,7 @@ def check_for_learned_fix(skill_name: str = "", error_type: str = "", skill_path
     return fallback
 
 
-def check_lessons(skill_name: str = "", func_name: str = "") -> Optional[str]:
+def check_lessons(skill_name: str = "", func_name: str = "", **kwargs) -> Optional[str]:
     """Pre-dispatch check: return a warning string if this skill has failed before,
     so the caller can surface the lesson before executing.
     Returns None if no prior failures exist (the common, happy path).
@@ -829,7 +829,7 @@ def _verify_syntax(source_code: str, skill_name: str) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def apply_patch(skill_name: str, patch: Dict, backup: bool = True) -> Dict:
+def apply_patch(skill_name: str, patch: Dict, backup: bool = True, **kwargs) -> Dict:
     """Apply a generated patch to the skill file.
 
     Verification gate: the patched source is parsed and compiled BEFORE the file

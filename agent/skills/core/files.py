@@ -130,8 +130,10 @@ def cat(path: str = "", **kwargs) -> str:
         return f"Error: {e}"
 
 
-def read(path: str) -> str:
+def read(path: str = "", **kwargs) -> str:
     """Alias for cat(). Read and return file contents (max 10 MB)."""
+    if not path:
+        path = kwargs.get("path", "") or kwargs.get("args", "")
     return cat(path)
 
 
