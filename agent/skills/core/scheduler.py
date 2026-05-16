@@ -42,11 +42,12 @@ _TASKS_FILE    = Path("/app/memory/scheduled_tasks.json")
 _ACTIVITY_LOG  = Path("/app/memory/activity_log.jsonl")
 _lock = threading.Lock()
 _start_lock = threading.Lock()   # guards _ensure_running check+set atomicity
-_firing_tasks: set = set()       # names of tasks currently being dispatched
+_firing_tasks: dict = {}         # name → timestamp when dispatch started (TTL-based unblock)
 _running = False
 _thread = None
 
 _MAX_DISPATCH_WORKERS = 10       # cap concurrent task dispatches
+_FIRING_TTL = 1500               # seconds before a stuck task is forcibly unblocked (25 min)
 
 _LOG_MAX_BYTES  = 5 * 1024 * 1024   # rotate when file exceeds 5 MB
 _LOG_KEEP_LINES = 8_000              # keep this many lines after rotation
@@ -401,6 +402,12 @@ def _run():
         try:
             now = datetime.now()
 
+            # Purge stuck tasks from _firing_tasks (TTL-based unblock)
+            _now_ts = time.time()
+            for stuck_name in [n for n, ts in _firing_tasks.items() if _now_ts - ts > _FIRING_TTL]:
+                print(f"[scheduler] unblocking stuck task: {stuck_name} (>{_FIRING_TTL}s)")
+                _firing_tasks.pop(stuck_name, None)
+
             # Phase 1: identify tasks to fire (lock held briefly, no I/O)
             with _lock:
                 tasks = _load()
@@ -414,6 +421,35 @@ def _run():
                         _now = datetime.now(next_run_dt.tzinfo) if next_run_dt.tzinfo else now
                         if _now < next_run_dt:
                             continue  # not due yet
+
+                        # ── Catch-up prevention ──────────────────────────────
+                        # If the task is significantly overdue (more than one full
+                        # interval or 24h for calendar tasks), the PC was probably
+                        # off. Skip all missed occurrences and advance to the next
+                        # future time instead of firing a storm of catch-ups.
+                        overdue_secs = (_now - next_run_dt).total_seconds()
+                        if t.get('recur_kind') == 'calendar':
+                            if overdue_secs > 86400:  # > 24h overdue
+                                t['next_run'] = _next_calendar_run(
+                                    t.get('cal_weekdays'), t['cal_hour'], t['cal_minute'],
+                                    after=now
+                                ).isoformat()
+                                print(f"[scheduler] skipped missed calendar task '{name}', next: {t['next_run']}")
+                                continue  # don't fire now — wait for the next scheduled time
+                        else:
+                            secs = t.get('interval_seconds') or 3600
+                            if overdue_secs > secs * 2:  # missed 2+ intervals
+                                # Advance to the next future occurrence
+                                intervals_behind = int(overdue_secs / secs)
+                                new_next = next_run_dt + timedelta(seconds=secs * (intervals_behind + 1))
+                                if new_next <= now:
+                                    # Safety: just use now + one interval
+                                    new_next = now + timedelta(seconds=secs)
+                                t['next_run'] = new_next.isoformat()
+                                print(f"[scheduler] skipped {intervals_behind} missed interval(s) for '{name}', next: {t['next_run']}")
+                                continue  # don't fire now — wait for the next scheduled time
+                        # ── End catch-up prevention ──────────────────────────
+
                         # Task is due — capture dispatch info BEFORE any state changes
                         to_fire.append((
                             name,
@@ -421,7 +457,7 @@ def _run():
                             t.get('type', 'once'),
                             t.get('interval_seconds'),
                         ))
-                        _firing_tasks.add(name)
+                        _firing_tasks[name] = time.time()
                         if t.get('type') == 'once':
                             # Defer deletion to Phase 3 so result can be logged first
                             to_remove.add(name)
@@ -440,8 +476,7 @@ def _run():
                     except Exception as e:
                         result = f"❌ dispatch exception: {e}"
                     finally:
-                        with _lock:
-                            _firing_tasks.discard(name)
+                        _firing_tasks.pop(name, None)
                     print(f"[scheduler] {name} → {result[:80]}")
                     return (name, prompt, kind, interval_secs, fired_at, result)
 
@@ -499,9 +534,15 @@ def _run():
 
 
 def _ensure_running():
-    """Start the background scheduler thread if it is not already running."""
+    """Start the background scheduler thread if it is not already running.
+    Also acts as a watchdog: if the thread died unexpectedly, restart it."""
     global _running, _thread
     with _start_lock:
+        # Watchdog: thread exists but is dead — restart
+        if _thread is not None and not _thread.is_alive():
+            print("[scheduler] watchdog: thread died, restarting")
+            _running = False
+            _thread = None
         if not _running:
             _running = True
             _thread = threading.Thread(target=_run, daemon=True, name="scheduler")
@@ -828,7 +869,7 @@ def run_now(name: str) -> str:
         prompt = tasks[name]['prompt']
         if name in _firing_tasks:
             return f"⚠️ Task '{name}' is already running. Try again after it completes."
-        _firing_tasks.add(name)
+        _firing_tasks[name] = time.time()
 
     try:
         fired_at = datetime.now()
@@ -837,8 +878,7 @@ def run_now(name: str) -> str:
     except Exception as e:
         result = f"❌ dispatch exception: {e}"
     finally:
-        with _lock:
-            _firing_tasks.discard(name)
+        _firing_tasks.pop(name, None)
 
     with _lock:
         tasks = _load()
