@@ -1368,6 +1368,93 @@ def _extract_skill_context(ai_reply: str, fallback: str) -> str:
     match = _SKILL_RESULT_RE.search(ai_reply)
     return match.group(1) if match else fallback
 
+
+# ── Preference extraction from user corrections ───────────────────────────────
+
+_PREF_NEGATION = re.compile(
+    r"(?:don'?t|do not|never|stop|no more|avoid|remove|drop|get rid of)\s+(?:using?|show(?:ing)?|add(?:ing)?|includ(?:e|ing)|apply(?:ing)?|set(?:ting)?|pick(?:ing)?|choos(?:e|ing)|select(?:ing)?)\s+(?:the\s+)?(?:font\s+)?([A-Za-z][A-Za-z0-9\s\-]*[A-Za-z0-9]|[A-Za-z])",
+    re.IGNORECASE,
+)
+_PREF_AFFIRMATION = re.compile(
+    r"(?:using?|always\s+using?|prefer(?:ring)?|always|keep(?:ing)?|stick\s+with|go\s+with|set(?:ting)?|pick(?:ing)?|select(?:ing)?|choos(?:e|ing))\s+(?:the\s+)?(?:font\s+)?([A-Za-z][A-Za-z0-9\s\-]*[A-Za-z0-9]|[A-Za-z])",
+    re.IGNORECASE,
+)
+_PREF_LIKE = re.compile(
+    r"(?:i (?:like|love|prefer|want|need))\s+(?:the\s+)?(?:font\s+)?([A-Za-z][A-Za-z0-9\s\-]*[A-Za-z0-9]|[A-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def _extract_preference_from_correction(msg: str) -> tuple:
+    """Try to extract a key=value preference from a user correction message.
+
+    Patterns detected:
+      - "don't use Inter font" → key="font", value="not Inter"
+      - "use Roboto" → key="font", value="Roboto"
+      - "I prefer dark mode" → key="theme", value="dark mode"
+
+    Returns:
+        (key, value) tuple or ("", "") if no preference detected.
+    """
+    msg = msg.strip()[:300]
+
+    # Negation: "don't use X"
+    m = _PREF_NEGATION.search(msg)
+    if m:
+        thing = m.group(1).strip()
+        # Try to categorize
+        lower = thing.lower()
+        if "font" in lower or any(f in lower for f in ("inter", "roboto", "arial", "serif", "sans", "mono")):
+            return "font", f"not {thing}"
+        if "color" in lower or "theme" in lower or "dark" in lower or "light" in lower:
+            return "theme", f"not {thing}"
+        return f"avoid_{thing[:20].lower().replace(' ', '_')}", "true"
+
+    # Affirmation: "use X"
+    m = _PREF_AFFIRMATION.search(msg)
+    if m:
+        thing = m.group(1).strip()
+        lower = thing.lower()
+        if "font" in lower or any(f in lower for f in ("inter", "roboto", "arial", "serif", "sans", "mono")):
+            return "font", thing
+        if "color" in lower or "theme" in lower or "dark" in lower or "light" in lower:
+            return "theme", thing
+        return f"use_{thing[:20].lower().replace(' ', '_')}", thing
+
+    # Preference: "I prefer X"
+    m = _PREF_LIKE.search(msg)
+    if m:
+        thing = m.group(1).strip()
+        lower = thing.lower()
+        if "font" in lower or any(f in lower for f in ("inter", "roboto", "arial", "serif", "sans", "mono")):
+            return "font", thing
+        return f"prefer_{thing[:20].lower().replace(' ', '_')}", thing
+
+    return "", ""
+
+
+def _import_skill_safe(module_name: str):
+    """Safely import a skill module, returning None on failure."""
+    try:
+        for _p in ("/app/skills/core", "/app/skills/dynamic", "/app/skills", "/app"):
+            _full = Path(_p) / f"{module_name}.py"
+            if _full.exists():
+                import importlib.util
+                _spec = importlib.util.spec_from_file_location(module_name, str(_full))
+                if _spec and _spec.loader:
+                    _mod = importlib.util.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)
+                    return _mod
+        # Try sys.modules fallback
+        import sys
+        if module_name in sys.modules:
+            return sys.modules[module_name]
+        __import__(module_name)
+        return sys.modules.get(module_name)
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 _IDENTITY_SECTION_RE = re.compile(
@@ -3234,6 +3321,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     if not any(k in _ns.lower() for k in _sched_kw):
                         _journal_lines.append(f"  Next steps promised: {_ns}")
             _user_model_block = ""
+            _proactive_block = ""
             try:
                 _notes_skill = skills.get("notes")
                 if _notes_skill and hasattr(_notes_skill, "get_context_for_prompt"):
@@ -3241,6 +3329,9 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     # mid-session and reloading them every turn wastes context budget.
                     if _is_new_session:
                         _user_model_block = _notes_skill.get_context_for_prompt()
+                        # Proactive memory engine: pattern mining, goal alerts, journal insights
+                        if hasattr(_notes_skill, "suggest_actions"):
+                            _proactive_block = _notes_skill.suggest_actions(req.message)
             except Exception:
                 pass
             _dm_parts = []
@@ -3250,6 +3341,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 _dm_parts.append(f"Recent Journal (last {_journal_days} days):\n" + "\n".join(_journal_lines))
             if _user_model_block:
                 _dm_parts.append("User Profile:\n" + _user_model_block)
+            if _proactive_block:
+                _dm_parts.append("Proactive Suggestions:\n" + _proactive_block)
             _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
             # Cache for subsequent turns in this session
             _session_daily_memory[session_id] = _daily_memory_block
@@ -4107,6 +4200,18 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         with open(_lessons_path, "a", encoding="utf-8") as _lf:
                             _lf.write(json.dumps(lesson, ensure_ascii=False) + "\n")
                         print(f"📝 Correction recorded — skill_context: {skill_ctx}")
+
+                        # Also try to extract a user preference from the correction
+                        # so it persists across sessions via the user model store.
+                        try:
+                            _pref_key, _pref_val = _extract_preference_from_correction(_req_message)
+                            if _pref_key and _pref_val:
+                                _um = _import_skill_safe("_user_model_store")
+                                if _um and hasattr(_um, "set_preference"):
+                                    _um.set_preference(_pref_key, _pref_val, source="user", confidence=1.0)
+                                    print(f"👤 Preference also set: {_pref_key} = {_pref_val!r}")
+                        except Exception as _pe:
+                            pass  # preference extraction is best-effort
                     except Exception as _le:
                         print(f"⚠️  Failed to record correction: {_le}")
                 # ─────────────────────────────────────────────────────────
