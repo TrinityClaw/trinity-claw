@@ -3366,6 +3366,20 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         except Exception:
             pass
 
+    # Inject post-task proactive suggestion from the PREVIOUS request's completion.
+    # This is how "you just built a website, want me to schedule a daily review?"
+    # reaches the model — cached by the bg thread after the prior task finished.
+    _post_task_suggestion_path = Path(f"/app/memory/post_task_suggestion_{session_id}.txt")
+    if _post_task_suggestion_path.exists():
+        try:
+            _pts = _post_task_suggestion_path.read_text(encoding="utf-8").strip()
+            if _pts:
+                _daily_memory_block += f"\n\n💭 Follow-up suggestion:\n{_pts}"
+            # Clean up after reading — one-shot injection
+            _post_task_suggestion_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     # On new sessions (first message): run daily_review in background — never blocks the response
     # Read the cached should_self_improve result written by the previous session's bg thread.
     # The bg thread always finishes after the current request's template is built, so we
@@ -4263,6 +4277,39 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 print(f"⚠️  Skill detection error: {_se}")
 
         threading.Thread(target=_maybe_suggest_skill, daemon=True, name="skill-detect").start()
+
+        # Post-task proactive suggestions — "you just built a website, want me to
+        # schedule a daily review of it?" — fires after every completed task, not
+        # just at session start.
+        _exec_logs_snap3 = list(all_execution_logs)
+        _task_type_snap = task_type
+        _session_id_snap = _req_session_id
+
+        def _suggest_post_task():
+            try:
+                notes_skill = skills.get("notes")
+                if not notes_skill or not hasattr(notes_skill, "suggest_actions"):
+                    return
+                # Build a context message from what just happened
+                successful_skills = [
+                    f"{l['skill']}.{l.get('function', '')}"
+                    for l in _exec_logs_snap3
+                    if l.get("status") == "success"
+                ]
+                if not successful_skills:
+                    return  # nothing succeeded, no suggestion needed
+                context = f"Just completed: {', '.join(successful_skills)}. Task type: {_task_type_snap}."
+                suggestion = notes_skill.suggest_actions(context)
+                if suggestion:
+                    # Cache the suggestion so the NEXT request can inject it
+                    _post_task_suggestion_path = Path(f"/app/memory/post_task_suggestion_{_session_id_snap}.txt")
+                    _post_task_suggestion_path.parent.mkdir(parents=True, exist_ok=True)
+                    _post_task_suggestion_path.write_text(suggestion[:500], encoding="utf-8")
+                    print(f"💡 Post-task suggestion cached for session {_session_id_snap[:12]}...")
+            except Exception as _sug_err:
+                print(f"⚠️ Post-task suggestion error: {_sug_err}")
+
+        threading.Thread(target=_suggest_post_task, daemon=True, name="post-task-suggest").start()
 
         _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": len(all_execution_logs), "token_est": _token_est})
         return {
