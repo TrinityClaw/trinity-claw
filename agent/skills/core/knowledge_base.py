@@ -796,3 +796,12 @@ def export_index(*args) -> str:
         out_path.unlink(missing_ok=True)
         return "📭 ChromaDB collection is empty — nothing to export."
     return f"✅ Exported {total} chunks to {out_path}"
+
+
+def index_all_lessons() -> str:
+    """Alias to self_improvement.index_all_lessons for cross-skill compatibility."""
+    try:
+        si = __import__("self_improvement")
+        return si.index_all_lessons()
+    except Exception as e:
+        return f"❌ Cannot delegate to self_improvement.index_all_lessons: {e}"

@@ -116,8 +116,11 @@ def list_images(path: str = "/app/memory") -> str:
 _MAX_READ_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
-def cat(path: str) -> str:
-    """Read and return file contents (max 10 MB)"""
+def cat(path: str = "", **kwargs) -> str:
+    """Read and return file contents (max 10 MB).
+    Accepts 'path' or 'args' as keyword argument for compatibility."""
+    if not path:
+        path = kwargs.get("path", "") or kwargs.get("args", "")
     try:
         p = _read_path(path)
         if p.stat().st_size > _MAX_READ_SIZE:
