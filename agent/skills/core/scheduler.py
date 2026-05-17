@@ -435,6 +435,8 @@ def _run():
                                     after=now
                                 ).isoformat()
                                 print(f"[scheduler] skipped missed calendar task '{name}', next: {t['next_run']}")
+                                tasks[name] = t
+                                _save(tasks)
                                 continue  # don't fire now — wait for the next scheduled time
                         else:
                             secs = t.get('interval_seconds') or 3600
@@ -447,6 +449,8 @@ def _run():
                                     new_next = now + timedelta(seconds=secs)
                                 t['next_run'] = new_next.isoformat()
                                 print(f"[scheduler] skipped {intervals_behind} missed interval(s) for '{name}', next: {t['next_run']}")
+                                tasks[name] = t
+                                _save(tasks)
                                 continue  # don't fire now — wait for the next scheduled time
                         # ── End catch-up prevention ──────────────────────────
 
