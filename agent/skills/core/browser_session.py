@@ -98,7 +98,38 @@ DOC = (
 SKILL_TIMEOUT = 60  # browser operations can take up to 60s
 
 _SCREENSHOT_DIR = Path("/app/memory/browser_screenshots")
-_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://host.docker.internal:9223")
+
+# CDP endpoint candidates — tried in order until one succeeds.
+# Covers: native (Win/Mac/Linux), Docker, WSL2, custom setups.
+_CDP_ENDPOINTS = [
+    ("http://localhost:9222", None),
+    ("http://127.0.0.1:9222", None),
+    ("http://host.docker.internal:9223", {"Host": "localhost:9222"}),
+]
+
+def _resolve_cdp_url() -> str:
+    """Find a working CDP URL by trying each candidate. Cached after first success."""
+    if os.getenv("BROWSER_CDP_URL"):
+        return os.getenv("BROWSER_CDP_URL")
+    import requests as _r
+    for url, headers in _CDP_ENDPOINTS:
+        try:
+            resp = _r.get(f"{url}/json/version", headers=headers, timeout=2)
+            if resp.status_code == 200:
+                return url
+        except Exception:
+            pass
+    # Fallback to first candidate (will produce a clear error on connect)
+    return _CDP_ENDPOINTS[0][0]
+
+_CDP_URL = _resolve_cdp_url()
+
+def _cdp_headers() -> dict:
+    """Return Host header needed for the resolved CDP URL (spoof for portproxy)."""
+    for url, headers in _CDP_ENDPOINTS:
+        if url == _CDP_URL:
+            return headers or {}
+    return {}
 
 logger = logging.getLogger(__name__)
 
@@ -690,29 +721,29 @@ def _connect():
     Returns (pw, browser). Used internally by _get_connection() only.
     Chrome itself keeps running — only the CDP control channel is opened.
 
-    Uses a Host-header spoof to bypass Chrome's DNS-rebinding protection when
-    connecting through the netsh portproxy (host.docker.internal:9223 → 127.0.0.1:9222).
+    Works on all platforms: native (Win/Mac/Linux), Docker, WSL2.
+    Uses Host-header spoof when needed to bypass Chrome's DNS-rebinding guard.
     """
     import requests as _requests
     from playwright.sync_api import sync_playwright
 
-    # Step 1: fetch /json/version with Host spoofed to what Chrome expects.
+    # Step 1: fetch /json/version with appropriate headers.
     # Chrome rejects requests where Host != localhost:9222 (DNS-rebinding guard).
-    # Spoofing the header makes Chrome accept and return the real WebSocket URL.
+    # When connecting through a portproxy (e.g. Docker), we spoof the Host header.
     ws_url = None
     try:
         resp = _requests.get(
             f"{_CDP_URL}/json/version",
-            headers={"Host": "localhost:9222"},
+            headers=_cdp_headers(),
             timeout=5,
         )
         if resp.status_code == 200:
             data = resp.json()
             ws_url = data.get("webSocketDebuggerUrl", "")
-            if ws_url:
-                # Rewrite the localhost URL so Playwright routes through our proxy
-                ws_url = ws_url.replace("ws://127.0.0.1:9222", "ws://host.docker.internal:9223")
-                ws_url = ws_url.replace("ws://localhost:9222", "ws://host.docker.internal:9223")
+            if ws_url and _CDP_URL != "http://localhost:9222" and _CDP_URL != "http://127.0.0.1:9222":
+                # Rewrite WebSocket URL to route through the proxy endpoint
+                ws_url = ws_url.replace("ws://127.0.0.1:9222", _CDP_URL.replace("http://", "ws://"))
+                ws_url = ws_url.replace("ws://localhost:9222", _CDP_URL.replace("http://", "ws://"))
     except Exception:
         pass  # fall through to direct connect attempt
 
@@ -724,10 +755,9 @@ def _connect():
     except Exception as e:
         pw.stop()
         raise ConnectionError(
-            f"Could not connect to Chrome.\n"
+            f"Could not connect to Chrome at {_CDP_URL}.\n"
             f"Make sure Chrome is running with: --remote-debugging-port=9222\n"
-            f"And the netsh portproxy is active: netsh interface portproxy add v4tov4 "
-            f"listenaddress=0.0.0.0 listenport=9223 connectaddress=127.0.0.1 connectport=9222\n"
+            f"Set BROWSER_CDP_URL env var if using a custom endpoint.\n"
             f"Error: {e}"
         )
 
