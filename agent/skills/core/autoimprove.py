@@ -26,6 +26,9 @@ from typing import Dict, List, Optional
 
 # ── Skill metadata ─────────────────────────────────────────────────────────────
 
+SKILL_TIMEOUT = 300  # overnight runs need up to 5 min for full audit+patch+test cycles
+
+SKILL_TIMEOUT = 300  # overnight runs need up to 5 min for full audit+patch+test cycles
 NAME = "autoimprove"
 SHORT_DOC = "Overnight self-improvement loops — auto-fix dynamic skills, suggest patches for core skills, run research loops."
 DOC = (
