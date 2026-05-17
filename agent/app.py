@@ -3161,21 +3161,24 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             "Also keep the human-readable summary current by calling notes__save with title='user_preferences' and the updated full preferences list."
         )
 
-    # Load user facts card (always injected, works for every model — no branching)
+    # Load user facts card only at session start — cached in _session_daily_memory
+    # so subsequent turns pay zero cost. get_context_for_prompt() already includes
+    # goals, preferences, patterns, and rejections in one compact block.
     _user_facts_card = ""
-    try:
-        _facts_raw = _fcache.read_text("/app/memory/user_facts.json")
-        if _facts_raw:
-            _facts = json.loads(_facts_raw)
-            _fact_lines = [
-                f"  {k}: {v['value'] if isinstance(v, dict) else v}"
-                for k, v in _facts.items() if not k.startswith("_")
-            ]
-            if _fact_lines:
-                _updated = _facts.get("_updated", "")[:10]
-                _user_facts_card = f"User Facts (last updated {_updated}):\n" + "\n".join(_fact_lines)
-    except Exception:
-        pass
+    if _is_new_session or session_id not in _session_daily_memory:
+        try:
+            _facts_raw = _fcache.read_text("/app/memory/user_facts.json")
+            if _facts_raw:
+                _facts = json.loads(_facts_raw)
+                _fact_lines = [
+                    f"  {k}: {v['value'] if isinstance(v, dict) else v}"
+                    for k, v in _facts.items() if not k.startswith("_")
+                ]
+                if _fact_lines:
+                    _updated = _facts.get("_updated", "")[:10]
+                    _user_facts_card = f"User Facts (last updated {_updated}):\n" + "\n".join(_fact_lines)
+        except Exception:
+            pass
 
     # Auto-load user preferences from notes.json and build notes index (cached)
     _pref_content = ""
