@@ -230,6 +230,13 @@ def save(title: str, content: str, tags: str = "") -> str:
 def load(title: str) -> str:
     """Load a note by title."""
     try:
+        # Redirect common journal lookups to the correct function
+        _JOURNAL_ALIASES = {
+            "today_journal", "todays_journal", "today's_journal",
+            "daily_journal", "journal_today", "journal",
+        }
+        if title.lower().strip().replace(" ", "_") in _JOURNAL_ALIASES:
+            return get_today()
         notes = _load_notes()
         if title in notes:
             content = notes[title]["content"]
