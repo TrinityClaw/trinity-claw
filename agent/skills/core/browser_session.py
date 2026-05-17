@@ -99,36 +99,49 @@ SKILL_TIMEOUT = 60  # browser operations can take up to 60s
 
 _SCREENSHOT_DIR = Path("/app/memory/browser_screenshots")
 
-# CDP endpoint candidates — tried in order until one succeeds.
-# Covers: native (Win/Mac/Linux), Docker, WSL2, custom setups.
-_CDP_ENDPOINTS = [
-    ("http://localhost:9222", None),
-    ("http://127.0.0.1:9222", None),
-    ("http://host.docker.internal:9223", {"Host": "localhost:9222"}),
+# Plain CDP endpoints (no Host header needed) — tried at startup.
+_CDP_PLAIN_ENDPOINTS = [
+    "http://localhost:9222",
+    "http://127.0.0.1:9222",
 ]
 
+# Docker/WSL2 fallback — connects directly to Chrome when it's started with
+# --remote-debugging-address=0.0.0.0. No portproxy or Host header spoof needed.
+_CDP_DOCKER_ENDPOINT = "http://host.docker.internal:9222"
+
+def _is_in_docker() -> bool:
+    """Detect if running inside a container (Docker, WSL2 distro, etc.)."""
+    return (
+        os.path.exists("/.dockerenv")
+        or os.environ.get("container")
+        or (Path("/proc/1/cgroup").exists() and "docker" in open("/proc/1/cgroup").read().lower())
+    )
+
 def _resolve_cdp_url() -> str:
-    """Find a working CDP URL by trying each candidate. Cached after first success."""
+    """Find a working CDP URL. Tries plain endpoints first, then Docker fallback."""
     if os.getenv("BROWSER_CDP_URL"):
         return os.getenv("BROWSER_CDP_URL")
     import requests as _r
-    for url, headers in _CDP_ENDPOINTS:
+    # Try plain endpoints (no Host header needed — Playwright WebSocket works directly)
+    for url in _CDP_PLAIN_ENDPOINTS:
         try:
-            resp = _r.get(f"{url}/json/version", headers=headers, timeout=2)
+            resp = _r.get(f"{url}/json/version", timeout=2)
             if resp.status_code == 200:
                 return url
         except Exception:
             pass
-    # Fallback to first candidate (will produce a clear error on connect)
-    return _CDP_ENDPOINTS[0][0]
+    # Plain endpoints failed — use Docker endpoint if in container
+    if _is_in_docker():
+        return _CDP_DOCKER_ENDPOINT
+    # Not in Docker and localhost failed — return first plain endpoint for clear error
+    return _CDP_PLAIN_ENDPOINTS[0]
 
 _CDP_URL = _resolve_cdp_url()
 
 def _cdp_headers() -> dict:
-    """Return Host header needed for the resolved CDP URL (spoof for portproxy)."""
-    for url, headers in _CDP_ENDPOINTS:
-        if url == _CDP_URL:
-            return headers or {}
+    """Return Host header needed for the resolved CDP URL (spoof for Docker portproxy)."""
+    # No longer needed — Chrome with --remote-debugging-address=0.0.0.0 accepts
+    # connections from any host without DNS-rebinding guard.
     return {}
 
 logger = logging.getLogger(__name__)
@@ -722,28 +735,24 @@ def _connect():
     Chrome itself keeps running — only the CDP control channel is opened.
 
     Works on all platforms: native (Win/Mac/Linux), Docker, WSL2.
-    Uses Host-header spoof when needed to bypass Chrome's DNS-rebinding guard.
+    Requires Chrome to be started with --remote-debugging-address=0.0.0.0
+    when accessed from Docker/WSL2 containers.
     """
     import requests as _requests
     from playwright.sync_api import sync_playwright
 
-    # Step 1: fetch /json/version with appropriate headers.
-    # Chrome rejects requests where Host != localhost:9222 (DNS-rebinding guard).
-    # When connecting through a portproxy (e.g. Docker), we spoof the Host header.
     ws_url = None
+    # Probe /json/version to get the WebSocket URL.
+    # Docker endpoint connects directly (Chrome with --remote-debugging-address=0.0.0.0
+    # accepts connections from any host without DNS-rebinding guard).
     try:
         resp = _requests.get(
             f"{_CDP_URL}/json/version",
-            headers=_cdp_headers(),
             timeout=5,
         )
         if resp.status_code == 200:
             data = resp.json()
             ws_url = data.get("webSocketDebuggerUrl", "")
-            if ws_url and _CDP_URL != "http://localhost:9222" and _CDP_URL != "http://127.0.0.1:9222":
-                # Rewrite WebSocket URL to route through the proxy endpoint
-                ws_url = ws_url.replace("ws://127.0.0.1:9222", _CDP_URL.replace("http://", "ws://"))
-                ws_url = ws_url.replace("ws://localhost:9222", _CDP_URL.replace("http://", "ws://"))
     except Exception:
         pass  # fall through to direct connect attempt
 
@@ -754,6 +763,13 @@ def _connect():
         return pw, browser
     except Exception as e:
         pw.stop()
+        if _CDP_URL == _CDP_DOCKER_ENDPOINT:
+            raise ConnectionError(
+                f"Could not connect to Chrome via Docker.\n"
+                f"Make sure Chrome is started with:\n"
+                f"  --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0\n\n"
+                f"Error: {e}"
+            )
         raise ConnectionError(
             f"Could not connect to Chrome at {_CDP_URL}.\n"
             f"Make sure Chrome is running with: --remote-debugging-port=9222\n"
