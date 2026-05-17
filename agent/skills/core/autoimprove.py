@@ -37,9 +37,9 @@ DOC = (
     "depth='deep' runs 4 iterations with 4 sources each vs quick's 2×2; "
     "coverage metric = 0.4×source_yield + 0.6×query_term_coverage; "
     "run_experiment(skill_name, issue_type, dry_run=False)→one autoresearch cycle on a dynamic skill; dry_run=True audits only — reports what would change without patching or logging; "
-    "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining|discover_patterns; "
+    "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining; discover_patterns is deprecated (use lessons_to_proposals instead); "
     "run_all(max_experiments=5, max_runtime_seconds=25)→all loops in sequence; direct calls capped at 25s (dispatcher limit) — use schedule_nightly() for full overnight runs with no cap; pass max_runtime_seconds=None only from a scheduled context; "
-    "discover_patterns loop→scan lessons.jsonl for error types NOT in error_patterns.json → use LLM to analyze and classify each → park proposals via park_idea(); fills the blind spot where error_reduce ignores unknown failure modes; "
+    "discover_patterns loop→DEPRECATED — removed from run_all(); was 180s of LLM calls producing auto-dismissed noise. Use lessons_to_proposals() instead which covers the same ground with zero LLM cost; "
     "loop_roi(runs=10)→show per-loop historical ROI (improved/total experiments, avg wall time) averaged over the last N run_all() runs; ⚠️ flags loops that consistently produce 0 improvements; "
     "pattern_mining loop→scan session_logs.jsonl for recurring task_type patterns → park skill proposals via park_idea(); review with list_ideas(); "
     "suggest_core(skill_name=None, max_skills=30)→audit core skills, save proposed patches to memory; skill_name targets one skill (e.g. 'browser_session'); "
@@ -2552,7 +2552,7 @@ def _loop_daily_review() -> str:
 
     # Self-reflection: inspect recent experiment outcomes and surface systemic
     # observations as parked ideas — "did we actually improve anything? what
-    # keeps failing?" — so they feed the discover_patterns and suggest_core loops.
+    # keeps failing?" — so they feed the suggest_core and lessons_to_proposals loops.
     reflection_note = ""
     try:
         recent = _load_log(days=7)
@@ -2885,6 +2885,13 @@ def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
     if loop_name not in _loops:
         return f"❌ Unknown loop '{loop_name}'. Available: {list(_loops.keys())}"
 
+    if loop_name == "discover_patterns":
+        sys.stderr.write(
+            "[autoimprove] WARNING: discover_patterns is deprecated — "
+            "it runs 180s of LLM calls producing auto-dismissed noise. "
+            "Use lessons_to_proposals() instead.\n"
+        )
+
     start   = time.time()
     result  = _loops[loop_name]()
     elapsed = time.time() - start
@@ -2906,7 +2913,6 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
       3. error_reduce     — target top error pattern in dynamic skills
       4. suggest_core     — audit core skills, queue suggestions for your review
       5. pattern_mining   — scan session history for recurring task patterns
-      6. discover_patterns — scan lessons.jsonl for untracked error types
 
     Args:
         max_experiments:     Max experiments per loop (default 5)
@@ -2937,7 +2943,7 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
     # _load_log(1) call after all loops finish and attribute entries in memory.
     loop_timing: List[Dict] = []
 
-    for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core", "pattern_mining", "discover_patterns"):
+    for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core", "pattern_mining"):
         elapsed_so_far = time.time() - start
         if deadline is not None and elapsed_so_far >= deadline:
             results.append(
@@ -3357,7 +3363,7 @@ def status() -> str:
         "  • error_reduce      — auto-fix top error pattern + surface lesson proposals",
         "  • suggest_core      — audit core skills, queue suggestions for your review",
         "  • pattern_mining    — scan session history for recurring task patterns, park skill proposals",
-        "  • discover_patterns — scan lessons.jsonl for untracked error types, propose via LLM",
+        "  • discover_patterns — DEPRECATED (use lessons_to_proposals instead)",
         "",
         f"Dynamic skills ({len(dynamic_skills)}): {', '.join(dynamic_skills) or 'none'}",
         f"Core skills    ({len(core_skills)}): {len(core_skills)} files in /app/skills/core/",
