@@ -888,7 +888,7 @@ def _parse_design_md(content: str) -> dict:
         if line.strip().startswith('```'):
             if in_code_block:
                 if code_block_lang in ('css', 'css-variables'):
-                    specs['colors'].setdefault('__css_vars', line for line in code_block_lines)
+                    specs['colors'].setdefault('__css_vars', list(code_block_lines))
                 code_block_lines = []
                 in_code_block = False
                 code_block_lang = None
