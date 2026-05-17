@@ -3161,6 +3161,9 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
             "Also keep the human-readable summary current by calling notes__save with title='user_preferences' and the updated full preferences list."
         )
 
+    # Determine if this is a new session BEFORE any code that references _is_new_session
+    _is_new_session = len(history) == 0
+
     # Load user facts card only at session start â€” cached in _session_daily_memory
     # so subsequent turns pay zero cost. get_context_for_prompt() already includes
     # goals, preferences, patterns, and rejections in one compact block.
@@ -3281,7 +3284,6 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
     # The journal and user facts are static within a session â€” build once on
     # the first turn and return the cached string on every subsequent turn.
     # The "parked idea" block is dynamic per-message and appended separately.
-    _is_new_session = len(history) == 0
     from datetime import date as _date, timedelta as _timedelta
     _today_str = _date.today().isoformat()
     if _is_new_session or session_id not in _session_daily_memory:
