@@ -99,50 +99,31 @@ SKILL_TIMEOUT = 60  # browser operations can take up to 60s
 
 _SCREENSHOT_DIR = Path("/app/memory/browser_screenshots")
 
-# Plain CDP endpoints (no Host header needed) — tried at startup.
-_CDP_PLAIN_ENDPOINTS = [
-    "http://localhost:9222",
-    "http://127.0.0.1:9222",
-]
-
-# Docker/WSL2 fallback — connects directly to Chrome when it's started with
-# --remote-debugging-address=0.0.0.0. No portproxy or Host header spoof needed.
-_CDP_DOCKER_ENDPOINT = "http://host.docker.internal:9222"
-
-def _is_in_docker() -> bool:
-    """Detect if running inside a container (Docker, WSL2 distro, etc.)."""
-    return (
-        os.path.exists("/.dockerenv")
-        or os.environ.get("container")
-        or (Path("/proc/1/cgroup").exists() and "docker" in open("/proc/1/cgroup").read().lower())
-    )
-
 def _resolve_cdp_url() -> str:
-    """Find a working CDP URL. Tries plain endpoints first, then Docker fallback."""
+    """Find a working CDP URL. Uses IP address to bypass Chrome's DNS-rebinding guard."""
     if os.getenv("BROWSER_CDP_URL"):
         return os.getenv("BROWSER_CDP_URL")
-    import requests as _r
-    # Try plain endpoints (no Host header needed — Playwright WebSocket works directly)
-    for url in _CDP_PLAIN_ENDPOINTS:
-        try:
-            resp = _r.get(f"{url}/json/version", timeout=2)
-            if resp.status_code == 200:
-                return url
-        except Exception:
-            pass
-    # Plain endpoints failed — use Docker endpoint if in container
-    if _is_in_docker():
-        return _CDP_DOCKER_ENDPOINT
-    # Not in Docker and localhost failed — return first plain endpoint for clear error
-    return _CDP_PLAIN_ENDPOINTS[0]
+    import socket as _socket
+    # Try localhost first (native Win/Mac/Linux)
+    try:
+        import requests as _r
+        resp = _r.get("http://localhost:9222/json/version", timeout=2)
+        if resp.status_code == 200:
+            return "http://localhost:9222"
+    except Exception:
+        pass
+    # Docker/WSL2: resolve host.docker.internal to IP and use it directly.
+    # Chrome's DNS-rebinding guard accepts IP addresses in the Host header,
+    # but rejects hostnames like host.docker.internal.
+    try:
+        host_ip = _socket.gethostbyname("host.docker.internal")
+        return f"http://{host_ip}:9222"
+    except Exception:
+        pass
+    # Fallback
+    return "http://localhost:9222"
 
 _CDP_URL = _resolve_cdp_url()
-
-def _cdp_headers() -> dict:
-    """Return Host header needed for the resolved CDP URL (spoof for Docker portproxy)."""
-    # No longer needed — Chrome with --remote-debugging-address=0.0.0.0 accepts
-    # connections from any host without DNS-rebinding guard.
-    return {}
 
 logger = logging.getLogger(__name__)
 
@@ -735,16 +716,15 @@ def _connect():
     Chrome itself keeps running — only the CDP control channel is opened.
 
     Works on all platforms: native (Win/Mac/Linux), Docker, WSL2.
-    Requires Chrome to be started with --remote-debugging-address=0.0.0.0
-    when accessed from Docker/WSL2 containers.
+    Uses IP address resolution to bypass Chrome's DNS-rebinding guard.
     """
     import requests as _requests
     from playwright.sync_api import sync_playwright
 
+    # Fetch /json/version to get the WebSocket URL.
+    # Using IP address (resolved at startup) means Chrome accepts the connection
+    # without Host header spoof — IP addresses pass the DNS-rebinding guard.
     ws_url = None
-    # Probe /json/version to get the WebSocket URL.
-    # Docker endpoint connects directly (Chrome with --remote-debugging-address=0.0.0.0
-    # accepts connections from any host without DNS-rebinding guard).
     try:
         resp = _requests.get(
             f"{_CDP_URL}/json/version",
@@ -763,16 +743,9 @@ def _connect():
         return pw, browser
     except Exception as e:
         pw.stop()
-        if _CDP_URL == _CDP_DOCKER_ENDPOINT:
-            raise ConnectionError(
-                f"Could not connect to Chrome via Docker.\n"
-                f"Make sure Chrome is started with:\n"
-                f"  --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0\n\n"
-                f"Error: {e}"
-            )
         raise ConnectionError(
             f"Could not connect to Chrome at {_CDP_URL}.\n"
-            f"Make sure Chrome is running with: --remote-debugging-port=9222\n"
+            f"Make sure Chrome is running with: --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0\n"
             f"Set BROWSER_CDP_URL env var if using a custom endpoint.\n"
             f"Error: {e}"
         )
