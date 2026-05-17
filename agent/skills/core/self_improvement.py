@@ -36,9 +36,9 @@ DOC = (
     "fix(skill_name, issue_type, line_number)→apply fix at line (use 'all' to fix every occurrence); always runs verify_skill() after — reports evidence before claiming success; "
     "verify_skill(skill_name)→syntax+compile+metadata checks then a model-based VERDICT: PASS/FAIL/PARTIAL with execution trace evidence — call before declaring any fix complete; "
     "daily_review(skill_name?)→scan skill(s), summarize lessons learned, surface recurring patterns; "
-    "record_mistake(skill, error_type, error_msg)→save lesson to lessons.jsonl and auto-index into ChromaDB; "
+    "record_mistake(skill, error_type, error_msg)→save lesson to lessons.jsonl and auto-index into ChromaDB; auto-extracts correct function signatures for TypeError/ValueError/skill_error; "
     "check_for_learned_fix(skill_name, error_type, skill_path?, task?)→check if we've already learned a fix; task parameter allows semantic search; "
-    "check_lessons(skill_name, func_name)→pre-dispatch check for prior failures; "
+    "check_lessons(skill_name, func_name)→pre-dispatch check for prior failures; returns correct signature if a TypeError/ValueError was previously recorded; "
     "search_lessons_semantic(query, n=5)→semantic ChromaDB search over past lessons — finds relevant failures without exact keyword match; "
     "index_all_lessons()→bulk-index all lessons.jsonl entries into ChromaDB (run once after upgrade); "
     "should_self_improve(threshold=3, window_days=7)→check if recurring failures in recent lessons warrant running autoimprove loops; "
@@ -130,6 +130,9 @@ def _load_error_patterns() -> Dict:
         "sql_injection_risk": {"count": 0, "severity": "critical", "fix": "Use parameterized queries"},
         "missing_timeout": {"count": 0, "severity": "medium", "fix": "Add timeout to network requests"},
         "no_rate_limit": {"count": 0, "severity": "medium", "fix": "Add rate limiting for external APIs"},
+        "TypeError": {"count": 0, "severity": "high", "fix": "Check function signature — use self_improvement.check_lessons() before calling"},
+        "ValueError": {"count": 0, "severity": "medium", "fix": "Validate argument types and values before calling the skill function"},
+        "skill_error": {"count": 0, "severity": "medium", "fix": "Review skill DOC string for correct usage — use self_improvement.check_lessons() before calling"},
     }
 
     if PATTERNS_FILE.exists():
@@ -203,6 +206,7 @@ def record_mistake(skill_name: str, error_type: str, error_msg: str, fix_applied
         _index_lesson_in_chroma(lesson)  # best-effort — never raises
     if saved and auto_fix:
         _try_auto_fix(skill_name, error_type, skill_path)
+        _try_auto_fix_signature(skill_name, error_type, error_msg)
     return f"✅ Recorded lesson: {error_type} in {skill_name}" if saved else "⚠️ Failed to record lesson"
 
 # ── ChromaDB semantic indexing for lessons ─────────────────────────────────────
@@ -259,6 +263,14 @@ _AUTO_FIXABLE_ISSUES = frozenset({
     "bare_except",
     "missing_timeout",
     "missing_docstring",
+})
+
+# Runtime signature errors — fixed by extracting the correct function signature
+# and storing it as the lesson's fix_applied so check_lessons() returns it.
+_SIGNATURE_ERROR_TYPES = frozenset({
+    "TypeError",
+    "ValueError",
+    "skill_error",
 })
 
 _auto_fix_in_flight: set = set()
@@ -343,6 +355,141 @@ def _try_auto_fix(skill_name: str, error_type: str, skill_path: str = "") -> Non
             _auto_fix_in_flight.discard(dedup_key)
 
     threading.Thread(target=_worker, daemon=True, name=f"auto-fix-{skill_name}-{error_type}").start()
+
+
+# ── Auto-fix: signature extraction for runtime errors ─────────────────────────
+
+def _extract_signature_fix(skill_name: str, error_type: str, error_msg: str) -> str:
+    """Extract the correct function signature for a TypeError/ValueError/skill_error.
+
+    Parses the skill_name (e.g. 'notes.log_activity') to find the module and
+    function, then uses inspect.signature() to produce the correct call format.
+
+    Returns:
+        A fix string like:
+        "Signature: log_activity(action, result, source='manual') — call with positional args or correct kwargs"
+        or empty string if the function cannot be found.
+    """
+    import importlib as _il
+    import inspect as _ins
+
+    # Parse 'skill.func' or 'skill.func.sub' → module stem + function name
+    parts = skill_name.split(".")
+    if len(parts) < 2:
+        return ""
+
+    func_name = parts[-1]
+    module_stem = parts[-2]  # e.g. 'notes' from 'notes.log_activity'
+
+    # Try to import the skill module from core then dynamic dirs
+    mod = None
+    for d in (CORE_SKILLS_DIR, SKILLS_DIR):
+        mod_path = d / f"{module_stem}.py"
+        if mod_path.exists():
+            try:
+                spec = _il.util.spec_from_file_location(module_stem, str(mod_path))
+                if spec and spec.loader:
+                    mod = _il.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    break
+            except Exception:
+                continue
+
+    if mod is None:
+        return ""
+
+    fn = getattr(mod, func_name, None)
+    if fn is None or not callable(fn):
+        return ""
+
+    try:
+        sig = _ins.signature(fn)
+    except (ValueError, TypeError):
+        return ""
+
+    # Build a human-readable signature string
+    params = []
+    for name, param in sig.parameters.items():
+        if name in ("self", "cls"):
+            continue
+        if param.default is _ins.Parameter.empty:
+            params.append(name)
+        else:
+            # Show default for common types, truncate long ones
+            dv = repr(param.default)
+            if len(dv) > 40:
+                dv = dv[:37] + "..."
+            params.append(f"{name}={dv}")
+
+    if not params:
+        sig_str = f"{func_name}()"
+    else:
+        sig_str = f"{func_name}({', '.join(params)})"
+
+    # Add a hint based on the error message
+    hint = ""
+    em = error_msg.lower()
+    if "unexpected keyword" in em:
+        hint = " — remove the unrecognized kwarg"
+    elif "missing" in em and "required" in em:
+        hint = " — all listed args are required (positional or kwarg)"
+    elif "takes" in em and ("positional" in em or "argument" in em):
+        hint = " — check argument count and order"
+
+    return f"Signature: {sig_str}{hint}"
+
+
+def _try_auto_fix_signature(skill_name: str, error_type: str, error_msg: str) -> None:
+    """Background signature fix — fire-and-forget, never raises.
+
+    Called from record_mistake() for TypeError/ValueError/skill_error.
+    Extracts the correct function signature and patches the lesson file
+    so check_lessons() returns it on future calls.
+    """
+    if error_type not in _SIGNATURE_ERROR_TYPES:
+        return
+
+    dedup_key = f"{skill_name}:{error_type}"
+    if dedup_key in _auto_fix_in_flight:
+        return
+    _auto_fix_in_flight.add(dedup_key)
+
+    def _worker():
+        try:
+            fix_str = _extract_signature_fix(skill_name, error_type, error_msg)
+            if not fix_str:
+                return
+
+            # Patch the most recent lesson for this skill+error_type with the fix
+            if not LESSONS_FILE.exists():
+                return
+
+            lines = LESSONS_FILE.read_text(encoding="utf-8").splitlines()
+            patched = False
+            for i in range(len(lines) - 1, -1, -1):
+                if not lines[i].strip():
+                    continue
+                try:
+                    lesson = json.loads(lines[i])
+                    if (lesson.get("skill") == skill_name
+                            and lesson.get("error_type") == error_type
+                            and not lesson.get("fix_applied")):
+                        lesson["fix_applied"] = fix_str
+                        lines[i] = json.dumps(lesson, ensure_ascii=False)
+                        patched = True
+                        break
+                except json.JSONDecodeError:
+                    continue
+
+            if patched:
+                LESSONS_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                print(f"[sig-fix] {skill_name}.{error_type} → {fix_str[:80]}")
+        except Exception as e:
+            print(f"[sig-fix] failed for {skill_name}.{error_type}: {e}")
+        finally:
+            _auto_fix_in_flight.discard(dedup_key)
+
+    threading.Thread(target=_worker, daemon=True, name=f"sig-fix-{skill_name}-{error_type}").start()
 
 
 def search_lessons_semantic(query: str, n: int = 5) -> str:
@@ -482,7 +629,9 @@ def check_lessons(skill_name: str = "", func_name: str = "", **kwargs) -> Option
         return None
     label = f"{skill_name}.{func_name}"
     lessons = _load_lessons()
-    matches = [l for l in lessons if l.get("skill") == skill_name]
+    # Match lessons stored as 'skill.func' or just 'skill'
+    matches = [l for l in lessons
+               if l.get("skill") == skill_name or l.get("skill") == label or l.get("skill", "").startswith(f"{skill_name}.")]
     if not matches:
         return None
     # Most recent failure wins
