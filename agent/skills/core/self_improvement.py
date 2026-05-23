@@ -53,11 +53,37 @@ DOC = (
 # CONFIGURATION
 # ============================================================================
 
-SKILLS_DIR = Path("/app/skills/dynamic")
-CORE_SKILLS_DIR = Path("/app/skills/core")
-LESSONS_FILE = Path("/app/memory/lessons.jsonl")
-PATTERNS_FILE = Path("/app/memory/error_patterns.json")
-_AUTO_FIX_LOG = Path("/app/memory/auto_fix_log.jsonl")
+# Dynamic path resolution supporting both Docker and local execution
+_APP_DIR = Path("/app")
+if _APP_DIR.exists() and (_APP_DIR / "skills").exists():
+    _ROOT = _APP_DIR
+    SKILLS_DIR = _ROOT / "skills" / "dynamic"
+    CORE_SKILLS_DIR = _ROOT / "skills" / "core"
+    _MEM_DIR = _ROOT / "memory"
+else:
+    # Local development fallback
+    _THIS_FILE = Path(__file__).resolve()
+    _AGENT_DIR = None
+    for _parent in _THIS_FILE.parents:
+        if _parent.name == "agent" or (_parent / "agent").exists():
+            _AGENT_DIR = _parent if _parent.name == "agent" else _parent / "agent"
+            break
+    
+    if _AGENT_DIR:
+        _ROOT = _AGENT_DIR.parent
+        SKILLS_DIR = _AGENT_DIR / "skills" / "dynamic"
+        CORE_SKILLS_DIR = _AGENT_DIR / "skills" / "core"
+        _MEM_DIR = _ROOT / "memory"
+    else:
+        _ROOT = Path.cwd()
+        SKILLS_DIR = _ROOT / "agent" / "skills" / "dynamic"
+        CORE_SKILLS_DIR = _ROOT / "agent" / "skills" / "core"
+        _MEM_DIR = _ROOT / "memory"
+
+LESSONS_FILE = _MEM_DIR / "lessons.jsonl"
+PATTERNS_FILE = _MEM_DIR / "error_patterns.json"
+_AUTO_FIX_LOG = _MEM_DIR / "auto_fix_log.jsonl"
+_TESTS_DIR = _MEM_DIR / "tests"
 
 # ============================================================================
 # MISTAKE MEMORY: Learn from every error
@@ -318,8 +344,7 @@ def _try_auto_fix(skill_name: str, error_type: str, skill_path: str = "") -> Non
 
     def _worker():
         try:
-            si_mod = __import__("self_improvement")
-            analysis = si_mod.analyze_skill_code(skill_name)
+            analysis = analyze_skill_code(skill_name)
             if analysis.get("error"):
                 return
             matching = [i for i in analysis["issues"] if i["type"] == error_type]
@@ -331,9 +356,9 @@ def _try_auto_fix(skill_name: str, error_type: str, skill_path: str = "") -> Non
             errors = []
 
             for issue in sorted(matching, key=lambda x: x["line"], reverse=True):
-                patch = si_mod.generate_patch(skill_name, error_type, issue["line"])
+                patch = generate_patch(skill_name, error_type, issue["line"])
                 if patch.get("safe_to_apply"):
-                    result = si_mod.apply_patch(skill_name, patch)
+                    result = apply_patch(skill_name, patch)
                     if result.get("success"):
                         applied += 1
                     else:
@@ -342,8 +367,8 @@ def _try_auto_fix(skill_name: str, error_type: str, skill_path: str = "") -> Non
             if applied == 0:
                 return
 
-            verification = si_mod.verify_skill(skill_name)
-            after = si_mod.analyze_skill_code(skill_name)
+            verification = verify_skill(skill_name)
+            after = analyze_skill_code(skill_name)
             after_score = after.get("health_score", before_score) if not after.get("error") else 0
 
             outcome = "AUTO_IMPROVED" if after_score >= before_score else "AUTO_REVERTED"
@@ -919,13 +944,14 @@ def generate_patch(skill_name: str, issue_type: str, issue_line: int) -> Dict:
             return {"error": f"Could not parse function name on line {issue_line}"}
             
     elif issue_type == "missing_timeout":
-        if 'requests.' in original_line and 'timeout' not in original_line:
+        is_http_call = any(client + '.' in original_line for client in ['requests', 'httpx'])
+        if is_http_call and 'timeout' not in original_line:
             if original_line.rstrip().endswith(')'):
                 fix_applied = original_line.rstrip()[:-1] + ', timeout=30)'
             else:
                 # Call spans multiple lines — patching a single line would break syntax
                 return {
-                    "note": "Multi-line requests call: add timeout= manually to the closing parenthesis",
+                    "note": "Multi-line requests/httpx call: add timeout= manually to the closing parenthesis",
                     "manual_review_required": True,
                     "original_line": original_line.strip(),
                     "requires_review": True,
@@ -1109,7 +1135,7 @@ def get_skill_health_report(skill_name: str) -> str:
     
     return "\n".join(lines)
 
-_TESTS_DIR = Path("/app/memory/tests")
+# _TESTS_DIR resolved dynamically at the top of the file
 
 
 def _generate_pytest_source(skill_name: str, skill_path: Path, functions: list) -> str:
@@ -1118,7 +1144,7 @@ def _generate_pytest_source(skill_name: str, skill_path: Path, functions: list) 
         "import pytest",
         "import importlib.util, sys",
         "",
-        f'_SKILL_PATH = "{skill_path}"',
+        f'_SKILL_PATH = "{skill_path.as_posix()}"',
         "",
         "@pytest.fixture(scope='module')",
         "def skill_mod():",
@@ -1189,13 +1215,19 @@ def suggest_tests(skill_name: str = "") -> str:
 
 def run_tests(skill_name: str) -> str:
     """Run pytest for the skill's test file in /app/memory/tests/ and return results."""
+    try:
+        import pytest
+    except ImportError:
+        return "❌ pytest is not installed in the current Python environment. Please run 'pip install pytest' to enable test capabilities."
+
     test_file = _TESTS_DIR / f"test_{skill_name}.py"
     if not test_file.exists():
         return f"❌ No test file found at {test_file}. Run suggest_tests('{skill_name}') first."
 
     try:
+        import sys
         proc = subprocess.run(
-            ["python", "-m", "pytest", str(test_file), "-v", "--tb=short", "--no-header"],
+            [sys.executable, "-m", "pytest", str(test_file), "-v", "--tb=short", "--no-header"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -1300,9 +1332,10 @@ def _verdict_check(skill_name: str, source: str) -> str:
             pos = source.rfind(boundary, 0, 8000)
             if pos != -1 and pos > cut:
                 cut = pos
-        if cut == -1:
+        # If the cut is too small (e.g. less than 4000 chars), seek standard line break
+        if cut == -1 or cut < 4000:
             cut = source.rfind('\n', 0, 8000)
-        if cut == -1:
+        if cut == -1 or cut < 4000:
             cut = 8000
         source_preview = source[:cut] + "\n... [truncated]"
     else:
