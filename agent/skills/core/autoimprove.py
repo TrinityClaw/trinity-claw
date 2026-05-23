@@ -1,18 +1,18 @@
 """
-AutoImprove — Autoresearch-style self-improvement loops for Trinity
+AutoImprove â€” Autoresearch-style self-improvement loops for Trinity
 
-Inspired by Karpathy's autoresearch: propose → apply → test → keep/revert → repeat
+Inspired by Karpathy's autoresearch: propose â†’ apply â†’ test â†’ keep/revert â†’ repeat
 Runs overnight via scheduler.schedule_recurring() while you sleep.
 
 Two-track system:
-  DYNAMIC skills → auto-fix (snapshot → patch → test → keep or restore)
-  CORE skills    → suggest only (audit → generate patch → save to memory → you approve)
+  DYNAMIC skills â†’ auto-fix (snapshot â†’ patch â†’ test â†’ keep or restore)
+  CORE skills    â†’ suggest only (audit â†’ generate patch â†’ save to memory â†’ you approve)
 
 Available loops:
-  • daily_review  — learning review, no code changes
-  • ast_audit     — auto-fix bare_except & missing_timeout in dynamic skills
-  • error_reduce  — auto-fix the most-frequent error pattern in dynamic skills
-  • suggest_core  — audit all 30+ core skills, save proposed patches for your review
+  â€¢ daily_review  â€” learning review, no code changes
+  â€¢ ast_audit     â€” auto-fix deterministic AUTO_FIXABLE issues in dynamic skills
+  â€¢ error_reduce  â€” auto-fix the most-frequent error pattern in dynamic skills
+  â€¢ suggest_core  â€” audit all 30+ core skills, save proposed patches for your review
 """
 
 import json
@@ -24,47 +24,45 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# ── Skill metadata ─────────────────────────────────────────────────────────────
-
-SKILL_TIMEOUT = 300  # overnight runs need up to 5 min for full audit+patch+test cycles
+# â”€â”€ Skill metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 SKILL_TIMEOUT = 300  # overnight runs need up to 5 min for full audit+patch+test cycles
 NAME = "autoimprove"
-SHORT_DOC = "Overnight self-improvement loops — auto-fix dynamic skills, suggest patches for core skills, run research loops."
+SHORT_DOC = "Overnight self-improvement loops â€” auto-fix dynamic skills, suggest patches for core skills, run research loops."
 DOC = (
-    "Autoresearch-style overnight self-improvement loops — two-track system: "
-    "DYNAMIC skills auto-fix (snapshot→patch→test→keep/restore); "
-    "CORE skills suggest-only (audit→patch→save to memory→you approve). "
-    "research(query, depth='quick', save=True, max_iterations=None)→autoresearch-style loop: "
-    "search→measure coverage→refine query→repeat until convergence (≥72% term coverage) or cap; "
-    "depth='deep' runs 4 iterations with 4 sources each vs quick's 2×2; "
-    "coverage metric = 0.4×source_yield + 0.6×query_term_coverage; "
-    "run_experiment(skill_name, issue_type, dry_run=False)→one autoresearch cycle on a dynamic skill; dry_run=True audits only — reports what would change without patching or logging; "
-    "run_loop(loop_name, max_experiments=10)→named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining; discover_patterns is deprecated (use lessons_to_proposals instead); "
-    "run_all(max_experiments=5, max_runtime_seconds=25)→all loops in sequence; direct calls capped at 25s (dispatcher limit) — use schedule_nightly() for full overnight runs with no cap; pass max_runtime_seconds=None only from a scheduled context; "
-    "discover_patterns loop→DEPRECATED — removed from run_all(); was 180s of LLM calls producing auto-dismissed noise. Use lessons_to_proposals() instead which covers the same ground with zero LLM cost; "
-    "loop_roi(runs=10)→show per-loop historical ROI (improved/total experiments, avg wall time) averaged over the last N run_all() runs; ⚠️ flags loops that consistently produce 0 improvements; "
-    "pattern_mining loop→scan session_logs.jsonl for recurring task_type patterns → park skill proposals via park_idea(); review with list_ideas(); "
-    "suggest_core(skill_name=None, max_skills=30)→audit core skills, save proposed patches to memory; skill_name targets one skill (e.g. 'browser_session'); "
-    "list_suggestions(status='pending', skill_name=None)→show pending|applied|failed|all core suggestions; skill_name filters to one skill; "
-    "apply_suggestion(skill_name, issue_type)→apply one approved suggestion to a core skill; stores original code for rollback; "
-    "unapply_suggestion(skill_name, issue_type)→revert a previously applied core suggestion — restores pre-patch code stored at apply time; "
-    "schedule_nightly(run_time='2am')→put on autopilot; "
-    "report(days=7)→improvement history; "
-    "status()→config and skills in scope; "
-    "design(task)→design-first gate: scan existing skills, surface gaps, propose 2-3 approaches with trade-offs — call this before create_skill for any non-trivial build request; "
-    "write_spec(task, approach, details)→write approved spec to /app/memory/designs/YYYY-MM-DD-<slug>.md and return the path — call after user approves an approach, before writing any code; "
-    "lessons_to_proposals(threshold=3)→scan error_patterns.json for patterns with ≥threshold occurrences that are NOT auto-fixable, save structured review proposals to lesson_proposals.jsonl — runs automatically inside error_reduce; "
-    "list_proposals(status='pending')→show lesson-derived improvement proposals needing a human decision; status: pending|resolved|dismissed|all; "
-    "park_idea(idea, source='')→park a free-form improvement idea to improvement_ideas.jsonl for later action — use during research, mid-experiment, or when user mentions a potential improvement; "
-    "list_ideas(status='open')→show parked improvement ideas; status: open|dismissed|all; "
-    "get_latest_idea()→return the single most-recent open idea as a plain string (≤140 chars) — for lightweight injection, not user display; "
-    "dismiss_idea(idea_id)→mark a parked idea as dismissed after acting on it or deciding it's not worth pursuing; "
-    "should_create_skill(execution_logs, iteration_count, user_message='')→analyze a completed task trace to decide if a new skill should be created; "
+    "Autoresearch-style overnight self-improvement loops â€” two-track system: "
+    "DYNAMIC skills auto-fix (snapshotâ†’patchâ†’testâ†’keep/restore); "
+    "CORE skills suggest-only (auditâ†’patchâ†’save to memoryâ†’you approve). "
+    "research(query, depth='quick', save=True, max_iterations=None)â†’autoresearch-style loop: "
+    "searchâ†’measure coverageâ†’refine queryâ†’repeat until convergence (â‰¥72% term coverage) or cap; "
+    "depth='deep' runs 4 iterations with 4 sources each vs quick's 2Ã—2; "
+    "coverage metric = 0.4Ã—source_yield + 0.6Ã—query_term_coverage; "
+    "run_experiment(skill_name, issue_type, dry_run=False)â†’one autoresearch cycle on a dynamic skill; dry_run=True audits only â€” reports what would change without patching or logging; "
+    "run_loop(loop_name, max_experiments=10)â†’named loop: ast_audit|error_reduce|daily_review|suggest_core|pattern_mining; discover_patterns is deprecated (use lessons_to_proposals instead); "
+    "run_all(max_experiments=5, max_runtime_seconds=25)â†’all loops in sequence; direct calls capped at 25s (dispatcher limit) â€” use schedule_nightly() for full overnight runs with no cap; pass max_runtime_seconds=None only from a scheduled context; "
+    "discover_patterns loopâ†’DEPRECATED â€” removed from run_all(); was 180s of LLM calls producing auto-dismissed noise. Use lessons_to_proposals() instead which covers the same ground with zero LLM cost; "
+    "loop_roi(runs=10)â†’show per-loop historical ROI (improved/total experiments, avg wall time) averaged over the last N run_all() runs; âš ï¸ flags loops that consistently produce 0 improvements; "
+    "pattern_mining loopâ†’scan session_logs.jsonl for recurring task_type patterns â†’ park skill proposals via park_idea(); review with list_ideas(); "
+    "suggest_core(skill_name=None, max_skills=30)â†’audit core skills, save proposed patches to memory; skill_name targets one skill (e.g. 'browser_session'); "
+    "list_suggestions(status='pending', skill_name=None)â†’show pending|applied|failed|all core suggestions; skill_name filters to one skill; "
+    "apply_suggestion(skill_name, issue_type)â†’apply one approved suggestion to a core skill; stores original code for rollback; "
+    "unapply_suggestion(skill_name, issue_type)â†’revert a previously applied core suggestion â€” restores pre-patch code stored at apply time; "
+    "schedule_nightly(run_time='2am')â†’put on autopilot; "
+    "report(days=7)â†’improvement history; "
+    "status()â†’config and skills in scope; "
+    "design(task)â†’design-first gate: scan existing skills, surface gaps, propose 2-3 approaches with trade-offs â€” call this before create_skill for any non-trivial build request; "
+    "write_spec(task, approach, details)â†’write approved spec to /app/memory/designs/YYYY-MM-DD-<slug>.md and return the path â€” call after user approves an approach, before writing any code; "
+    "lessons_to_proposals(threshold=3)â†’scan error_patterns.json for patterns with â‰¥threshold occurrences that are NOT auto-fixable, save structured review proposals to lesson_proposals.jsonl â€” runs automatically inside error_reduce; "
+    "list_proposals(status='pending')â†’show lesson-derived improvement proposals needing a human decision; status: pending|resolved|dismissed|all; "
+    "park_idea(idea, source='')â†’park a free-form improvement idea to improvement_ideas.jsonl for later action â€” use during research, mid-experiment, or when user mentions a potential improvement; "
+    "list_ideas(status='open')â†’show parked improvement ideas; status: open|dismissed|all; "
+    "get_latest_idea()â†’return the single most-recent open idea as a plain string (â‰¤140 chars) â€” for lightweight injection, not user display; "
+    "dismiss_idea(idea_id)â†’mark a parked idea as dismissed after acting on it or deciding it's not worth pursuing; "
+    "should_create_skill(execution_logs, iteration_count, user_message='')â†’analyze a completed task trace to decide if a new skill should be created; "
     "returns {create: bool, reason, trigger, complexity_score}; triggers: complexity (5+ calls), error_recovery, correction, workflow (3+ skills)."
 )
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 SKILLS_DYNAMIC_DIR = Path("/app/skills/dynamic")
 SKILLS_CORE_DIR    = Path("/app/skills/core")
@@ -79,7 +77,7 @@ IDEAS_FILE         = MEMORY_DIR / "improvement_ideas.jsonl"
 SESSION_LOG        = MEMORY_DIR / "session_logs.jsonl"
 
 # Only deterministic, low-risk issue types get auto-applied
-AUTO_FIXABLE = ("bare_except", "missing_timeout", "missing_docstring")
+AUTO_FIXABLE = ("bare_except", "missing_timeout")
 
 # Min occurrences before a non-auto-fixable pattern earns a review proposal
 PROPOSAL_THRESHOLD = 3
@@ -87,14 +85,14 @@ PROPOSAL_THRESHOLD = 3
 # Min IMPROVED experiments needed before MAD confidence is meaningful
 MAD_MIN_SAMPLES = 3
 
-# ── Atomic file writes ────────────────────────────────────────────────────────
+# â”€â”€ Atomic file writes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _atomic_write_jsonl(path: Path, records: List[Dict]) -> None:
     """Overwrite a JSONL file atomically using a temp file + os.replace().
 
     Writes to <path>.tmp first, then swaps it into place with a single
-    os.replace() call.  On Linux/macOS, os.replace() is a rename(2) syscall —
-    atomic at the filesystem level — so concurrent readers always see either
+    os.replace() call.  On Linux/macOS, os.replace() is a rename(2) syscall â€”
+    atomic at the filesystem level â€” so concurrent readers always see either
     the old file or the new file, never a partial write or an empty file.
 
     This is safer than opening with "w" (which truncates immediately) and then
@@ -115,7 +113,7 @@ def _atomic_write_jsonl(path: Path, records: List[Dict]) -> None:
         raise
 
 
-# ── Logging ────────────────────────────────────────────────────────────────────
+# â”€â”€ Logging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _log(entry: Dict) -> None:
     """Append one experiment result to improvement_log.jsonl."""
@@ -148,13 +146,13 @@ def _load_log(days: int = 7) -> List[Dict]:
     return entries
 
 
-# ── False-positive / regression detection ─────────────────────────────────────
+# â”€â”€ False-positive / regression detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _check_prior_improved(skill_name: str, issue_type: str) -> bool:
     """Return True if the most recent log entry for this skill+issue_type was IMPROVED.
 
     Used at the top of run_experiment: if True, the issue has regressed after a
-    previous fix — meaning that fix was a false positive. The outcome is then
+    previous fix â€” meaning that fix was a false positive. The outcome is then
     flagged in the log with 'regressed_after_fix: True' for tracking.
     """
     if not IMPROVE_LOG.exists():
@@ -175,7 +173,7 @@ def _check_prior_improved(skill_name: str, issue_type: str) -> bool:
     return False
 
 
-# ── MAD confidence scoring ────────────────────────────────────────────────────
+# â”€â”€ MAD confidence scoring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _load_all_score_deltas(cap: int = 50) -> List[float]:
     """
@@ -216,11 +214,11 @@ def _compute_confidence(current_delta: Optional[float], recent_deltas: List[floa
       ratio = current_delta / MAD
 
     Returns (ratio, label):
-      ratio  — float or None if not enough data
-      label  — "🟢 genuine" | "🟡 marginal" | "🔴 within noise" | "— (no baseline)"
+      ratio  â€” float or None if not enough data
+      label  â€” "ðŸŸ¢ genuine" | "ðŸŸ¡ marginal" | "ðŸ”´ within noise" | "â€” (no baseline)"
     """
     if current_delta is None or len(recent_deltas) < MAD_MIN_SAMPLES:
-        return None, "— (no baseline yet)"
+        return None, "â€” (no baseline yet)"
 
     deltas = sorted(recent_deltas)
     n      = len(deltas)
@@ -229,22 +227,22 @@ def _compute_confidence(current_delta: Optional[float], recent_deltas: List[floa
     mad      = abs_devs[n // 2] if n % 2 else (abs_devs[n // 2 - 1] + abs_devs[n // 2]) / 2.0
 
     if mad == 0:
-        # All past deltas identical — any positive improvement is genuine
-        label = "🟢 genuine" if current_delta > 0 else "🔴 within noise"
+        # All past deltas identical â€” any positive improvement is genuine
+        label = "ðŸŸ¢ genuine" if current_delta > 0 else "ðŸ”´ within noise"
         return None, label
 
     ratio = round(current_delta / mad, 2)
     if ratio >= 2.0:
-        label = f"🟢 genuine ({ratio}×)"
+        label = f"ðŸŸ¢ genuine ({ratio}Ã—)"
     elif ratio >= 1.0:
-        label = f"🟡 marginal ({ratio}×)"
+        label = f"ðŸŸ¡ marginal ({ratio}Ã—)"
     else:
-        label = f"🔴 within noise ({ratio}×)"
+        label = f"ðŸ”´ within noise ({ratio}Ã—)"
 
     return ratio, label
 
 
-# ── Suggestion store (core skills) ────────────────────────────────────────────
+# â”€â”€ Suggestion store (core skills) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _load_suggestions() -> List[Dict]:
     """Load all suggestions from core_suggestions.jsonl."""
@@ -272,7 +270,7 @@ def _save_suggestions(suggestions: List[Dict]) -> None:
         sys.stderr.write(f"[autoimprove] _save_suggestions failed: {_exc}\n")
 
 
-# ── Ideas parking lot ─────────────────────────────────────────────────────────
+# â”€â”€ Ideas parking lot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _load_ideas() -> List[Dict]:
     """Load all ideas from improvement_ideas.jsonl."""
@@ -305,20 +303,20 @@ def park_idea(idea: str, source: str = "") -> str:
     Park a free-form improvement idea for later action.
 
     Use this when Trinity or you spot something worth trying but can't act on
-    it right now — during a research loop, mid-experiment observation, or a
+    it right now â€” during a research loop, mid-experiment observation, or a
     passing thought. Ideas accumulate in improvement_ideas.jsonl and are
     reviewed with list_ideas().
 
     Args:
         idea:   Plain-language description of the improvement idea.
-        source: Optional context — skill name, loop name, or 'user'.
+        source: Optional context â€” skill name, loop name, or 'user'.
 
     Returns:
         Confirmation with the assigned idea ID.
     """
     idea = str(idea).strip()
     if not idea:
-        return "❌ idea text cannot be empty."
+        return "âŒ idea text cannot be empty."
 
     import hashlib as _hashlib
     import uuid as _uuid
@@ -332,10 +330,10 @@ def park_idea(idea: str, source: str = "") -> str:
             continue
         # Exact-hash dedup
         if existing.get("hash") == idea_hash:
-            return f"💡 Duplicate skipped [{existing['id']}]: {idea[:80]}"
+            return f"ðŸ’¡ Duplicate skipped [{existing['id']}]: {idea[:80]}"
         # Near-duplicate dedup: same first 60 chars (catches same idea with different counts)
         if existing.get("idea", "")[:60].lower().strip() == idea_prefix:
-            return f"💡 Near-duplicate skipped [{existing['id']}]: {idea[:80]}"
+            return f"ðŸ’¡ Near-duplicate skipped [{existing['id']}]: {idea[:80]}"
 
     idea_id = datetime.now().strftime("%Y%m%d") + "_" + _uuid.uuid4().hex[:6]
     entry = {
@@ -348,7 +346,7 @@ def park_idea(idea: str, source: str = "") -> str:
     }
     ideas.append(entry)
     _save_ideas(ideas)
-    return f"💡 Idea parked [{idea_id}]: {idea[:80]}"
+    return f"ðŸ’¡ Idea parked [{idea_id}]: {idea[:80]}"
 
 
 def list_ideas(status: str = "open") -> str:
@@ -356,7 +354,7 @@ def list_ideas(status: str = "open") -> str:
     Show parked improvement ideas.
 
     Args:
-        status: Filter — 'open' | 'dismissed' | 'all'
+        status: Filter â€” 'open' | 'dismissed' | 'all'
 
     Returns:
         Formatted list of ideas.
@@ -368,20 +366,20 @@ def list_ideas(status: str = "open") -> str:
     all_ideas = _load_ideas()
     if not all_ideas:
         return (
-            "📭 No ideas parked yet.\n"
+            "ðŸ“­ No ideas parked yet.\n"
             "Use autoimprove.park_idea('your idea') to save one."
         )
 
     filtered = all_ideas if status == "all" else [i for i in all_ideas if i.get("status") == status]
     if not filtered:
-        return f"📭 No '{status}' ideas. Try list_ideas('all') to see everything."
+        return f"ðŸ“­ No '{status}' ideas. Try list_ideas('all') to see everything."
 
     # Sort open ideas by priority (highest first) if scores exist
     if status == "open" and any(i.get("priority") is not None for i in filtered):
         filtered.sort(key=lambda x: x.get("priority", 0), reverse=True)
 
-    icons = {"open": "💡", "dismissed": "—"}
-    lines = [f"💡 Improvement ideas — {status} ({len(filtered)} of {len(all_ideas)} total):"]
+    icons = {"open": "ðŸ’¡", "dismissed": "â€”"}
+    lines = [f"ðŸ’¡ Improvement ideas â€” {status} ({len(filtered)} of {len(all_ideas)} total):"]
 
     for idea in filtered:
         icon   = icons.get(idea.get("status", "open"), "?")
@@ -408,11 +406,11 @@ def get_latest_idea() -> str:
     Return the single most-recent open improvement idea as a plain string,
     or an empty string if none exist.
 
-    Intended for lightweight system-prompt injection — callers should not
+    Intended for lightweight system-prompt injection â€” callers should not
     show this to the user directly; use list_ideas() for that.
 
     Returns:
-        The idea text (≤140 chars), or '' if no open ideas.
+        The idea text (â‰¤140 chars), or '' if no open ideas.
     """
     ideas = _load_ideas()
     for entry in reversed(ideas):  # newest last in JSONL
@@ -438,15 +436,15 @@ def dismiss_idea(idea_id: str) -> str:
             ideas[i]["status"]       = "dismissed"
             ideas[i]["dismissed_at"] = datetime.now().isoformat()
             _save_ideas(ideas)
-            return f"✅ Idea dismissed: {idea.get('idea', '')[:80]}"
+            return f"âœ… Idea dismissed: {idea.get('idea', '')[:80]}"
     open_ids = [i["id"] for i in ideas if i.get("status") == "open"]
     return (
-        f"❌ Idea '{idea_id}' not found.\n"
+        f"âŒ Idea '{idea_id}' not found.\n"
         f"Open idea IDs: {open_ids or 'none'}"
     )
 
 
-# ── Idea priority scoring ─────────────────────────────────────────────────────
+# â”€â”€ Idea priority scoring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 # Sources ordered by trust: user requests > systemic analysis > auto-detected noise
 _SOURCE_WEIGHT: Dict[str, int] = {
@@ -541,7 +539,7 @@ def review_ideas(auto_cleanup: bool = True, max_actions: int = 3) -> str:
     open_ideas = [i for i in ideas if i.get("status") == "open"]
 
     if not open_ideas:
-        return "✅ No open ideas to review."
+        return "âœ… No open ideas to review."
 
     # 1. Score all open ideas
     scored: List[Dict] = []
@@ -562,7 +560,7 @@ def review_ideas(auto_cleanup: bool = True, max_actions: int = 3) -> str:
             if src == "discover_patterns":
                 idea["status"] = "dismissed"
                 idea["dismissed_at"] = datetime.now().isoformat()
-                idea["dismissed_reason"] = "auto: noise — recurring pattern report, not actionable"
+                idea["dismissed_reason"] = "auto: noise â€” recurring pattern report, not actionable"
                 dismissed_count += 1
                 continue
 
@@ -573,7 +571,7 @@ def review_ideas(auto_cleanup: bool = True, max_actions: int = 3) -> str:
                     if ts and datetime.fromisoformat(ts) < (datetime.now() - timedelta(days=14)):
                         idea["status"] = "dismissed"
                         idea["dismissed_at"] = datetime.now().isoformat()
-                        idea["dismissed_reason"] = "auto: stale task context — no longer actionable"
+                        idea["dismissed_reason"] = "auto: stale task context â€” no longer actionable"
                         dismissed_count += 1
                 except (ValueError, TypeError):
                     pass
@@ -587,7 +585,7 @@ def review_ideas(auto_cleanup: bool = True, max_actions: int = 3) -> str:
 
     # 4. Build report
     lines = [
-        "🔍 Idea Review",
+        "ðŸ” Idea Review",
         "=" * 40,
         f"Total open ideas    : {len(open_ideas)}",
         f"Auto-dismissed      : {dismissed_count}",
@@ -597,14 +595,14 @@ def review_ideas(auto_cleanup: bool = True, max_actions: int = 3) -> str:
     # Top 5 by priority
     top = open_ideas[:5]
     if top:
-        lines.append("📊 Top priorities:")
+        lines.append("ðŸ“Š Top priorities:")
         for i, idea in enumerate(top, 1):
             p = idea.get("priority", 0)
             src = idea.get("source", "?")
             text = idea.get("idea", "?")[:100]
             iid = idea.get("id", "?")
             ts = idea.get("timestamp", "")[:10]
-            icon = "🔴" if p >= 60 else "🟡" if p >= 30 else "🟢"
+            icon = "ðŸ”´" if p >= 60 else "ðŸŸ¡" if p >= 30 else "ðŸŸ¢"
             lines.append(f"  {i}. {icon} [{iid}] priority={p} src={src} ({ts})")
             lines.append(f"     {text}")
         lines.append("")
@@ -615,18 +613,18 @@ def review_ideas(auto_cleanup: bool = True, max_actions: int = 3) -> str:
         result = _try_act_on_idea(idea)
         if result:
             acted += 1
-            lines.append(f"  ⚡ Acted: {result}")
+            lines.append(f"  âš¡ Acted: {result}")
 
     if acted:
-        lines.append(f"\n  ⚡ {acted} idea(s) acted on automatically")
+        lines.append(f"\n  âš¡ {acted} idea(s) acted on automatically")
     else:
         lines.append("  No ideas ready for automatic action yet.")
 
-    lines.append("\n💡 Tip: review_ideas() runs automatically during daily_review().")
+    lines.append("\nðŸ’¡ Tip: review_ideas() runs automatically during daily_review().")
     return "\n".join(lines)
 
 
-# ── Condition checking and action execution ───────────────────────────────────
+# â”€â”€ Condition checking and action execution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _CONDITION_HANDLERS: Dict[str, callable] = {}
 
@@ -751,12 +749,12 @@ def _check_idea_conditions(idea: Dict) -> tuple:
 
         try:
             result = handler(*args)
-            status = "✅" if result else "❌"
+            status = "âœ…" if result else "âŒ"
             details.append(f"{status} {handler_name}({', '.join(args)})")
             if not result:
                 all_met = False
         except Exception as e:
-            details.append(f"⚠️ {handler_name} error: {e}")
+            details.append(f"âš ï¸ {handler_name} error: {e}")
             all_met = False
 
     return all_met, details
@@ -777,7 +775,7 @@ def _try_act_on_idea(idea: Dict) -> str:
     if not conditions_met:
         return ""
 
-    # Action: discover_patterns → add to error_patterns.json
+    # Action: discover_patterns â†’ add to error_patterns.json
     if source == "discover_patterns":
         match = re.search(r"'(\w+)'", text)
         if match:
@@ -796,13 +794,13 @@ def _try_act_on_idea(idea: Dict) -> str:
                 return f"Added '{error_type}' to error_patterns.json [{iid}]"
         return ""
 
-    # Action: auto_detect with error_recovery → ensure lesson recorded
+    # Action: auto_detect with error_recovery â†’ ensure lesson recorded
     if source == "auto_detect" and "error_recovery" in text.lower():
         idea["status"] = "dismissed"
         idea["dismissed_at"] = datetime.now().isoformat()
         idea["dismissed_reason"] = "auto: error recovery already captured in lessons.jsonl"
         _save_ideas(_load_ideas())
-        return f"Dismissed — already in lessons [{iid}]"
+        return f"Dismissed â€” already in lessons [{iid}]"
 
     return ""
 
@@ -820,27 +818,27 @@ def act_on_idea(idea_id: str) -> str:
     for i, idea in enumerate(ideas):
         if idea.get("id") == idea_id:
             if idea.get("status") != "open":
-                return f"❌ Idea '{idea_id}' is not open (status={idea.get('status')})."
+                return f"âŒ Idea '{idea_id}' is not open (status={idea.get('status')})."
 
             conditions_met, cond_details = _check_idea_conditions(idea)
             if not conditions_met:
-                return f"⏳ Conditions not met for '{idea_id}':\n" + "\n".join(f"  {d}" for d in cond_details)
+                return f"â³ Conditions not met for '{idea_id}':\n" + "\n".join(f"  {d}" for d in cond_details)
 
             result = _try_act_on_idea(idea)
             if result:
                 _save_ideas(ideas)
-                return f"✅ {result}"
+                return f"âœ… {result}"
 
             text = idea.get("idea", "")[:200]
             return (
-                f"⚠️ No automatic action for '{idea_id}'.\n"
+                f"âš ï¸ No automatic action for '{idea_id}'.\n"
                 f"Idea: {text}\n"
                 f"Conditions: {'; '.join(cond_details)}\n"
                 f"Consider: implement a custom handler or dismiss with dismiss_idea('{idea_id}')"
             )
 
     open_ids = [i["id"] for i in ideas if i.get("status") == "open"]
-    return f"❌ Idea '{idea_id}' not found.\nOpen IDs: {open_ids or 'none'}"
+    return f"âŒ Idea '{idea_id}' not found.\nOpen IDs: {open_ids or 'none'}"
 
 
 def get_idea_summary(max_ideas: int = 3) -> str:
@@ -874,11 +872,11 @@ def get_idea_summary(max_ideas: int = 3) -> str:
     if not meaningful:
         return ""
 
-    lines = ["🔍 Top improvement ideas:"]
+    lines = ["ðŸ” Top improvement ideas:"]
     for idea in meaningful:
         p = idea.get("priority", 0)
         text = idea.get("idea", "")[:120]
-        lines.append(f"  • [priority={p}] {text}")
+        lines.append(f"  â€¢ [priority={p}] {text}")
 
     return "\n".join(lines)
 
@@ -888,7 +886,7 @@ def _suggestion_key(skill_name: str, issue_type: str) -> str:
     return f"{skill_name}::{issue_type}"
 
 
-# ── Lazy skill imports ─────────────────────────────────────────────────────────
+# â”€â”€ Lazy skill imports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _SKILL_PATHS = ("/app/skills/core", "/app/skills/dynamic", "/app/skills", "/app")
 _skill_paths_ready: bool = False
@@ -922,12 +920,12 @@ def _import_skill(module_name: str, reload: bool = False):
     return importlib.import_module(module_name)
 
 
-# ── Minimal LLM helper ────────────────────────────────────────────────────────
+# â”€â”€ Minimal LLM helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _call_llm_simple(prompt: str, max_tokens: int = 256) -> str:
     """Single-turn LLM call via LiteLLM proxy (cloud) or Ollama (local).
 
-    Returns empty string on any failure — callers must always have a non-LLM
+    Returns empty string on any failure â€” callers must always have a non-LLM
     fallback path.  Mirrors the pattern in self_improvement._call_llm_verdict()
     so both skills route through the same env-var config.
     """
@@ -982,10 +980,10 @@ def _call_llm_simple(prompt: str, max_tokens: int = 256) -> str:
     return ""
 
 
-# ── Research loop constants ────────────────────────────────────────────────────
+# â”€â”€ Research loop constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-# Converge when ≥72% of query terms are covered by collected sources.
-# Mirrors autoresearch's val_bpb threshold — the single number that decides
+# Converge when â‰¥72% of query terms are covered by collected sources.
+# Mirrors autoresearch's val_bpb threshold â€” the single number that decides
 # whether to keep the current state or refine and try again.
 COVERAGE_THRESHOLD = 0.72
 
@@ -996,7 +994,7 @@ _RESEARCH_STOP = frozenset({
     "can", "will", "would", "could", "should", "their", "they", "them",
 })
 
-# ── Research loop helpers ──────────────────────────────────────────────────────
+# â”€â”€ Research loop helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _extract_urls(raw_search: str) -> List[str]:
     """Extract URLs from a web.search() result string."""
@@ -1012,14 +1010,14 @@ def _extract_urls(raw_search: str) -> List[str]:
 
 def _score_coverage(query: str, sources: List[Dict]) -> float:
     """
-    Coverage metric 0.0–1.0: how well collected sources answer the query.
+    Coverage metric 0.0â€“1.0: how well collected sources answer the query.
 
-    0.4 × source yield  +  0.6 × query-term coverage in collected content,
+    0.4 Ã— source yield  +  0.6 Ã— query-term coverage in collected content,
     scaled by a domain-diversity factor so that N sources from the same site
     score lower than N sources from N different domains.
 
-    Diversity scale: all one domain → ×0.75 (25% penalty); fully diverse → ×1.0.
-    Mirrors autoresearch's val_bpb — one number that drives keep/refine decisions.
+    Diversity scale: all one domain â†’ Ã—0.75 (25% penalty); fully diverse â†’ Ã—1.0.
+    Mirrors autoresearch's val_bpb â€” one number that drives keep/refine decisions.
     """
     if not sources:
         return 0.0
@@ -1029,7 +1027,7 @@ def _score_coverage(query: str, sources: List[Dict]) -> float:
     ]
     yield_score = len(successful) / len(sources)
 
-    # Domain-diversity penalty — penalise echo chambers where all URLs share a host.
+    # Domain-diversity penalty â€” penalise echo chambers where all URLs share a host.
     urls           = [s.get("url") for s in successful if s.get("url")]
     unique_domains = len({u.split("/")[2] for u in urls if u.count("/") >= 2}) or 1
     diversity_factor = min(1.0, unique_domains / max(1, len(successful)))
@@ -1099,7 +1097,7 @@ def _refine_query(
         ]
         if snippets:
             source_summary = "\n---\n".join(snippets)
-            missing_str = (", ".join(missing[:5])) if missing else "(none — coverage below threshold)"
+            missing_str = (", ".join(missing[:5])) if missing else "(none â€” coverage below threshold)"
             prompt = (
                 f"You are refining a web research query. The original topic is:\n"
                 f"  {base_query}\n\n"
@@ -1111,7 +1109,7 @@ def _refine_query(
                 f"information. Return only the query, no explanation or quotes."
             )
             refined = _call_llm_simple(prompt, max_tokens=64)
-            # Accept only plausible short queries — reject walls of text or empty
+            # Accept only plausible short queries â€” reject walls of text or empty
             if refined and 2 <= len(refined.split()) <= 20:
                 refined = refined.strip().strip('"').strip("'")
                 # Topical continuity check: at least one non-stopword term from
@@ -1126,12 +1124,12 @@ def _refine_query(
                     if t.lower() not in _RESEARCH_STOP and len(t) > 3
                 }
                 # Skip the topical continuity check when base_terms is empty
-                # (query was all stopwords / very short words) — there's nothing
+                # (query was all stopwords / very short words) â€” there's nothing
                 # to intersect against, so we can't distinguish drift from a
                 # genuinely good reformulation.  Accept the LLM result as-is.
                 if not base_terms or base_terms & refined_terms:
                     return refined
-                # LLM drifted off-topic — log so degradation is visible over time
+                # LLM drifted off-topic â€” log so degradation is visible over time
                 _log({
                     "timestamp": datetime.now().isoformat(),
                     "event": "llm_query_drift",
@@ -1142,23 +1140,23 @@ def _refine_query(
     # Fallback: mechanical keyword append (original behaviour)
     if missing:
         return f"{base_query} {' '.join(missing[:3])}"
-    # No missing terms and no useful LLM refinement — return base query unchanged
+    # No missing terms and no useful LLM refinement â€” return base query unchanged
     # rather than appending generic noise like "data statistics examples".
     return base_query
 
 
-# ── General-purpose research ───────────────────────────────────────────────────
+# â”€â”€ General-purpose research â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def research(query: str, depth: str = "quick", save=True, max_iterations=None) -> str:
     """
     Autoresearch-style web research loop on any topic.
 
-    Mirrors Karpathy's autoresearch: search → measure coverage → keep/refine →
-    repeat until convergence or iteration cap. Never pauses — runs autonomously.
+    Mirrors Karpathy's autoresearch: search â†’ measure coverage â†’ keep/refine â†’
+    repeat until convergence or iteration cap. Never pauses â€” runs autonomously.
 
-    Coverage metric (0.0–1.0):
-        0.4 × source yield  +  0.6 × query-term coverage across all fetched content
-    Convergence: stops when coverage ≥ 0.72 or iteration cap is reached.
+    Coverage metric (0.0â€“1.0):
+        0.4 Ã— source yield  +  0.6 Ã— query-term coverage across all fetched content
+    Convergence: stops when coverage â‰¥ 0.72 or iteration cap is reached.
 
     Args:
         query:          Topic, question, or measurable thing to investigate.
@@ -1177,9 +1175,9 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
     try:
         web = _import_skill("web")
     except ImportError as e:
-        return f"❌ web skill not available: {e}"
+        return f"âŒ web skill not available: {e}"
 
-    # Coerce types — Trinity dispatcher passes all args as strings
+    # Coerce types â€” Trinity dispatcher passes all args as strings
     depth = str(depth).strip().lower()
     _save_raw = str(save).strip().lower()
     save = True if _save_raw == "" else _save_raw not in ("false", "0", "no")
@@ -1200,7 +1198,7 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
     best_coverage  = 0.0
     final_decision = "MAX_ITERS"
 
-    # ── Autoresearch loop ─────────────────────────────────────────────────────
+    # â”€â”€ Autoresearch loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     for iteration in range(1, max_iters + 1):
         iter_sources: List[Dict] = []
 
@@ -1220,7 +1218,7 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
         if not candidate_urls and not all_sources:
             all_sources.append({"url": None, "content": raw, "iteration": iteration})
 
-        # 2. Fetch — skip already-seen URLs
+        # 2. Fetch â€” skip already-seen URLs
         for url in candidate_urls:
             if url not in seen_urls and len(iter_sources) < sources_per_iter:
                 seen_urls.add(url)
@@ -1240,7 +1238,7 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
 
         all_sources.extend(iter_sources)
 
-        # 3. Measure coverage — the single metric that drives all decisions
+        # 3. Measure coverage â€” the single metric that drives all decisions
         coverage = _score_coverage(query, all_sources)
         missing  = _missing_terms(query, all_sources)
         improved = coverage > best_coverage
@@ -1251,17 +1249,17 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
             decision       = "CONVERGED"
             final_decision = "CONVERGED"
         elif not improved and iteration > 1:
-            decision       = "NO_IMPROVEMENT — stopping early"
+            decision       = "NO_IMPROVEMENT â€” stopping early"
             final_decision = "NO_IMPROVEMENT"
         elif iteration == max_iters:
             decision       = "MAX_ITERS"
             final_decision = "MAX_ITERS"
         else:
-            # Compute once — reused for both the log label and the actual next query.
+            # Compute once â€” reused for both the log label and the actual next query.
             # Pass all_sources so the LLM path has content context; falls back to
             # keyword append automatically if LLM is unavailable.
             next_query = _refine_query(query, iteration, missing, sources=all_sources)
-            decision   = f"REFINE → \"{next_query}\""
+            decision   = f"REFINE â†’ \"{next_query}\""
 
         iter_log.append({
             "iter":     iteration,
@@ -1276,25 +1274,25 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
         if final_decision in ("CONVERGED", "NO_IMPROVEMENT"):
             break
         if decision.startswith("REFINE"):
-            current_query = next_query  # already computed above — avoid second LLM call
+            current_query = next_query  # already computed above â€” avoid second LLM call
 
-    # ── Build report ──────────────────────────────────────────────────────────
+    # â”€â”€ Build report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     conv_marker = (
-        "✅ converged" if final_decision == "CONVERGED"
-        else f"⚠️ {final_decision.lower().replace('_', ' ')}"
+        "âœ… converged" if final_decision == "CONVERGED"
+        else f"âš ï¸ {final_decision.lower().replace('_', ' ')}"
     )
     lines = [
-        f"📚 Research: {query}",
+        f"ðŸ“š Research: {query}",
         f"   {date_label} | {len(iter_log)} iteration(s) | "
         f"coverage: {best_coverage:.0%} | {conv_marker}",
         "=" * 60,
         "",
-        "── Iteration Log ──────────────────────────────────────────",
+        "â”€â”€ Iteration Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€",
     ]
     for e in iter_log:
         status = (
-            "✅" if e["coverage"] >= COVERAGE_THRESHOLD
-            else ("🔄" if "REFINE" in e["decision"] else "—")
+            "âœ…" if e["coverage"] >= COVERAGE_THRESHOLD
+            else ("ðŸ”„" if "REFINE" in e["decision"] else "â€”")
         )
         lines.append(
             f"  iter {e['iter']} | cov {e['coverage']:.0%} | "
@@ -1303,10 +1301,10 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
         if e.get("missing"):
             lines.append(f"           missing: {e['missing']}")
 
-    lines += ["", "── Sources ────────────────────────────────────────────────"]
+    lines += ["", "â”€â”€ Sources â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"]
     for i, src in enumerate(all_sources, 1):
         lines.append(
-            f"\n[{i}] iter {src.get('iteration', '?')} — {src.get('url') or '(search result)'}"
+            f"\n[{i}] iter {src.get('iteration', '?')} â€” {src.get('url') or '(search result)'}"
         )
         content = src.get("content") or ""
         if content:
@@ -1315,7 +1313,7 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
                 preview += f"\n  ... [{len(content) - 800} more chars truncated]"
             lines.append(preview)
 
-    # ── Extract code snippets from all sources ────────────────────────────────
+    # â”€â”€ Extract code snippets from all sources â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     _code_blocks: List[str] = []
     for _src in all_sources:
         _c = _src.get("content") or ""
@@ -1326,7 +1324,7 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
 
     _research_save_path = None
     if _code_blocks:
-        lines += ["", "── Code Snippets ──────────────────────────────────────────"]
+        lines += ["", "â”€â”€ Code Snippets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"]
         for _i, _blk in enumerate(_code_blocks, 1):
             lines.append(f"\n[snippet {_i}]\n{_blk}")
         try:
@@ -1351,12 +1349,12 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
     ]
     result_text = "\n".join(lines)
 
-    # ── Save to notes ─────────────────────────────────────────────────────────
+    # â”€â”€ Save to notes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     save_path = None
     if save:
         try:
             notes = _import_skill("notes")
-            title = f"Research — {query[:60]} — {datetime.now().strftime('%Y-%m-%d')}"
+            title = f"Research â€” {query[:60]} â€” {datetime.now().strftime('%Y-%m-%d')}"
             notes.save(title, result_text, tags="research,autoimprove")
             save_path = title
         except Exception as e:
@@ -1377,27 +1375,27 @@ def research(query: str, depth: str = "quick", save=True, max_iterations=None) -
         "snippets_saved":   _research_save_path,
     })
 
-    footer = f"\n💾 Saved to notes: \"{save_path}\"" if save_path else ""
+    footer = f"\nðŸ’¾ Saved to notes: \"{save_path}\"" if save_path else ""
     if _research_save_path:
-        footer += f"\n📎 Code snippets ({len(_code_blocks)}): {_research_save_path}"
+        footer += f"\nðŸ“Ž Code snippets ({len(_code_blocks)}): {_research_save_path}"
     return result_text + footer
 
 
-# ── Layered smoke test ────────────────────────────────────────────────────────
+# â”€â”€ Layered smoke test â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _run_smoke_test(skill_name: str, ce) -> tuple:
     """
     Layered smoke test for a dynamic skill after patching.
 
     Layer 1 (always): status() call, falling back to a bare import check.
-        Passes if ce.test_skill() returns a '✅'-prefixed string, or if the
+        Passes if ce.test_skill() returns a 'âœ…'-prefixed string, or if the
         fallback import snippet prints the skill's NAME without error.
 
     Layer 2 (if skill defines get_test_scenarios): run up to 2 skill-defined
         scenarios against the patched code.  Each scenario must be a dict:
-            name      — str, human-readable label shown on failure
-            code      — str, Python snippet passed to ce.run_snippet()
-            validator — callable(result: str) -> bool
+            name      â€” str, human-readable label shown on failure
+            code      â€” str, Python snippet passed to ce.run_snippet()
+            validator â€” callable(result: str) -> bool
 
         Example in a skill file:
             def get_test_scenarios(skill_name):
@@ -1410,15 +1408,15 @@ def _run_smoke_test(skill_name: str, ce) -> tuple:
                 ]
 
         If get_test_scenarios() is absent, raises, or returns an empty list,
-        Layer 1 result stands — skills are not required to implement it.
+        Layer 1 result stands â€” skills are not required to implement it.
 
     Returns:
         (passed: bool, detail: str)
     """
-    # ── Layer 1: status() or import check ─────────────────────────────────────
+    # â”€â”€ Layer 1: status() or import check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     test_result = ce.test_skill(skill_name, "status", "[]", timeout=10)
     used_fallback = False
-    if not test_result.startswith("✅"):
+    if not test_result.startswith("âœ…"):
         test_result = ce.run_snippet(
             "import sys\n"
             "sys.path.insert(0, '/app/skills/dynamic')\n"
@@ -1429,14 +1427,14 @@ def _run_smoke_test(skill_name: str, ce) -> tuple:
         used_fallback = True
 
     if used_fallback:
-        # run_snippet returns raw stdout — pass if no error markers present
-        _err_markers = ("error", "exception", "traceback", "❌", "syntaxerror", "importerror")
+        # run_snippet returns raw stdout â€” pass if no error markers present
+        _err_markers = ("error", "exception", "traceback", "âŒ", "syntaxerror", "importerror")
         if any(m in test_result.lower() for m in _err_markers):
             return False, f"layer 1 failed: {test_result[:150]}"
-    elif not test_result.startswith("✅"):
+    elif not test_result.startswith("âœ…"):
         return False, f"layer 1 failed: {test_result[:150]}"
 
-    # ── Layer 2: skill-defined scenarios (optional) ────────────────────────────
+    # â”€â”€ Layer 2: skill-defined scenarios (optional) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         # reload=True picks up the patched file, not the cached pre-patch version
         skill_mod = _import_skill(skill_name, reload=True)
@@ -1450,16 +1448,16 @@ def _run_smoke_test(skill_name: str, ce) -> tuple:
             result = ce.run_snippet(scenario["code"], timeout=15)
             if not scenario["validator"](result):
                 return False, (
-                    f"layer 2 failed — scenario '{scenario['name']}': {result[:120]}"
+                    f"layer 2 failed â€” scenario '{scenario['name']}': {result[:120]}"
                 )
     except Exception as exc:
-        # Scenario infrastructure error — layer 1 already passed, don't block
+        # Scenario infrastructure error â€” layer 1 already passed, don't block
         return True, f"layer 1 passed (scenario load error: {exc})"
 
     return True, f"all layers passed ({run_count} scenario(s))"
 
 
-# ── Core experiment runner (DYNAMIC skills only) ──────────────────────────────
+# â”€â”€ Core experiment runner (DYNAMIC skills only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> str:
     """
@@ -1467,13 +1465,13 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
 
     Flow:
       1. Snapshot current code
-      2. Baseline AST audit — confirm issue exists and get health score
+      2. Baseline AST audit â€” confirm issue exists and get health score
       3. Apply all occurrences of issue_type        [skipped if dry_run=True]
-      4. Re-audit — confirm health score improved   [skipped if dry_run=True]
+      4. Re-audit â€” confirm health score improved   [skipped if dry_run=True]
       5. Runtime smoke test                         [skipped if dry_run=True]
-      6. PASS  → keep improved file,  log IMPROVED
-         FAIL  → restore snapshot,    log REVERTED
-         NO-OP → restore snapshot,    log NO_CHANGE
+      6. PASS  â†’ keep improved file,  log IMPROVED
+         FAIL  â†’ restore snapshot,    log REVERTED
+         NO-OP â†’ restore snapshot,    log NO_CHANGE
 
     Args:
         skill_name:  Dynamic skill stem (e.g. 'seo_analyzer')
@@ -1486,7 +1484,7 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
         In dry_run mode: DRY_RUN: <what would happen>
 
     Raises:
-        ValueError:   issue_type is not in AUTO_FIXABLE (hard safety boundary —
+        ValueError:   issue_type is not in AUTO_FIXABLE (hard safety boundary â€”
                       this is never a soft skip, even if the caller rationalizes
                       that a non-listed type "should" be safe), or skill not found.
         ImportError:  required dependency skill unavailable.
@@ -1495,7 +1493,7 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
     if issue_type not in AUTO_FIXABLE:
         raise ValueError(
             f"refused: '{issue_type}' is not in the auto-fixable set {AUTO_FIXABLE}. "
-            f"Add it to AUTO_FIXABLE explicitly after human review — do not bypass this check."
+            f"Add it to AUTO_FIXABLE explicitly after human review â€” do not bypass this check."
         )
 
     skill_path = SKILLS_DYNAMIC_DIR / f"{skill_name}.py"
@@ -1508,18 +1506,18 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
         si = _import_skill("self_improvement")
         ce = _import_skill("terminal")
     except ImportError as e:
-        raise ImportError(f"dependency missing — {e}") from e
+        raise ImportError(f"dependency missing â€” {e}") from e
 
-    # 1. Snapshot — safety net, no git needed
+    # 1. Snapshot â€” safety net, no git needed
     try:
         original_code = skill_path.read_text(encoding="utf-8")
     except Exception as e:
-        raise RuntimeError(f"cannot read {skill_name}.py — {e}") from e
+        raise RuntimeError(f"cannot read {skill_name}.py â€” {e}") from e
 
     # 2. Baseline audit
     before = si.analyze_skill_code(skill_name)
     if before.get("error"):
-        raise RuntimeError(f"pre-audit failed for {skill_name} — {before['error']}")
+        raise RuntimeError(f"pre-audit failed for {skill_name} â€” {before['error']}")
 
     before_score  = before["health_score"]
     target_issues = [i for i in before["issues"] if i["type"] == issue_type]
@@ -1527,7 +1525,7 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
     if not target_issues:
         return f"NO_CHANGE: no '{issue_type}' in {skill_name} (score={before_score})"
 
-    # Guard: missing_docstring patches are subjective — if self_improvement.fix()
+    # Guard: missing_docstring patches are subjective â€” if self_improvement.fix()
     # doesn't implement a deterministic rewrite for this type, the experiment will
     # always return NO_CHANGE and silently waste a slot.  Surface a warning so the
     # issue is visible rather than accumulating as unexplained NO_CHANGE entries.
@@ -1539,10 +1537,10 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
                 "skill":      skill_name,
                 "issue_type": issue_type,
                 "outcome":    "NO_CHANGE",
-                "reason":     "missing_docstring: si.fix() has no deterministic patcher — skipping experiment",
+                "reason":     "missing_docstring: si.fix() has no deterministic patcher â€” skipping experiment",
             })
             return (
-                f"NO_CHANGE: skipped '{issue_type}' for {skill_name} — "
+                f"NO_CHANGE: skipped '{issue_type}' for {skill_name} â€” "
                 "no deterministic patcher available (see suggest_core for manual review)"
             )
 
@@ -1554,16 +1552,16 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
         more = f" (+{len(target_issues)-3} more)" if len(target_issues) > 3 else ""
         return (
             f"DRY_RUN: {skill_name} has {len(target_issues)} '{issue_type}' issue(s) "
-            f"(health={before_score}) — would attempt fix.\n"
+            f"(health={before_score}) â€” would attempt fix.\n"
             f"  {issue_summary}{more}\n"
             f"  Run without dry_run=True to apply."
         )
 
     # Regression check: if the previous logged outcome for this skill+issue was IMPROVED,
-    # the fix didn't hold — flag it so the false-positive rate stays visible in report().
+    # the fix didn't hold â€” flag it so the false-positive rate stays visible in report().
     _regressed = _check_prior_improved(skill_name, issue_type)
 
-    # Disk backup — mirrors apply_suggestion's crash-safety pattern.
+    # Disk backup â€” mirrors apply_suggestion's crash-safety pattern.
     # A stale .bak means a previous run crashed mid-experiment; restore from it
     # before retrying so we never operate on a partially-patched file.
     backup_path = skill_path.with_suffix(".py.bak")
@@ -1576,12 +1574,12 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
         except Exception as e:
             return (
                 f"REVERTED: found stale backup {backup_path.name} from a previous crashed run "
-                f"but could not restore it — {e}. Inspect manually before retrying."
+                f"but could not restore it â€” {e}. Inspect manually before retrying."
             )
     try:
         backup_path.write_text(original_code, encoding="utf-8")
     except Exception as e:
-        return f"REVERTED: cannot write backup for {skill_name}.py — {e}"
+        return f"REVERTED: cannot write backup for {skill_name}.py â€” {e}"
 
     # 3. Apply patch
     try:
@@ -1594,7 +1592,7 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
             "outcome": "REVERTED", "before_score": before_score, "after_score": None,
             "reason": f"si.fix() raised: {fix_exc}",
         })
-        return f"REVERTED: si.fix() raised {type(fix_exc).__name__} — restored snapshot"
+        return f"REVERTED: si.fix() raised {type(fix_exc).__name__} â€” restored snapshot"
 
     # 4. Post-patch audit
     after = si.analyze_skill_code(skill_name)
@@ -1606,7 +1604,7 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
             "outcome": "REVERTED", "before_score": before_score, "after_score": None,
             "reason": f"post-patch syntax error: {after['error']}",
         })
-        return f"REVERTED: patch broke {skill_name} syntax — restored"
+        return f"REVERTED: patch broke {skill_name} syntax â€” restored"
 
     after_score = after["health_score"]
 
@@ -1625,14 +1623,14 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
     elif issues_fixed > 0:
         backup_path.unlink(missing_ok=True)
         outcome = "IMPROVED"
-        reason  = f"score {before_score}→{after_score}, fixed {issues_fixed}/{len(target_issues)} issues"
+        reason  = f"score {before_score}â†’{after_score}, fixed {issues_fixed}/{len(target_issues)} issues"
     else:
         skill_path.write_text(original_code, encoding="utf-8")
         backup_path.unlink(missing_ok=True)
         outcome = "NO_CHANGE"
         reason  = f"score unchanged at {before_score}, no issues reduced"
 
-    # MAD confidence — how does this delta compare to historical noise?
+    # MAD confidence â€” how does this delta compare to historical noise?
     score_delta       = (after_score - before_score) if outcome == "IMPROVED" else None
     recent_deltas     = _load_all_score_deltas()
     conf_ratio, conf_label = _compute_confidence(score_delta, recent_deltas)
@@ -1651,23 +1649,23 @@ def run_experiment(skill_name: str, issue_type: str, dry_run: bool = False) -> s
         "test_passed":        test_passed,
         "test_detail":        test_detail,
         "reason":             reason,
-        "regressed_after_fix": _regressed,  # True → previous IMPROVED didn't hold
+        "regressed_after_fix": _regressed,  # True â†’ previous IMPROVED didn't hold
     })
 
-    icon     = "✅" if outcome == "IMPROVED" else ("🔄" if outcome == "REVERTED" else "—")
+    icon     = "âœ…" if outcome == "IMPROVED" else ("ðŸ”„" if outcome == "REVERTED" else "â€”")
     conf_str = f" | {conf_label}" if outcome == "IMPROVED" else ""
-    return f"{icon} {outcome}: {skill_name} [{issue_type}] — {reason}{conf_str}"
+    return f"{icon} {outcome}: {skill_name} [{issue_type}] â€” {reason}{conf_str}"
 
 
-# ── Core skill suggestion system ───────────────────────────────────────────────
+# â”€â”€ Core skill suggestion system â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def suggest_core(skill_name=None, max_skills=30) -> str:
     """
     Audit core skills and save proposed patches to memory for your review.
     No files are modified. You approve each suggestion with apply_suggestion().
 
-    Scans /app/skills/core/ for auto-fixable issues (bare_except, missing_timeout),
-    generates the proposed patch for each, and saves to core_suggestions.jsonl.
+    Scans /app/skills/core/ for auto-fixable issues plus suggestion-only issues
+    such as missing_docstring, and saves each proposed patch to core_suggestions.jsonl.
     Already-pending suggestions are skipped (no duplicates).
 
     Args:
@@ -1681,9 +1679,9 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
     try:
         si = _import_skill("self_improvement")
     except ImportError as e:
-        return f"❌ {e}"
+        return f"âŒ {e}"
 
-    # Normalize args — dispatcher passes everything as strings
+    # Normalize args â€” dispatcher passes everything as strings
     skill_name = str(skill_name).strip() if skill_name not in (None, "None", "", "null") else None
     try:
         max_skills = int(max_skills)
@@ -1699,16 +1697,16 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
         if not core_files:
             available = [p.stem for p in all_core_files]
             return (
-                f"❌ Core skill '{skill_name}' not found.\n"
+                f"âŒ Core skill '{skill_name}' not found.\n"
                 f"Available: {', '.join(available)}"
             )
     else:
         core_files = all_core_files
     if not core_files:
-        return "⚠️ No core skills found at /app/skills/core/"
+        return "âš ï¸ No core skills found at /app/skills/core/"
 
     existing   = _load_suggestions()
-    # Map pending key → index in existing, so we can update priority data in place
+    # Map pending key â†’ index in existing, so we can update priority data in place
     # instead of silently skipping a suggestion that has grown more severe since it was filed.
     pending_by_key: Dict[str, int] = {
         _suggestion_key(s["skill"], s["issue_type"]): i
@@ -1722,9 +1720,8 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
     skipped_dup     = 0
     scanned         = 0
 
-    # Scan AUTO_FIXABLE types (can be auto-applied) plus high/critical types
-    # that require manual review (sql_injection_risk, hardcoded_path).
-    SUGGEST_TYPES = AUTO_FIXABLE + ("sql_injection_risk", "hardcoded_path")
+    # Scan AUTO_FIXABLE types plus suggestion-only types that require manual review.
+    SUGGEST_TYPES = AUTO_FIXABLE + ("missing_docstring", "sql_injection_risk", "hardcoded_path")
 
     scan_list = core_files if skill_name else core_files[:max_skills]
     for skill_path in scan_list:
@@ -1743,7 +1740,7 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
             key = _suggestion_key(_skill_stem, issue_type)
             first_issue = matching[0]
             if key in pending_by_key:
-                # Already pending — update priority fields if the skill has deteriorated
+                # Already pending â€” update priority fields if the skill has deteriorated
                 idx = pending_by_key[key]
                 if analysis["health_score"] < existing[idx].get("health_score", 100):
                     existing[idx]["health_score"] = analysis["health_score"]
@@ -1790,7 +1787,7 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
             })
 
     lines = [
-        f"🔍 suggest_core — scanned {scanned} core skills",
+        f"ðŸ” suggest_core â€” scanned {scanned} core skills",
         f"  New suggestions saved : {len(new_suggestions)}",
         f"  Already pending       : {skipped_dup}"
         + (f" ({priority_updates} priority-updated)" if priority_updates else ""),
@@ -1802,7 +1799,7 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
         lines.append("New suggestions (review with list_suggestions()):")
         for s in new_suggestions:
             lines.append(
-                f"  • {s['skill']} [{s['issue_type']}] — "
+                f"  â€¢ {s['skill']} [{s['issue_type']}] â€” "
                 f"{s['occurrences']}x, score={s['health_score']}, {s['severity']}"
             )
         lines.append("")
@@ -1812,16 +1809,16 @@ def suggest_core(skill_name=None, max_skills=30) -> str:
         try:
             tg = _import_skill("telegram_bot")
             critical = [s for s in new_suggestions if s["severity"] == "critical"]
-            flag = "🚨" if critical else "🔧"
+            flag = "ðŸš¨" if critical else "ðŸ”§"
             tg.send(
                 f"{flag} autoimprove: {len(new_suggestions)} new core skill suggestion(s) pending.\n"
-                + (f"⚠️ {len(critical)} critical severity — review now.\n" if critical else "")
+                + (f"âš ï¸ {len(critical)} critical severity â€” review now.\n" if critical else "")
                 + "Run: autoimprove.list_suggestions()"
             )
         except Exception:
             pass  # Never let a notification failure break the improvement loop
     else:
-        lines.append("✅ No new suggestions — core looks clean or all issues already pending.")
+        lines.append("âœ… No new suggestions â€” core looks clean or all issues already pending.")
 
     return "\n".join(lines)
 
@@ -1831,24 +1828,24 @@ def list_suggestions(status: str = "pending", skill_name: str = None) -> str:
     Show core skill improvement suggestions saved to memory.
 
     Args:
-        status:     Filter — 'pending' | 'applied' | 'failed' | 'all'
-        skill_name: Optional — show suggestions for one skill only (e.g. 'browser_session')
+        status:     Filter â€” 'pending' | 'applied' | 'failed' | 'all'
+        skill_name: Optional â€” show suggestions for one skill only (e.g. 'browser_session')
 
     Returns:
         Formatted list of suggestions.
     """
-    # Normalize — dispatcher may pass skill name as status arg
+    # Normalize â€” dispatcher may pass skill name as status arg
     skill_name = str(skill_name).strip() if skill_name not in (None, "None", "", "null") else None
     valid_statuses = ("pending", "applied", "failed", "all")
     if status not in valid_statuses:
-        # User passed a skill name as first arg — treat it as skill_name filter
+        # User passed a skill name as first arg â€” treat it as skill_name filter
         skill_name = status
         status = "all"
 
     all_s = _load_suggestions()
     if not all_s:
         return (
-            "📭 No suggestions yet.\n"
+            "ðŸ“­ No suggestions yet.\n"
             "Run: autoimprove.suggest_core() to scan your 30+ core skills."
         )
 
@@ -1857,11 +1854,11 @@ def list_suggestions(status: str = "pending", skill_name: str = None) -> str:
         filtered = [s for s in filtered if s.get("skill") == skill_name]
     if not filtered:
         skill_hint = f" for '{skill_name}'" if skill_name else ""
-        return f"📭 No '{status}' suggestions{skill_hint}. Try list_suggestions('all') to see everything."
+        return f"ðŸ“­ No '{status}' suggestions{skill_hint}. Try list_suggestions('all') to see everything."
 
-    icons = {"pending": "⏳", "applied": "✅", "failed": "❌"}
+    icons = {"pending": "â³", "applied": "âœ…", "failed": "âŒ"}
     skill_label = f" [{skill_name}]" if skill_name else ""
-    lines = [f"📋 Core skill suggestions{skill_label} — {status} ({len(filtered)} of {len(all_s)} total):"]
+    lines = [f"ðŸ“‹ Core skill suggestions{skill_label} â€” {status} ({len(filtered)} of {len(all_s)} total):"]
 
     for s in filtered:
         icon    = icons.get(s.get("status", "pending"), "?")
@@ -1874,7 +1871,7 @@ def list_suggestions(status: str = "pending", skill_name: str = None) -> str:
         safe    = "safe to auto-apply" if s.get("safe_to_apply") else "review recommended"
         preview = s.get("patch_preview", "")
 
-        lines.append(f"\n  {icon} [{ts}] {skill} — {issue}")
+        lines.append(f"\n  {icon} [{ts}] {skill} â€” {issue}")
         lines.append(f"     occurrences: {occ}  |  health: {score}/100  |  severity: {sev}  |  {safe}")
         if s.get("message"):
             lines.append(f"     issue: {s['message']}")
@@ -1894,15 +1891,15 @@ def list_suggestions(status: str = "pending", skill_name: str = None) -> str:
 
 def apply_suggestion(skill_name: str, issue_type: str) -> str:
     """
-    Apply a pending core skill suggestion — your explicit approval required.
+    Apply a pending core skill suggestion â€” your explicit approval required.
 
     Flow:
       1. Find the pending suggestion for this skill + issue_type
       2. Snapshot the core skill file (safety net)
       3. Apply patch via self_improvement.fix()
       4. Runtime smoke test
-      5. PASS  → keep improved file, mark suggestion 'applied'
-         FAIL  → restore snapshot,   mark suggestion 'failed'
+      5. PASS  â†’ keep improved file, mark suggestion 'applied'
+         FAIL  â†’ restore snapshot,   mark suggestion 'failed'
 
     Args:
         skill_name:  Core skill stem (e.g. 'browser_session', 'web')
@@ -1925,7 +1922,7 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     if match is None:
         pending_skills = [s["skill"] for s in suggestions if s.get("status") == "pending"]
         return (
-            f"❌ No pending suggestion found for {skill_name} [{issue_type}].\n"
+            f"âŒ No pending suggestion found for {skill_name} [{issue_type}].\n"
             f"Pending skills: {pending_skills or 'none'}\n"
             f"Run list_suggestions() to see what's available."
         )
@@ -1933,19 +1930,19 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     # Locate the core skill file
     skill_path = SKILLS_CORE_DIR / f"{skill_name}.py"
     if not skill_path.exists():
-        return f"❌ Core skill file not found: {skill_path}"
+        return f"âŒ Core skill file not found: {skill_path}"
 
     try:
         si = _import_skill("self_improvement")
         ce = _import_skill("terminal")
     except ImportError as e:
-        return f"❌ dependency missing — {e}"
+        return f"âŒ dependency missing â€” {e}"
 
-    # Snapshot — persisted to disk so a mid-run crash leaves the original recoverable
+    # Snapshot â€” persisted to disk so a mid-run crash leaves the original recoverable
     try:
         original_code = skill_path.read_text(encoding="utf-8")
     except Exception as e:
-        return f"❌ Cannot read {skill_name}.py — {e}"
+        return f"âŒ Cannot read {skill_name}.py â€” {e}"
 
     backup_path = skill_path.with_suffix(".py.bak")
     # A pre-existing .bak means a previous apply_suggestion() crashed between backup and
@@ -1958,13 +1955,13 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
             original_code = stale_original
         except Exception as e:
             return (
-                f"❌ Found stale backup {backup_path.name} from a previous crashed run "
-                f"but could not restore it — {e}. Inspect manually before retrying."
+                f"âŒ Found stale backup {backup_path.name} from a previous crashed run "
+                f"but could not restore it â€” {e}. Inspect manually before retrying."
             )
     try:
         backup_path.write_text(original_code, encoding="utf-8")
     except Exception as e:
-        return f"❌ Cannot write backup for {skill_name}.py — {e}"
+        return f"âŒ Cannot write backup for {skill_name}.py â€” {e}"
 
     # Pre-audit for baseline
     before = si.analyze_skill_code(skill_name)
@@ -1980,7 +1977,7 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
         suggestions[match_idx]["applied_at"] = datetime.now().isoformat()
         suggestions[match_idx]["fail_reason"] = f"si.fix() raised: {fix_exc}"
         _save_suggestions(suggestions)
-        return f"❌ FAILED: si.fix() raised {type(fix_exc).__name__} — core file restored"
+        return f"âŒ FAILED: si.fix() raised {type(fix_exc).__name__} â€” core file restored"
 
     # Post-patch audit
     after = si.analyze_skill_code(skill_name)
@@ -1991,11 +1988,11 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
         suggestions[match_idx]["applied_at"] = datetime.now().isoformat()
         suggestions[match_idx]["fail_reason"] = f"syntax error: {after['error']}"
         _save_suggestions(suggestions)
-        return f"❌ FAILED: patch broke {skill_name} syntax — core file restored"
+        return f"âŒ FAILED: patch broke {skill_name} syntax â€” core file restored"
 
     after_score = after.get("health_score", 0)
 
-    # Smoke test — use the same layered test as run_experiment so core patches
+    # Smoke test â€” use the same layered test as run_experiment so core patches
     # face the same bar as dynamic patches (layer 1: status(); layer 2: scenarios).
     test_passed, test_detail = _run_smoke_test(skill_name, ce)
 
@@ -2013,9 +2010,9 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
             "outcome": "REVERTED", "track": "core", "before_score": before_score,
             "after_score": after_score, "reason": "runtime test failed after apply_suggestion",
         })
-        return f"❌ FAILED: runtime test failed — core file restored\n{test_detail[:200]}"
+        return f"âŒ FAILED: runtime test failed â€” core file restored\n{test_detail[:200]}"
 
-    # Success — persist original code to a dedicated file so the JSONL doesn't grow
+    # Success â€” persist original code to a dedicated file so the JSONL doesn't grow
     # with full file contents on every applied suggestion.
     backup_path.unlink(missing_ok=True)
     issues_fixed = match.get("occurrences", "?")
@@ -2030,7 +2027,7 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
     suggestions[match_idx]["applied_at"] = timestamp
     _save_suggestions(suggestions)
 
-    # MAD confidence — same scoring as run_experiment so report() stats include core fixes
+    # MAD confidence â€” same scoring as run_experiment so report() stats include core fixes
     score_delta           = (after_score - before_score) if (before_score and after_score) else None
     recent_deltas         = _load_all_score_deltas()
     conf_ratio, conf_label = _compute_confidence(score_delta, recent_deltas)
@@ -2068,8 +2065,8 @@ def apply_suggestion(skill_name: str, issue_type: str) -> str:
 
     suffix = f"\nAuto-dismissed {len(auto_dismissed)} related idea(s)." if auto_dismissed else ""
     return (
-        f"✅ APPLIED: {skill_name} [{issue_type}] — "
-        f"score {before_score}→{after_score}, {issues_fixed} occurrence(s) fixed\n"
+        f"âœ… APPLIED: {skill_name} [{issue_type}] â€” "
+        f"score {before_score}â†’{after_score}, {issues_fixed} occurrence(s) fixed\n"
         f"Core skill updated at: {skill_path}{suffix}"
     )
 
@@ -2105,7 +2102,7 @@ def unapply_suggestion(skill_name: str, issue_type: str) -> str:
             for s in suggestions if s.get("status") == "applied"
         ]
         return (
-            f"❌ No applied suggestion found for {skill_name} [{issue_type}].\n"
+            f"âŒ No applied suggestion found for {skill_name} [{issue_type}].\n"
             f"Applied suggestions: {applied or 'none'}"
         )
 
@@ -2114,12 +2111,12 @@ def unapply_suggestion(skill_name: str, issue_type: str) -> str:
         try:
             original_code = Path(bak_path_str).read_text(encoding="utf-8")
         except Exception as e:
-            return f"❌ Cannot read backup file {bak_path_str}: {e}"
+            return f"âŒ Cannot read backup file {bak_path_str}: {e}"
     else:
         original_code = match.get("original_code")
     if not original_code:
         return (
-            f"❌ No original_code stored for {skill_name} [{issue_type}] — "
+            f"âŒ No original_code stored for {skill_name} [{issue_type}] â€” "
             "suggestion was applied before rollback support was added. "
             "Restore manually from git or a backup."
         )
@@ -2128,7 +2125,7 @@ def unapply_suggestion(skill_name: str, issue_type: str) -> str:
     try:
         skill_path.write_text(original_code, encoding="utf-8")
     except Exception as e:
-        return f"❌ Could not write restored code to {skill_path}: {e}"
+        return f"âŒ Could not write restored code to {skill_path}: {e}"
 
     timestamp = datetime.now().isoformat()
     suggestions[match_idx]["status"]      = "reverted"
@@ -2145,12 +2142,12 @@ def unapply_suggestion(skill_name: str, issue_type: str) -> str:
         "issue_type": issue_type,
         "outcome":    "REVERTED",
         "track":      "core",
-        "reason":     "unapply_suggestion() — manual rollback",
+        "reason":     "unapply_suggestion() â€” manual rollback",
     })
-    return f"✅ Reverted {skill_name} [{issue_type}] — original code restored to {skill_path}"
+    return f"âœ… Reverted {skill_name} [{issue_type}] â€” original code restored to {skill_path}"
 
 
-# ── Lesson proposals (non-auto-fixable patterns) ──────────────────────────────
+# â”€â”€ Lesson proposals (non-auto-fixable patterns) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _load_proposals() -> List[Dict]:
     """Load all lesson proposals from lesson_proposals.jsonl."""
@@ -2180,13 +2177,13 @@ def _save_proposals(proposals: List[Dict]) -> None:
 
 def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
     """
-    Scan error_patterns.json for patterns that have accumulated ≥ threshold
+    Scan error_patterns.json for patterns that have accumulated â‰¥ threshold
     occurrences but are NOT in AUTO_FIXABLE (so error_reduce silently ignores them).
     For each qualifying pattern, save a structured review proposal to
     lesson_proposals.jsonl. Already-pending proposals are skipped.
 
-    This closes the loop: mistakes accumulate in lessons.jsonl → threshold hit →
-    proposal surfaces for your review → you decide how to act on it.
+    This closes the loop: mistakes accumulate in lessons.jsonl â†’ threshold hit â†’
+    proposal surfaces for your review â†’ you decide how to act on it.
     Auto-fixable patterns (bare_except, missing_timeout) are already handled by
     ast_audit / error_reduce and are intentionally excluded here.
 
@@ -2196,23 +2193,23 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
     Returns:
         Summary of new proposals found.
     """
-    # Coerce — dispatcher passes strings
+    # Coerce â€” dispatcher passes strings
     try:
         threshold = int(threshold)
     except (ValueError, TypeError):
         threshold = PROPOSAL_THRESHOLD
 
     if not PATTERNS_FILE.exists():
-        return "NO_DATA: error_patterns.json not found yet — run skills first to accumulate data"
+        return "NO_DATA: error_patterns.json not found yet â€” run skills first to accumulate data"
 
     try:
         with PATTERNS_FILE.open(encoding="utf-8") as f:
             patterns = json.load(f)
     except Exception as e:
-        return f"❌ could not read error_patterns.json: {e}"
+        return f"âŒ could not read error_patterns.json: {e}"
 
     # Collect example messages from lessons.jsonl for richer proposals.
-    # Also count (skill, error_type) pairs for Phase 2 runtime-error proposals —
+    # Also count (skill, error_type) pairs for Phase 2 runtime-error proposals â€”
     # these never appear in error_patterns.json which only tracks AST/static issues.
     lessons_by_type:  Dict[str, List[str]] = {}
     runtime_counts:   Dict[str, int]       = {}   # key = "skill::error_type"
@@ -2230,7 +2227,7 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
                     msg = lesson.get("error_message") or lesson.get("message", "")
                     if et and msg:
                         lessons_by_type.setdefault(et, []).append(str(msg)[:120])
-                    # Runtime pair tracking — one counter per (skill, error_type) combo
+                    # Runtime pair tracking â€” one counter per (skill, error_type) combo
                     skill = lesson.get("skill", "").strip()
                     if skill and et:
                         rkey = f"{skill}::{et}"
@@ -2252,7 +2249,7 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
         for p in existing
         if p.get("status") == "pending"
     }
-    # Separate dedup set for runtime proposals — keyed by "skill::error_type"
+    # Separate dedup set for runtime proposals â€” keyed by "skill::error_type"
     pending_runtime_keys = {
         p["runtime_key"]
         for p in existing
@@ -2280,8 +2277,8 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
 
         examples = lessons_by_type.get(error_type, [])[:3]
 
-        # LLM significance pass: only run for borderline patterns (threshold ≤ count < 2×threshold).
-        # High-count patterns (≥ 2×threshold) are unconditionally significant.
+        # LLM significance pass: only run for borderline patterns (threshold â‰¤ count < 2Ã—threshold).
+        # High-count patterns (â‰¥ 2Ã—threshold) are unconditionally significant.
         if count < threshold * 2:
             _sig_prompt = (
                 f"You are reviewing an AI agent error pattern for significance.\n\n"
@@ -2312,10 +2309,10 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
         new_proposals.append(proposal)
         pending_types.add(error_type)
 
-    # ── Phase 2: runtime errors from lessons.jsonl ────────────────────────────
+    # â”€â”€ Phase 2: runtime errors from lessons.jsonl â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # error_patterns.json only tracks AST/static patterns (bare_except,
-    # missing_docstring, etc.). Runtime errors — skill_error, TypeError,
-    # ValueError, etc. — live exclusively in lessons.jsonl and were never
+    # missing_docstring, etc.). Runtime errors â€” skill_error, TypeError,
+    # ValueError, etc. â€” live exclusively in lessons.jsonl and were never
     # reaching this pipeline. This phase closes that gap.
     for rkey, count in sorted(runtime_counts.items(), key=lambda x: -x[1]):
         if count < threshold:
@@ -2333,7 +2330,7 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
             "runtime_key":      rkey,
             "count":            count,
             "severity":         sev,
-            "suggested_fix":    fix_hint or f"Review {skill_stem} — {et} recurring {count}x, no fix recorded yet",
+            "suggested_fix":    fix_hint or f"Review {skill_stem} â€” {et} recurring {count}x, no fix recorded yet",
             "status":           "pending",
             "source":           "lessons.jsonl",
             "example_messages": runtime_examples.get(rkey, [])[:3],
@@ -2353,7 +2350,7 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
         })
 
     lines = [
-        f"🔎 lessons_to_proposals (threshold={threshold})",
+        f"ðŸ”Ž lessons_to_proposals (threshold={threshold})",
         f"   New proposals        : {len(new_proposals)}",
         f"   Already pending      : {skipped_dup}",
         f"   Below threshold      : {skipped_low}",
@@ -2366,11 +2363,11 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
         lines.append("New proposals (review with autoimprove.list_proposals()):")
         for p in new_proposals:
             lines.append(
-                f"  • [{p['severity'].upper()}] {p['error_type']} — "
-                f"{p['count']}x seen → {p['suggested_fix']}"
+                f"  â€¢ [{p['severity'].upper()}] {p['error_type']} â€” "
+                f"{p['count']}x seen â†’ {p['suggested_fix']}"
             )
     else:
-        lines.append("✅ No new proposals — all qualifying patterns already pending or below threshold.")
+        lines.append("âœ… No new proposals â€” all qualifying patterns already pending or below threshold.")
 
     return "\n".join(lines)
 
@@ -2378,11 +2375,11 @@ def lessons_to_proposals(threshold: int = PROPOSAL_THRESHOLD) -> str:
 def list_proposals(status: str = "pending") -> str:
     """
     Show lesson-derived improvement proposals.
-    These are recurring error patterns (≥3 occurrences) that are NOT auto-fixable
+    These are recurring error patterns (â‰¥3 occurrences) that are NOT auto-fixable
     and need a human decision on how to address them.
 
     Args:
-        status: Filter — 'pending' | 'resolved' | 'dismissed' | 'all'
+        status: Filter â€” 'pending' | 'resolved' | 'dismissed' | 'all'
 
     Returns:
         Formatted list of proposals.
@@ -2394,21 +2391,21 @@ def list_proposals(status: str = "pending") -> str:
     all_p = _load_proposals()
     if not all_p:
         return (
-            "📭 No lesson proposals yet.\n"
-            "Run: autoimprove.lessons_to_proposals() — or it runs automatically inside error_reduce."
+            "ðŸ“­ No lesson proposals yet.\n"
+            "Run: autoimprove.lessons_to_proposals() â€” or it runs automatically inside error_reduce."
         )
 
     filtered = all_p if status == "all" else [p for p in all_p if p.get("status") == status]
     if not filtered:
-        return f"📭 No '{status}' proposals. Try list_proposals('all') to see everything."
+        return f"ðŸ“­ No '{status}' proposals. Try list_proposals('all') to see everything."
 
-    icons    = {"pending": "⏳", "resolved": "✅", "dismissed": "—"}
-    sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}
+    icons    = {"pending": "â³", "resolved": "âœ…", "dismissed": "â€”"}
+    sev_icon = {"critical": "ðŸ”´", "high": "ðŸŸ ", "medium": "ðŸŸ¡", "low": "ðŸ”µ"}
 
-    lines = [f"📋 Lesson proposals — {status} ({len(filtered)} of {len(all_p)} total):"]
+    lines = [f"ðŸ“‹ Lesson proposals â€” {status} ({len(filtered)} of {len(all_p)} total):"]
     for p in filtered:
         icon   = icons.get(p.get("status", "pending"), "?")
-        si     = sev_icon.get(p.get("severity", "medium"), "•")
+        si     = sev_icon.get(p.get("severity", "medium"), "â€¢")
         ts     = p.get("timestamp", "")[:10]
         et     = p.get("error_type", "?")
         count  = p.get("count", "?")
@@ -2421,34 +2418,34 @@ def list_proposals(status: str = "pending") -> str:
         if examples:
             lines.append("     Examples from lessons:")
             for ex in examples[:2]:
-                lines.append(f"       – {ex[:100]}")
+                lines.append(f"       â€“ {ex[:100]}")
 
     if status == "pending" and filtered:
         lines += [
             "",
-            "These patterns are NOT auto-fixed — they need your decision.",
+            "These patterns are NOT auto-fixed â€” they need your decision.",
             "Options per pattern:",
-            "  • Extend AUTO_FIXABLE in autoimprove.py if a safe deterministic fix exists",
-            "  • Run autoimprove.suggest_core('<skill_name>') to generate a patch proposal",
-            "  • Update coding practices in identity.md to prevent future occurrences",
+            "  â€¢ Extend AUTO_FIXABLE in autoimprove.py if a safe deterministic fix exists",
+            "  â€¢ Run autoimprove.suggest_core('<skill_name>') to generate a patch proposal",
+            "  â€¢ Update coding practices in identity.md to prevent future occurrences",
         ]
 
     return "\n".join(lines)
 
 
-# ── Individual loops ───────────────────────────────────────────────────────────
+# â”€â”€ Individual loops â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _loop_ast_audit(max_experiments=10) -> str:
-    """Loop 1 — auto-fix bare_except & missing_timeout in DYNAMIC skills."""
+    """Loop 1 - auto-fix deterministic AUTO_FIXABLE issues in DYNAMIC skills."""
     max_experiments = int(max_experiments)
     try:
         si = _import_skill("self_improvement")
     except ImportError as e:
-        return f"❌ {e}"
+        return f"âŒ {e}"
 
     skill_files = sorted(p for p in SKILLS_DYNAMIC_DIR.glob("*.py") if not p.name.startswith("_"))
     if not skill_files:
-        return "✅ ast_audit: no dynamic skills found — nothing to audit"
+        return "âœ… ast_audit: no dynamic skills found â€” nothing to audit"
 
     results = []
     count   = 0
@@ -2473,26 +2470,26 @@ def _loop_ast_audit(max_experiments=10) -> str:
                 time.sleep(1)
 
     if not results:
-        return "✅ ast_audit: all dynamic skills clean — no auto-fixable issues"
-    return f"🔬 ast_audit ({count} experiments):\n" + "\n".join(results)
+        return "âœ… ast_audit: all dynamic skills clean â€” no auto-fixable issues"
+    return f"ðŸ”¬ ast_audit ({count} experiments):\n" + "\n".join(results)
 
 
 def _loop_error_reduce(max_experiments=10) -> str:
-    """Loop 2 — target the most-frequent error pattern in DYNAMIC skills."""
+    """Loop 2 â€” target the most-frequent error pattern in DYNAMIC skills."""
     max_experiments = int(max_experiments)
     try:
         si = _import_skill("self_improvement")
     except ImportError as e:
-        return f"❌ {e}"
+        return f"âŒ {e}"
 
     if not PATTERNS_FILE.exists():
-        return "NO_DATA: error_patterns.json not found yet — run skills first"
+        return "NO_DATA: error_patterns.json not found yet â€” run skills first"
 
     try:
         with PATTERNS_FILE.open(encoding="utf-8") as f:
             patterns = json.load(f)
     except Exception as e:
-        return f"❌ could not read error_patterns.json: {e}"
+        return f"âŒ could not read error_patterns.json: {e}"
 
     fixable = {k: v for k, v in patterns.items() if k in AUTO_FIXABLE}
     if not fixable:
@@ -2502,7 +2499,7 @@ def _loop_error_reduce(max_experiments=10) -> str:
     top_count = fixable[top_issue].get("count", 0)
 
     if top_count == 0:
-        return f"✅ error_reduce: top pattern '{top_issue}' has 0 occurrences"
+        return f"âœ… error_reduce: top pattern '{top_issue}' has 0 occurrences"
 
     results = []
     count   = 0
@@ -2525,25 +2522,25 @@ def _loop_error_reduce(max_experiments=10) -> str:
     proposals_summary = lessons_to_proposals()
 
     base = (
-        f"✅ error_reduce: no dynamic skills have '{top_issue}' currently"
+        f"âœ… error_reduce: no dynamic skills have '{top_issue}' currently"
         if not results else
-        f"🔬 error_reduce — targeting '{top_issue}' ({top_count}x in history), "
+        f"ðŸ”¬ error_reduce â€” targeting '{top_issue}' ({top_count}x in history), "
         f"{count} experiments:\n" + "\n".join(results)
     )
     return f"{base}\n\n{proposals_summary}"
 
 
 def _loop_daily_review() -> str:
-    """Loop 3 — learning review + user model maintenance + self-reflection. No code changes."""
+    """Loop 3 â€” learning review + user model maintenance + self-reflection. No code changes."""
     try:
         si = _import_skill("self_improvement")
     except ImportError as e:
-        return f"❌ {e}"
+        return f"âŒ {e}"
 
     try:
         review = si.daily_review()
     except AttributeError:
-        return "❌ self_improvement.daily_review() not found — skill may need updating"
+        return "âŒ self_improvement.daily_review() not found â€” skill may need updating"
 
     # Prune stale inferred patterns and low-confidence preferences from user model
     prune_note = ""
@@ -2551,11 +2548,11 @@ def _loop_daily_review() -> str:
         notes = _import_skill("notes")
         prune_note = "\n" + notes.prune_user_model(days_old=30)
     except Exception as _exc:
-        prune_note = f"\n⚠️  prune_user_model skipped: {_exc}"
+        prune_note = f"\nâš ï¸  prune_user_model skipped: {_exc}"
 
     # Self-reflection: inspect recent experiment outcomes and surface systemic
-    # observations as parked ideas — "did we actually improve anything? what
-    # keeps failing?" — so they feed the suggest_core and lessons_to_proposals loops.
+    # observations as parked ideas â€” "did we actually improve anything? what
+    # keeps failing?" â€” so they feed the suggest_core and lessons_to_proposals loops.
     reflection_note = ""
     try:
         recent = _load_log(days=7)
@@ -2591,22 +2588,22 @@ def _loop_daily_review() -> str:
                 if count >= 3:
                     idea = (
                         f"Self-reflection (7d): '{skill}' failed or reverted {count}x "
-                        f"in the last week — may need a suggest_core audit or manual review."
+                        f"in the last week â€” may need a suggest_core audit or manual review."
                     )
                     park_idea(idea, source="daily_review")
                     ideas_parked.append(f"{skill} failed {count}x")
 
             if ideas_parked:
-                reflection_note = f"\n💭 self-reflection: parked {len(ideas_parked)} idea(s) — {'; '.join(ideas_parked)}"
+                reflection_note = f"\nðŸ’­ self-reflection: parked {len(ideas_parked)} idea(s) â€” {'; '.join(ideas_parked)}"
             else:
                 reflection_note = (
-                    f"\n💭 self-reflection: {n_improved}/{n_total} improved "
-                    f"({n_reverted} reverted) over 7d — no systemic issues detected"
+                    f"\nðŸ’­ self-reflection: {n_improved}/{n_total} improved "
+                    f"({n_reverted} reverted) over 7d â€” no systemic issues detected"
                 )
         else:
-            reflection_note = "\n💭 self-reflection: no experiment history yet"
+            reflection_note = "\nðŸ’­ self-reflection: no experiment history yet"
     except Exception as _exc:
-        reflection_note = f"\n⚠️  self-reflection skipped: {_exc}"
+        reflection_note = f"\nâš ï¸  self-reflection skipped: {_exc}"
 
     _log({
         "timestamp": datetime.now().isoformat(),
@@ -2618,19 +2615,19 @@ def _loop_daily_review() -> str:
     # Idea review
     try:
         idea_review = review_ideas(auto_cleanup=True, max_actions=2)
-        idea_review_line = f"\n🔍 idea_review:\n{idea_review}"
+        idea_review_line = f"\nðŸ” idea_review:\n{idea_review}"
     except Exception as _exc:
-        idea_review_line = f"\n⚠️ idea_review skipped: {_exc}"
+        idea_review_line = f"\nâš ï¸ idea_review skipped: {_exc}"
 
-    return f"📋 daily_review:\n{review}{prune_note}{reflection_note}{idea_review_line}"
+    return f"ðŸ“‹ daily_review:\n{review}{prune_note}{reflection_note}{idea_review_line}"
 
 
 def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
     """
-    Loop 4 — scan session_logs.jsonl for recurring task_type patterns and park
+    Loop 4 â€” scan session_logs.jsonl for recurring task_type patterns and park
     skill proposals when a pattern appears frequently but has no matching skill.
 
-    Uses task_type tags written by app.py's _detect_task_type() — no LLM call,
+    Uses task_type tags written by app.py's _detect_task_type() â€” no LLM call,
     no ChromaDB access needed. Results go to improvement_ideas.jsonl via
     park_idea() so you review them with autoimprove.list_ideas().
 
@@ -2650,7 +2647,7 @@ def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
         days, min_occurrences, max_proposals = 7, 3, 5
 
     if not SESSION_LOG.exists():
-        return "NO_DATA: session_logs.jsonl not found — no conversations logged yet"
+        return "NO_DATA: session_logs.jsonl not found â€” no conversations logged yet"
 
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
 
@@ -2673,10 +2670,10 @@ def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
                 (entry.get("user") or "")[:120]
             )
     except Exception as e:
-        return f"❌ pattern_mining: could not read session_logs.jsonl — {e}"
+        return f"âŒ pattern_mining: could not read session_logs.jsonl â€” {e}"
 
     if not counts:
-        return f"✅ pattern_mining: no typed task patterns in the last {days} day(s)"
+        return f"âœ… pattern_mining: no typed task patterns in the last {days} day(s)"
 
     # Build set of already-existing skill stems so we skip covered patterns
     existing: set = set()
@@ -2700,7 +2697,7 @@ def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
         sample = "; ".join(dict.fromkeys(examples[:3]))  # dedupe while preserving order
         park_idea(
             f"Recurring task pattern '{task_type}' seen {len(examples)}x in {days}d "
-            f"— consider a new skill. Example queries: {sample}",
+            f"â€” consider a new skill. Example queries: {sample}",
             source="pattern_mining",
         )
         proposed += 1
@@ -2718,33 +2715,33 @@ def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
 
     if proposed == 0:
         return (
-            f"✅ pattern_mining: {len(counts)} pattern(s) found — "
+            f"âœ… pattern_mining: {len(counts)} pattern(s) found â€” "
             f"none qualified ({skipped_existing} already have a skill, "
             f"{skipped_threshold} below {min_occurrences}x threshold)"
         )
     return (
-        f"🔍 pattern_mining: {proposed} new proposal(s) parked "
+        f"ðŸ” pattern_mining: {proposed} new proposal(s) parked "
         f"({len(counts)} patterns scanned, {skipped_existing} already covered) "
-        f"— review with autoimprove.list_ideas()"
+        f"â€” review with autoimprove.list_ideas()"
     )
 
 
-# ── Discover new error pattern types ─────────────────────────────────────────
+# â”€â”€ Discover new error pattern types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) -> str:
     """
     Scan lessons.jsonl for error/failure types NOT already tracked in
     error_patterns.json.  Uses the LLM to analyze recurring unknown failure modes
     and propose new pattern definitions.  Results are parked via park_idea() for
-    human review — nothing is auto-added.
+    human review â€” nothing is auto-added.
 
     This closes the blind spot where error_reduce only improves patterns it already
     knows about while silently ignoring new categories accumulating in lessons.jsonl.
 
     Args:
         min_occurrences: Min times an untracked type must appear before analysis
-                         (default 2 — low bar since the LLM decides severity).
-        max_proposals:   Max ideas to park per run (default 10) — prevents flooding
+                         (default 2 â€” low bar since the LLM decides severity).
+        max_proposals:   Max ideas to park per run (default 10) â€” prevents flooding
                          improvement_ideas.jsonl when lessons.jsonl is large.
 
     Returns:
@@ -2760,7 +2757,7 @@ def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) ->
         max_proposals = 10
 
     if not LESSONS_FILE.exists():
-        return "NO_DATA: lessons.jsonl not found — run skills first to accumulate lessons"
+        return "NO_DATA: lessons.jsonl not found â€” run skills first to accumulate lessons"
 
     # Build the set of already-known pattern types
     known_types: set = set(AUTO_FIXABLE)
@@ -2787,10 +2784,10 @@ def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) ->
                 continue
             unknown_counts.setdefault(et, []).append(msg[:200])
     except Exception as e:
-        return f"❌ _discover_new_patterns: could not read lessons.jsonl — {e}"
+        return f"âŒ _discover_new_patterns: could not read lessons.jsonl â€” {e}"
 
     if not unknown_counts:
-        return "✅ discover_patterns: no untracked error types in lessons.jsonl"
+        return "âœ… discover_patterns: no untracked error types in lessons.jsonl"
 
     qualifying = {
         et: msgs
@@ -2801,16 +2798,16 @@ def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) ->
     if not qualifying:
         below = len(unknown_counts)
         return (
-            f"✅ discover_patterns: {below} untracked type(s) in lessons — "
+            f"âœ… discover_patterns: {below} untracked type(s) in lessons â€” "
             f"none meet the {min_occurrences}x threshold yet"
         )
 
     proposed = 0
-    lines = [f"🔍 discover_patterns: {len(qualifying)} qualifying untracked type(s):"]
+    lines = [f"ðŸ” discover_patterns: {len(qualifying)} qualifying untracked type(s):"]
 
     for et, msgs in sorted(qualifying.items(), key=lambda x: -len(x[1])):
         if proposed >= max_proposals:
-            lines.append(f"  … capped at {max_proposals} proposals — remaining types skipped")
+            lines.append(f"  â€¦ capped at {max_proposals} proposals â€” remaining types skipped")
             break
         # Dedupe while preserving order
         unique_msgs = list(dict.fromkeys(msgs))
@@ -2822,8 +2819,8 @@ def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) ->
             f"Occurrences     : {len(msgs)}\n"
             f"Example messages:\n{examples_str}\n\n"
             f"Respond in this EXACT format (3 lines, no extra text):\n"
-            f"DESCRIPTION: <one sentence — what this failure pattern is>\n"
-            f"FIX: <one sentence — how to prevent or fix it in Python code>\n"
+            f"DESCRIPTION: <one sentence â€” what this failure pattern is>\n"
+            f"FIX: <one sentence â€” how to prevent or fix it in Python code>\n"
             f"SEVERITY: low|medium|high|critical"
         )
 
@@ -2833,11 +2830,11 @@ def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) ->
             idea_text = (
                 f"New error pattern discovered: '{et}' ({len(msgs)}x in lessons.jsonl).\n"
                 f"LLM analysis:\n{analysis}\n"
-                f"Consider adding to error_patterns.json — and to AUTO_FIXABLE if a safe "
+                f"Consider adding to error_patterns.json â€” and to AUTO_FIXABLE if a safe "
                 f"deterministic fix exists."
             )
         else:
-            # LLM unavailable — surface raw data so a human can still act on it
+            # LLM unavailable â€” surface raw data so a human can still act on it
             sample = "; ".join(unique_msgs[:3])
             idea_text = (
                 f"New error pattern discovered: '{et}' ({len(msgs)}x in lessons.jsonl). "
@@ -2846,7 +2843,7 @@ def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) ->
             )
 
         park_idea(idea_text, source="discover_patterns")
-        lines.append(f"  • '{et}' ({len(msgs)}x) → parked for review")
+        lines.append(f"  â€¢ '{et}' ({len(msgs)}x) â†’ parked for review")
         proposed += 1
 
     _log({
@@ -2863,7 +2860,7 @@ def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) ->
     return "\n".join(lines)
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+# â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
     """
@@ -2886,11 +2883,11 @@ def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
         "discover_patterns": lambda: _discover_new_patterns(max_proposals=max_experiments),
     }
     if loop_name not in _loops:
-        return f"❌ Unknown loop '{loop_name}'. Available: {list(_loops.keys())}"
+        return f"âŒ Unknown loop '{loop_name}'. Available: {list(_loops.keys())}"
 
     if loop_name == "discover_patterns":
         sys.stderr.write(
-            "[autoimprove] WARNING: discover_patterns is deprecated — "
+            "[autoimprove] WARNING: discover_patterns is deprecated â€” "
             "it runs 180s of LLM calls producing auto-dismissed noise. "
             "Use lessons_to_proposals() instead.\n"
         )
@@ -2898,7 +2895,7 @@ def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
     start   = time.time()
     result  = _loops[loop_name]()
     elapsed = time.time() - start
-    return f"{result}\n\n⏱ Loop '{loop_name}' finished in {elapsed:.1f}s"
+    return f"{result}\n\nâ± Loop '{loop_name}' finished in {elapsed:.1f}s"
 
 
 def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
@@ -2906,20 +2903,20 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
     Run all loops in sequence.
 
     IMPORTANT: Direct calls are capped at 25s (dispatcher limit). Only 1-2 loops
-    will run before the cap is hit — this is expected behaviour for interactive use.
+    will run before the cap is hit â€” this is expected behaviour for interactive use.
     For a full overnight run across all loops, use schedule_nightly() instead:
         autoimprove.schedule_nightly('2am')
 
     Order:
-      1. daily_review     — learn what happened, no code changes
-      2. ast_audit        — auto-fix dynamic skills
-      3. error_reduce     — target top error pattern in dynamic skills
-      4. suggest_core     — audit core skills, queue suggestions for your review
-      5. pattern_mining   — scan session history for recurring task patterns
+      1. daily_review     â€” learn what happened, no code changes
+      2. ast_audit        â€” auto-fix dynamic skills
+      3. error_reduce     â€” target top error pattern in dynamic skills
+      4. suggest_core     â€” audit core skills, queue suggestions for your review
+      5. pattern_mining   â€” scan session history for recurring task patterns
 
     Args:
         max_experiments:     Max experiments per loop (default 5)
-        max_runtime_seconds: Hard wall-time cap in seconds (default 25 — fits
+        max_runtime_seconds: Hard wall-time cap in seconds (default 25 â€” fits
                              dispatcher limit). Pass None only from a scheduled
                              context where no timeout applies.
 
@@ -2938,32 +2935,35 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
 
     start   = time.time()
     divider = "=" * 52
-    results = [f"🤖 AutoImprove started — {datetime.now().strftime('%Y-%m-%d %H:%M')}"]
+    results = [f"ðŸ¤– AutoImprove started â€” {datetime.now().strftime('%Y-%m-%d %H:%M')}"]
     if deadline is not None:
         results.append(f"   runtime cap: {deadline:.0f}s")
 
     # Track (loop_name, start_ts, end_ts, elapsed) so we can do a single
     # _load_log(1) call after all loops finish and attribute entries in memory.
     loop_timing: List[Dict] = []
+    loop_errors: List[str] = []
 
     for loop_name in ("daily_review", "ast_audit", "error_reduce", "suggest_core", "pattern_mining"):
         elapsed_so_far = time.time() - start
         if deadline is not None and elapsed_so_far >= deadline:
             results.append(
-                f"\n{divider}\n⏱ runtime cap reached ({elapsed_so_far:.1f}s ≥ {deadline:.0f}s) "
-                f"— skipping '{loop_name}' and remaining loops"
+                f"\n{divider}\nâ± runtime cap reached ({elapsed_so_far:.1f}s â‰¥ {deadline:.0f}s) "
+                f"â€” skipping '{loop_name}' and remaining loops"
             )
             break
 
         loop_start_ts = datetime.now().isoformat()
         loop_start_t  = time.time()
 
-        results.append(f"\n{divider}\n🔬 {loop_name}")
+        results.append(f"\n{divider}\nðŸ”¬ {loop_name}")
         try:
             loop_result = run_loop(loop_name, max_experiments)
         except Exception as loop_exc:
-            loop_result = f"❌ {loop_name} raised {type(loop_exc).__name__}: {loop_exc}"
-            sys.stderr.write(f"[autoimprove] run_all: {loop_name} failed — {loop_exc}\n")
+            loop_result = f"âŒ {loop_name} raised {type(loop_exc).__name__}: {loop_exc}"
+            sys.stderr.write(f"[autoimprove] run_all: {loop_name} failed â€” {loop_exc}\n")
+        if "ERROR" in loop_result or "Error" in loop_result or "raised " in loop_result or "Ã¢ÂÅ’" in loop_result or "âŒ" in loop_result:
+            loop_errors.append(loop_name)
         results.append(loop_result)
 
         loop_timing.append({
@@ -2974,7 +2974,7 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
         })
         time.sleep(0.5)
 
-    # Single log read — filter in memory per loop instead of one read per loop.
+    # Single log read â€” filter in memory per loop instead of one read per loop.
     all_new_entries = _load_log(1)
     loop_roi_data: List[Dict] = []
     for lt in loop_timing:
@@ -3011,19 +3011,25 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
         "total_elapsed": round(elapsed, 1),
     })
 
-    # Inline ROI table — quick overnight read
-    results.append(f"\n{divider}\n📊 Loop ROI (this run):")
+    # Inline ROI table â€” quick overnight read
+    results.append(f"\n{divider}\nðŸ“Š Loop ROI (this run):")
     results.append(f"  {'Loop':<22} {'Time':>6}  {'Impr/Total':>11}  {'ROI':>6}")
     results.append(f"  {'-'*22} {'-'*6}  {'-'*11}  {'-'*6}")
     for lr in loop_roi_data:
-        roi_str  = f"{lr['roi']:.0%}" if lr["roi"] is not None else "—"
-        flag     = " ⚠️" if lr["total"] > 0 and lr["roi"] == 0.0 else ""
+        roi_str  = f"{lr['roi']:.0%}" if lr["roi"] is not None else "â€”"
+        flag     = " âš ï¸" if lr["total"] > 0 and lr["roi"] == 0.0 else ""
         results.append(
             f"  {lr['loop']:<22} {lr['elapsed']:>5.1f}s  "
             f"{lr['improved']}/{lr['total']:>2} improved  {roi_str:>5}{flag}"
         )
 
-    results.append(f"\n{divider}\n✅ run_all complete — {elapsed:.1f}s total")
+    if loop_errors:
+        results.append(
+            f"\n{divider}\nERROR: run_all completed with loop errors: "
+            f"{', '.join(loop_errors)} - {elapsed:.1f}s total"
+        )
+    else:
+        results.append(f"\n{divider}\nrun_all complete - {elapsed:.1f}s total")
     results.append("Review core suggestions: autoimprove.list_suggestions()")
     results.append("Review skill proposals:  autoimprove.list_ideas()")
     results.append("Historical loop ROI:     autoimprove.loop_roi()")
@@ -3032,7 +3038,7 @@ def run_all(max_experiments=5, max_runtime_seconds=25) -> str:
 
 def schedule_nightly(run_time: str = "2am", max_experiments=5) -> str:
     """
-    Put all improvement loops on autopilot — schedules run_all() every night.
+    Put all improvement loops on autopilot â€” schedules run_all() every night.
 
     Args:
         run_time:        When to run (e.g. '2am', '3am', 'midnight')
@@ -3045,23 +3051,23 @@ def schedule_nightly(run_time: str = "2am", max_experiments=5) -> str:
     try:
         sched = _import_skill("scheduler")
     except ImportError as e:
-        return f"❌ scheduler not available: {e}"
+        return f"âŒ scheduler not available: {e}"
 
     prompt = (
         f"Run overnight self-improvement on all skills. "
-        f"Call autoimprove.run_all({max_experiments}, max_runtime_seconds=None) — this audits and fixes dynamic skills "
+        f"Call autoimprove.run_all({max_experiments}, max_runtime_seconds=None) â€” this audits and fixes dynamic skills "
         f"automatically, and queues suggestions for core skills for the user to review."
     )
     # Build an 'every' string that anchors to the requested run_time so the
     # scheduler fires at the right hour instead of just "+24h from now".
     run_time_clean = str(run_time).strip().lower()
-    # Normalise common shorthand: '2am' → 'every day at 2am'
+    # Normalise common shorthand: '2am' -> 'every day at 2am'
     if re.match(r'^\d{1,2}(am|pm)$', run_time_clean):
         every_str = f"every day at {run_time_clean}"
     elif run_time_clean == "midnight":
-        every_str = "every day at midnight"
+        every_str = "every day at 12am"
     elif run_time_clean == "noon":
-        every_str = "every day at noon"
+        every_str = "every day at 12pm"
     elif run_time_clean.startswith("every"):
         every_str = run_time_clean  # already a valid natural-language spec
     else:
@@ -3079,15 +3085,14 @@ def schedule_nightly(run_time: str = "2am", max_experiments=5) -> str:
         if hasattr(kb, "schedule_nightly_kb"):
             _kb_result = "\n" + kb.schedule_nightly_kb(run_time)
     except Exception as _kb_err:
-        _kb_result = f"\n⚠️  KB schedule skipped: {_kb_err}"
+        _kb_result = f"\nâš ï¸  KB schedule skipped: {_kb_err}"
 
     return (
-        f"✅ Nightly improvement loop scheduled (every 24h from now):\n"
-        f"   Note: exact start time is not enforced — job runs ~24h after first schedule.\n"
+        f"Nightly improvement loop scheduled ({every_str}):\n"
         f"{result}{_kb_result}\n\n"
         f"In the morning:\n"
-        f"  autoimprove.report(1)          → see what was auto-fixed overnight\n"
-        f"  autoimprove.list_suggestions() → review proposed fixes for core skills"
+        f"  autoimprove.report(1)          â†’ see what was auto-fixed overnight\n"
+        f"  autoimprove.list_suggestions() â†’ review proposed fixes for core skills"
     )
 
 
@@ -3102,7 +3107,7 @@ def report(days=7) -> str:
     entries = _load_log(days)
     if not entries:
         return (
-            f"📭 No experiments recorded in the last {days} days.\n"
+            f"ðŸ“­ No experiments recorded in the last {days} days.\n"
             f"Run: autoimprove.run_all() or autoimprove.schedule_nightly()"
         )
 
@@ -3143,25 +3148,25 @@ def report(days=7) -> str:
         fp_rate_str = str(regressions)
 
     lines = [
-        f"📈 AutoImprove Report — last {days} day(s)",
+        f"ðŸ“ˆ AutoImprove Report â€” last {days} day(s)",
         "=" * 52,
         f"Experiments run      : {total}",
-        f"  ✅ Improved        : {improved}",
-        f"  🔄 Reverted        : {reverted}",
-        f"  —  No change       : {no_change}",
-        f"  📋 Reviews/scans   : {reviews}",
+        f"  âœ… Improved        : {improved}",
+        f"  ðŸ”„ Reverted        : {reverted}",
+        f"  â€”  No change       : {no_change}",
+        f"  ðŸ“‹ Reviews/scans   : {reviews}",
         f"Core suggestions     : {pending_count} pending review",
     ]
     if fp_rate_str:
-        lines.append(f"  ⚠️  Fix regressions : {fp_rate_str}  ← fixes that didn't hold")
+        lines.append(f"  âš ï¸  Fix regressions : {fp_rate_str}  â† fixes that didn't hold")
 
     if has_conf:
         lines += [
             "",
             "Confidence breakdown (MAD-based noise floor):",
-            f"  🟢 Genuine (≥2×)    : {genuine}",
-            f"  🟡 Marginal (1–2×)  : {marginal}",
-            f"  🔴 Within noise (<1×): {noise}",
+            f"  ðŸŸ¢ Genuine (â‰¥2Ã—)    : {genuine}",
+            f"  ðŸŸ¡ Marginal (1â€“2Ã—)  : {marginal}",
+            f"  ðŸ”´ Within noise (<1Ã—): {noise}",
         ]
         if len(period_deltas) >= MAD_MIN_SAMPLES:
             avg_delta = sum(period_deltas) / len(period_deltas)
@@ -3171,21 +3176,21 @@ def report(days=7) -> str:
         # was added to the schema (confidence: None) vs. genuinely no data yet.
         if improved > 0:
             lines.append(
-                f"  Confidence          : — (this window's {improved} IMPROVED "
-                "entr(y/ies) predate the confidence field — new runs will populate it)"
+                f"  Confidence          : â€” (this window's {improved} IMPROVED "
+                "entr(y/ies) predate the confidence field â€” new runs will populate it)"
             )
         else:
-            lines.append(f"  Confidence          : — (need {MAD_MIN_SAMPLES}+ IMPROVED experiments for MAD baseline)")
+            lines.append(f"  Confidence          : â€” (need {MAD_MIN_SAMPLES}+ IMPROVED experiments for MAD baseline)")
 
     if skill_wins:
         lines.append("")
         lines.append("Top improved skills:")
         for skill, wins in sorted(skill_wins.items(), key=lambda x: x[1], reverse=True):
-            lines.append(f"  • {skill}: {wins} fix(es)")
+            lines.append(f"  â€¢ {skill}: {wins} fix(es)")
 
     if pending_count:
         lines.append("")
-        lines.append(f"⏳ {pending_count} core skill fix(es) waiting for your approval:")
+        lines.append(f"â³ {pending_count} core skill fix(es) waiting for your approval:")
         lines.append("   Run: autoimprove.list_suggestions()")
 
     lines.append("")
@@ -3195,16 +3200,16 @@ def report(days=7) -> str:
         outcome = e.get("outcome", "?")
         track   = f"[{e['track']}] " if e.get("track") else ""
         if outcome in ("REVIEW", "SUGGESTED"):
-            lines.append(f"  {ts}  📋  {e.get('loop', 'review')}")
+            lines.append(f"  {ts}  ðŸ“‹  {e.get('loop', 'review')}")
         else:
             skill  = e.get("skill", "?")
             issue  = e.get("issue_type", "?")
             before = e.get("before_score", "?")
             after  = e.get("after_score", "?")
-            icon   = "✅" if outcome == "IMPROVED" else ("🔄" if outcome == "REVERTED" else "—")
+            icon   = "âœ…" if outcome == "IMPROVED" else ("ðŸ”„" if outcome == "REVERTED" else "â€”")
             conf   = e.get("confidence_label", "")
             conf_str = f"  {conf}" if conf and outcome == "IMPROVED" else ""
-            lines.append(f"  {ts}  {icon}  {track}{skill} [{issue}] {before}→{after}{conf_str}")
+            lines.append(f"  {ts}  {icon}  {track}{skill} [{issue}] {before}â†’{after}{conf_str}")
 
     return "\n".join(lines)
 
@@ -3214,7 +3219,7 @@ def loop_roi(runs: int = 10) -> str:
     Show per-loop historical ROI averaged over the last N run_all() runs.
 
     ROI = experiments that improved / total experiments run per loop.
-    Loops with consistently 0 ROI are flagged — candidates for skipping or
+    Loops with consistently 0 ROI are flagged â€” candidates for skipping or
     reducing frequency once you have enough history to trust the signal.
 
     Args:
@@ -3230,8 +3235,8 @@ def loop_roi(runs: int = 10) -> str:
 
     if not IMPROVE_LOG.exists():
         return (
-            "📭 No improvement log yet.\n"
-            "Run autoimprove.run_all() — ROI data is collected each time it completes."
+            "ðŸ“­ No improvement log yet.\n"
+            "Run autoimprove.run_all() â€” ROI data is collected each time it completes."
         )
 
     # Collect the last N RUN_ALL summary entries from the log
@@ -3247,11 +3252,11 @@ def loop_roi(runs: int = 10) -> str:
             except json.JSONDecodeError:
                 continue
     except Exception as exc:
-        return f"❌ Could not read improvement log: {exc}"
+        return f"âŒ Could not read improvement log: {exc}"
 
     if not run_summaries:
         return (
-            "📭 No run_all() history yet — ROI data appears after the first completed run.\n"
+            "ðŸ“­ No run_all() history yet â€” ROI data appears after the first completed run.\n"
             "Run: autoimprove.run_all()"
         )
 
@@ -3259,7 +3264,7 @@ def loop_roi(runs: int = 10) -> str:
 
     if len(recent) < MAD_MIN_SAMPLES:
         sample_warn = (
-            f"\n⚠️  Only {len(recent)} run(s) recorded — ROI estimates are unreliable "
+            f"\nâš ï¸  Only {len(recent)} run(s) recorded â€” ROI estimates are unreliable "
             f"until at least {MAD_MIN_SAMPLES} runs have completed.\n"
         )
     else:
@@ -3278,10 +3283,10 @@ def loop_roi(runs: int = 10) -> str:
             loop_stats[name]["runs"]     += 1
 
     if not loop_stats:
-        return "📭 No per-loop data in the stored run_all() entries — run again to populate."
+        return "ðŸ“­ No per-loop data in the stored run_all() entries â€” run again to populate."
 
     # discover_patterns has different semantics (proposals/qualifying, not experiments)
-    # — pull it out so it doesn't pollute the experiment-loop sort.
+    # â€” pull it out so it doesn't pollute the experiment-loop sort.
     dp_stats = loop_stats.pop("discover_patterns", None)
 
     sorted_loops = sorted(
@@ -3291,7 +3296,7 @@ def loop_roi(runs: int = 10) -> str:
     )
 
     lines = [
-        f"📊 Loop ROI — last {len(recent)} run_all() run(s)",
+        f"ðŸ“Š Loop ROI â€” last {len(recent)} run_all() run(s)",
         "=" * 58,
         f"  {'Loop':<22} {'Avg ROI':>8}  {'Improved':>9}  {'Total':>7}  {'Avg Time':>9}",
         f"  {'-'*22} {'-'*8}  {'-'*9}  {'-'*7}  {'-'*9}",
@@ -3300,21 +3305,21 @@ def loop_roi(runs: int = 10) -> str:
     for name, s in sorted_loops:
         avg_roi  = s["improved"] / max(1, s["total"])
         avg_time = s["elapsed"] / max(1, s["runs"])
-        roi_str  = f"{avg_roi:.0%}" if s["total"] > 0 else "—"
-        flag     = " ⚠️" if s["total"] > 0 and avg_roi == 0.0 else ""
+        roi_str  = f"{avg_roi:.0%}" if s["total"] > 0 else "â€”"
+        flag     = " âš ï¸" if s["total"] > 0 and avg_roi == 0.0 else ""
         lines.append(
             f"  {name:<22} {roi_str:>8}  {s['improved']:>9}  {s['total']:>7}  {avg_time:>7.1f}s{flag}"
         )
 
-    # discover_patterns row — uses discovery rate (proposed/qualifying), not experiment ROI
+    # discover_patterns row â€” uses discovery rate (proposed/qualifying), not experiment ROI
     if dp_stats is not None:
         dp_time = dp_stats["elapsed"] / max(1, dp_stats["runs"])
         if dp_stats["total"] > 0:
             disc_rate = dp_stats["improved"] / dp_stats["total"]
             disc_str  = f"{disc_rate:.0%}"
-            dp_flag   = " ⚠️" if disc_rate == 0.0 else ""
+            dp_flag   = " âš ï¸" if disc_rate == 0.0 else ""
         else:
-            disc_str = "—"
+            disc_str = "â€”"
             dp_flag  = ""
         lines += [
             f"  {'-'*22} {'-'*8}  {'-'*9}  {'-'*7}  {'-'*9}",
@@ -3324,10 +3329,10 @@ def loop_roi(runs: int = 10) -> str:
 
     lines += [
         f"  {'='*58}",
-        "⚠️  = zero improvements across all sampled runs",
-        "    → consider running: autoimprove.run_loop('<name>') to spot-check",
-        "    → or skip that loop in a custom run_all call",
-        "(*) discover_patterns: Proposed / Qualifying — discovery rate, not experiment ROI.",
+        "âš ï¸  = zero improvements across all sampled runs",
+        "    â†’ consider running: autoimprove.run_loop('<name>') to spot-check",
+        "    â†’ or skip that loop in a custom run_all call",
+        "(*) discover_patterns: Proposed / Qualifying â€” discovery rate, not experiment ROI.",
         f"\nData from {len(recent)} of {len(run_summaries)} total recorded run_all() runs.{sample_warn}",
     ]
     return "\n".join(lines)
@@ -3353,20 +3358,20 @@ def status() -> str:
     open_ideas     = sum(1 for i in ideas if i.get("status") == "open")
 
     return "\n".join([
-        "🤖 AutoImprove — Autoresearch Loop for Trinity",
+        "ðŸ¤– AutoImprove â€” Autoresearch Loop for Trinity",
         "=" * 52,
         "",
         "Two-track system:",
-        "  DYNAMIC → auto-fix  (snapshot → patch → test → keep or restore)",
-        "  CORE    → suggest   (audit → patch preview → you approve → apply)",
+        "  DYNAMIC â†’ auto-fix  (snapshot â†’ patch â†’ test â†’ keep or restore)",
+        "  CORE    â†’ suggest   (audit â†’ patch preview â†’ you approve â†’ apply)",
         "",
         "Loops:",
-        "  • daily_review      — learning review, no code changes",
-        "  • ast_audit         — auto-fix bare_except & missing_timeout in dynamic skills",
-        "  • error_reduce      — auto-fix top error pattern + surface lesson proposals",
-        "  • suggest_core      — audit core skills, queue suggestions for your review",
-        "  • pattern_mining    — scan session history for recurring task patterns, park skill proposals",
-        "  • discover_patterns — DEPRECATED (use lessons_to_proposals instead)",
+        "  â€¢ daily_review      â€” learning review, no code changes",
+        "  â€¢ ast_audit         â€” auto-fix deterministic AUTO_FIXABLE issues in dynamic skills",
+        "  â€¢ error_reduce      â€” auto-fix top error pattern + surface lesson proposals",
+        "  â€¢ suggest_core      â€” audit core skills, queue suggestions for your review",
+        "  â€¢ pattern_mining    â€” scan session history for recurring task patterns, park skill proposals",
+        "  â€¢ discover_patterns â€” DEPRECATED (use lessons_to_proposals instead)",
         "",
         f"Dynamic skills ({len(dynamic_skills)}): {', '.join(dynamic_skills) or 'none'}",
         f"Core skills    ({len(core_skills)}): {len(core_skills)} files in /app/skills/core/",
@@ -3376,29 +3381,29 @@ def status() -> str:
         f"Last experiment     : {last_run}",
         "",
         "Commands:",
-        "  autoimprove.research('any topic', depth='deep')     → web research, saved to notes",
-        "  autoimprove.run_all(5)                              → run all loops tonight",
-        "  autoimprove.suggest_core()                          → scan all core skills now",
-        "  autoimprove.list_suggestions()                      → review pending core fixes",
-        "  autoimprove.apply_suggestion('web', 'bare_except')  → approve and apply one fix",
-        "  autoimprove.lessons_to_proposals()                  → surface recurring error patterns",
-        "  autoimprove.list_proposals()                        → review non-auto-fixable patterns",
-        "  autoimprove.park_idea('description', 'source')      → park an idea for later",
-        "  autoimprove.list_ideas()                            → show open improvement ideas",
-        "  autoimprove.dismiss_idea('<id>')                    → mark idea as done/dismissed",
-        "  autoimprove.loop_roi()                              → per-loop historical ROI",
-        "  autoimprove.schedule_nightly('2am')                 → set on autopilot",
-        "  autoimprove.report(7)                               → last 7 days",
+        "  autoimprove.research('any topic', depth='deep')     â†’ web research, saved to notes",
+        "  autoimprove.run_all(5)                              â†’ run all loops tonight",
+        "  autoimprove.suggest_core()                          â†’ scan all core skills now",
+        "  autoimprove.list_suggestions()                      â†’ review pending core fixes",
+        "  autoimprove.apply_suggestion('web', 'bare_except')  â†’ approve and apply one fix",
+        "  autoimprove.lessons_to_proposals()                  â†’ surface recurring error patterns",
+        "  autoimprove.list_proposals()                        â†’ review non-auto-fixable patterns",
+        "  autoimprove.park_idea('description', 'source')      â†’ park an idea for later",
+        "  autoimprove.list_ideas()                            â†’ show open improvement ideas",
+        "  autoimprove.dismiss_idea('<id>')                    â†’ mark idea as done/dismissed",
+        "  autoimprove.loop_roi()                              â†’ per-loop historical ROI",
+        "  autoimprove.schedule_nightly('2am')                 â†’ set on autopilot",
+        "  autoimprove.report(7)                               â†’ last 7 days",
         "",
         "Safety:",
-        "  • Dynamic: only skills/dynamic/ auto-modified, snapshot always taken",
-        "  • Core: NEVER auto-modified — requires your explicit apply_suggestion() call",
-        "  • Runtime smoke test gates every change (dynamic and core alike)",
-        "  • Restores original file if test fails",
+        "  â€¢ Dynamic: only skills/dynamic/ auto-modified, snapshot always taken",
+        "  â€¢ Core: NEVER auto-modified â€” requires your explicit apply_suggestion() call",
+        "  â€¢ Runtime smoke test gates every change (dynamic and core alike)",
+        "  â€¢ Restores original file if test fails",
     ])
 
 
-# ── Design-first brainstorming ────────────────────────────────────────────────
+# â”€â”€ Design-first brainstorming â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 DESIGNS_DIR = MEMORY_DIR / "designs"
 
@@ -3419,7 +3424,7 @@ def design(task: str) -> str:
     """
     task = str(task).strip()
     if not task:
-        return "❌ task cannot be empty."
+        return "âŒ task cannot be empty."
 
     # Scan what skills already exist (core + dynamic)
     core_skills, dynamic_skills = [], []
@@ -3453,40 +3458,40 @@ def design(task: str) -> str:
     ]
     if scan_errors:
         for err in scan_errors:
-            lines.append(f"⚠️  Could not scan skills directory — {err}")
+            lines.append(f"âš ï¸  Could not scan skills directory â€” {err}")
         lines.append("   Skill overlap check may be incomplete.")
         lines.append("")
     if related:
         lines.append(f"Potentially related skills: {', '.join(related)}")
-        lines.append("→ Check if one of these can be extended before creating a new skill.")
+        lines.append("â†’ Check if one of these can be extended before creating a new skill.")
     else:
-        lines.append("No directly related skills found — likely needs a new skill.")
+        lines.append("No directly related skills found â€” likely needs a new skill.")
 
     lines += [
         "",
         "### Clarifying Question",
         "Ask the user ONE of the following (pick the most critical unknown):",
         "  A) What is the expected input format / data source?",
-        "  B) What should the output look like — string, file, notification?",
+        "  B) What should the output look like â€” string, file, notification?",
         "  C) Will this run on demand or on a schedule?",
         "  D) Are there auth/credential requirements?",
         "  E) Should this extend an existing skill or be standalone?",
         "",
         "### Proposed Approaches",
         "",
-        "**Option 1 — Extend existing skill** (if a related skill exists)",
+        "**Option 1 â€” Extend existing skill** (if a related skill exists)",
         "  + No new file, lower maintenance surface",
         "  + Fits naturally into existing DOC string and __all__",
         "  - May grow the skill beyond its original scope",
         "  - Only viable if the overlap is genuine, not superficial",
         "",
-        "**Option 2 — New dynamic skill** (default path)",
+        "**Option 2 â€” New dynamic skill** (default path)",
         "  + Isolated, easy to audit and delete",
         "  + Sandboxed by create_skill's AST + blocklist gates",
         "  - Adds to skill count; name must be unique and descriptive",
         "  - Must follow NAME/DOC/function convention",
         "",
-        "**Option 3 — Compose from existing skills** (no new code)",
+        "**Option 3 â€” Compose from existing skills** (no new code)",
         "  + Zero new files, zero security surface",
         "  + Trinity orchestrates existing tools via chat instructions",
         "  - Only works if existing skills already cover all sub-steps",
@@ -3511,7 +3516,7 @@ def write_spec(task: str, approach: str, details: str) -> str:
 
     Args:
         task:     Plain-language task description (used for filename slug).
-        approach: Chosen approach label, e.g. "Option 2 — New dynamic skill".
+        approach: Chosen approach label, e.g. "Option 2 â€” New dynamic skill".
         details:  Free-form spec content: inputs, outputs, edge cases, constraints.
 
     Returns:
@@ -3522,7 +3527,7 @@ def write_spec(task: str, approach: str, details: str) -> str:
     details = str(details).strip()
 
     if not task or not details:
-        return "❌ task and details are required."
+        return "âŒ task and details are required."
 
     slug = re.sub(r'[^\w]+', '-', task.lower()).strip('-')[:50]
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -3548,12 +3553,12 @@ def write_spec(task: str, approach: str, details: str) -> str:
         DESIGNS_DIR.mkdir(parents=True, exist_ok=True)
         spec_path = DESIGNS_DIR / filename
         spec_path.write_text(content, encoding="utf-8")
-        return f"✅ Spec saved to /app/memory/designs/{filename} — show this to the user for approval before writing any code."
+        return f"âœ… Spec saved to /app/memory/designs/{filename} â€” show this to the user for approval before writing any code."
     except Exception as e:
-        return f"❌ Failed to write spec: {e}"
+        return f"âŒ Failed to write spec: {e}"
 
 
-# ── Export list ────────────────────────────────────────────────────────────────
+# â”€â”€ Export list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def should_create_skill(
     execution_logs: list,
@@ -3574,7 +3579,7 @@ def should_create_skill(
             "create": bool,
             "reason": str,
             "trigger": str,   # "complexity" | "error_recovery" | "correction" | "workflow" | "none"
-            "complexity_score": float,  # 0.0–1.0
+            "complexity_score": float,  # 0.0â€“1.0
         }
     """
     if not execution_logs:
@@ -3585,18 +3590,18 @@ def should_create_skill(
             "complexity_score": 0.0,
         }
 
-    # Skip informational queries — read-only lookups are never worth capturing as a skill.
+    # Skip informational queries â€” read-only lookups are never worth capturing as a skill.
     _QUERY_SIGNALS = (
         "how is", "how are", "how does", "what is", "what are", "show me",
         "tell me", "check ", "can you show", "which ", "is there", "do you",
-        "kako je", "kako su", "šta je", "šta su", "kako radi", "da li",
-        "koliko", "gde je", "koji je", "trenutno", "podešen", "podešavanja",
+        "kako je", "kako su", "Å¡ta je", "Å¡ta su", "kako radi", "da li",
+        "koliko", "gde je", "koji je", "trenutno", "podeÅ¡en", "podeÅ¡avanja",
     )
     _msg_lower = user_message.lower()
     if any(sig in _msg_lower for sig in _QUERY_SIGNALS):
         return {
             "create": False,
-            "reason": "informational query — read-only tasks are not worth capturing as a skill",
+            "reason": "informational query â€” read-only tasks are not worth capturing as a skill",
             "trigger": "none",
             "complexity_score": 0.0,
         }
@@ -3627,7 +3632,7 @@ def should_create_skill(
 
     if _has_correction:
         trigger = "correction"
-        reason  = "User corrected the approach — the fix pattern may be worth capturing as a skill"
+        reason  = "User corrected the approach â€” the fix pattern may be worth capturing as a skill"
     elif total_calls >= 5 and len(unique_skills) >= 3:
         trigger = "workflow"
         reason  = (
@@ -3637,7 +3642,7 @@ def should_create_skill(
     elif error_calls >= 2 and success_calls > 0 and total_calls >= 3:
         trigger = "error_recovery"
         reason  = (
-            f"Recovered from {error_calls} error(s) before success — "
+            f"Recovered from {error_calls} error(s) before success â€” "
             "the successful path is worth capturing"
         )
     elif total_calls >= 5:
