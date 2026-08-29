@@ -1,12 +1,23 @@
 model_list:
-  # Local Gemma 4 26B — fast, no latency, no cost
+
+  # Qwen3.5 9B — fast dense model, default driver
   - model_name: trinity-default
     litellm_params:
-      model: "ollama/gemma4:26b-a4b-it-q4_K_M"
+      model: "ollama/qwen3.5:9b"
       api_base: "http://ollama:11434"
       supports_function_calling: true
     model_info:
       supports_vision: true
+      
+   # Qwen3.8 27B MoE (~3B active) — heavier tasks, better reasoning
+  - model_name: qwen-smart
+    litellm_params:
+      model: "ollama/qwen3.8-27b-q4ks"
+      api_base: "http://ollama:11434"
+      supports_function_calling: true
+    model_info:
+      supports_vision: true
+
 
   # Cloud models — switch by setting OLLAMA_MODEL env var or updating litellm code
   # Uncomment below and use MODEL_SOURCE=cloud to enable
