@@ -90,7 +90,21 @@ _TESTS_DIR = _MEM_DIR / "tests"
 # ============================================================================
 
 def _load_lessons() -> List[Dict]:
-    """Load learned lessons from persistent storage, deduplicating by hash."""
+    """Load learned lessons from persistent storage, deduplicating by hash.
+
+    Cached by file mtime — repeated calls within the same process (e.g. one
+    check_lessons() per skill dispatch, or check_for_learned_fix() called once
+    per issue in analyze_skill_code()) are O(1) after the first read instead of
+    re-reading and re-parsing the whole file every time.
+    """
+    try:
+        current_mtime = LESSONS_FILE.stat().st_mtime if LESSONS_FILE.exists() else None
+    except OSError:
+        current_mtime = None
+
+    if _lessons_cache["data"] is not None and _lessons_cache["mtime"] == current_mtime:
+        return list(_lessons_cache["data"])  # shallow copy — callers can't mutate the cache
+
     lessons = []
     seen_hashes: set = set()
     if LESSONS_FILE.exists():
@@ -110,6 +124,9 @@ def _load_lessons() -> List[Dict]:
                             continue
         except (IOError, OSError):
             pass
+
+    _lessons_cache["data"] = list(lessons)
+    _lessons_cache["mtime"] = current_mtime
     return lessons
 
 def _save_lesson(lesson: Dict) -> bool:
@@ -119,6 +136,7 @@ def _save_lesson(lesson: Dict) -> bool:
         with open(LESSONS_FILE, 'a', encoding='utf-8') as f:
             f.write(json.dumps(lesson, ensure_ascii=False) + '\n')
         _patterns_cache["data"] = None  # invalidate so next read recomputes counts
+        _lessons_cache["data"] = None   # invalidate so next _load_lessons() re-reads
         return True
     except (IOError, OSError) as e:
         print(f"⚠️ Failed to save lesson: {e}")
@@ -508,6 +526,7 @@ def _try_auto_fix_signature(skill_name: str, error_type: str, error_msg: str) ->
 
             if patched:
                 LESSONS_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                _lessons_cache["data"] = None  # invalidate — file was modified outside _save_lesson()
                 print(f"[sig-fix] {skill_name}.{error_type} → {fix_str[:80]}")
         except Exception as e:
             print(f"[sig-fix] failed for {skill_name}.{error_type}: {e}")
