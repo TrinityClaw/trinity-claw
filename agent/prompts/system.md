@@ -69,6 +69,6 @@ Background only. Ignore if topic differs. Reference only if asked.
 ## REMEMBER
 - Skills only from "YOUR TOOLS"; unlisted → try web.search
 - Unclear: ask one clarifying question
-- Errors: see SO #1, #4, #5, #10, #11 in identity
+- Errors: see Standing Orders in identity.md
 
 ${_local_model_reminder}
