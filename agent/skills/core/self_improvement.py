@@ -22,6 +22,12 @@ import requests as _requests
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
+import sys as _sys
+_CORE_DIR = str(Path(__file__).parent)
+if _CORE_DIR not in _sys.path:
+    _sys.path.insert(0, _CORE_DIR)
+
+from _store_utils import _file_lock
 
 # ============================================================================
 # SKILL METADATA (Required for skill loader)
@@ -133,8 +139,9 @@ def _save_lesson(lesson: Dict) -> bool:
     """Save a new lesson to persistent storage. Returns True on success."""
     try:
         LESSONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(LESSONS_FILE, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(lesson, ensure_ascii=False) + '\n')
+        with _file_lock(LESSONS_FILE):
+            with open(LESSONS_FILE, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(lesson, ensure_ascii=False) + '\n')
         _patterns_cache["data"] = None  # invalidate so next read recomputes counts
         _lessons_cache["data"] = None   # invalidate so next _load_lessons() re-reads
         return True
@@ -503,29 +510,31 @@ def _try_auto_fix_signature(skill_name: str, error_type: str, error_msg: str) ->
             if not fix_str:
                 return
 
-            # Patch the most recent lesson for this skill+error_type with the fix
             if not LESSONS_FILE.exists():
                 return
 
-            lines = LESSONS_FILE.read_text(encoding="utf-8").splitlines()
             patched = False
-            for i in range(len(lines) - 1, -1, -1):
-                if not lines[i].strip():
-                    continue
-                try:
-                    lesson = json.loads(lines[i])
-                    if (lesson.get("skill") == skill_name
-                            and lesson.get("error_type") == error_type
-                            and not lesson.get("fix_applied")):
-                        lesson["fix_applied"] = fix_str
-                        lines[i] = json.dumps(lesson, ensure_ascii=False)
-                        patched = True
-                        break
-                except json.JSONDecodeError:
-                    continue
+            with _file_lock(LESSONS_FILE):
+                lines = LESSONS_FILE.read_text(encoding="utf-8").splitlines()
+                for i in range(len(lines) - 1, -1, -1):
+                    if not lines[i].strip():
+                        continue
+                    try:
+                        lesson = json.loads(lines[i])
+                        if (lesson.get("skill") == skill_name
+                                and lesson.get("error_type") == error_type
+                                and not lesson.get("fix_applied")):
+                            lesson["fix_applied"] = fix_str
+                            lines[i] = json.dumps(lesson, ensure_ascii=False)
+                            patched = True
+                            break
+                    except json.JSONDecodeError:
+                        continue
+
+                if patched:
+                    LESSONS_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
             if patched:
-                LESSONS_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
                 _lessons_cache["data"] = None  # invalidate — file was modified outside _save_lesson()
                 print(f"[sig-fix] {skill_name}.{error_type} → {fix_str[:80]}")
         except Exception as e:
