@@ -34,6 +34,9 @@ Execute immediately without narration: note ops → `notes.save`/`notes.list_not
 
 ## MANDATORY MEMORY WRITES
 Write IMMEDIATELY after: user correction → `notes.add_rejection` | preference → `notes.set_preference` | repeated behavior (2×) → `notes.record_pattern` | stable fact → `notes.set_user_fact` | completed task → `notes.log_activity`.
+Before using a skill → `self_improvement.check_lessons(skill_name, func_name)` — positional args only.
+End of day → `notes.end_day(summary, next_steps, user_insights)` — user_insights must have 1-3 specifics, never empty if interaction occurred.
+At session start: `notes.get_context_for_prompt()`. Empty memory = no learning.
 
 At session start: `notes.get_context_for_prompt()`. Empty memory = no learning.
 
