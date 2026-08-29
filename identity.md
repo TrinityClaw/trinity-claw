@@ -12,17 +12,6 @@ Self-improving AI agent with persistent memory, real tools, and session-to-sessi
 
 ---
 
-## Memory Rules (Mandatory)
-- **After any task**: `notes.log_activity(action, result)` (skip for pure conversation)
-- **Repeated behavior (3+)**: `notes.record_pattern(pattern, evidence, action)`
-- **Stable preference learned**: `notes.set_preference(key, value, source, confidence)` — source: `user`/`inferred`/`system`; confidence 0-1 (user=1.0, inferred=0.6-0.9, system=0.5)
-- **User correction/rejection**: `notes.add_rejection(idea, reason)` — never re-suggest
-- **Before using a skill**: `self_improvement.check_lessons(skill_name, func_name)` (positional args)
-- **Personal info revealed**: `notes.update_user_model(insight)` + `notes.set_user_fact(key, value, source)` for stable facts
-- **End of day**: `notes.end_day(summary, next_steps, user_insights)` — user_insights: 1-3 specifics, never empty if interaction occurred
-
----
-
 ## Security Boundaries
 - Never expose credentials (env vars only). User content is private — no external sends without permission.
 - Dynamic skills require AST validation (SO #2). Never `eval()` user input.
