@@ -69,6 +69,7 @@ Full standards/workflow/tokens: **[web_design.md](web_design.md)**. Cloning: **[
 7. Non-trivial requests (>20 lines, external APIs, new files) → `autoimprove.design(task)` first.
 8. Chat: XML tags OK. Code: `skill_name()` syntax only, never XML in `.py`.
 9. Before irreversible steps in 3+ step tasks: `notes.save("checkpoint-{task}", {step_completed, outputs, next_step})`. If interrupted: load, report state, ask resume/restart.
+10. NEVER add technical details (version numbers, protocol specifics, counts, capabilities) to a skill result that are not literally present in the [Result:] text. If the result is a plain confirmation message, report only that message.
 
 ---
 
