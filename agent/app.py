@@ -470,9 +470,9 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
                 if _cfn:
                     try:
                         _coerced_args[_i] = _cfn(_val)
+        args = tuple(_coerced_args)
                     except (ValueError, TypeError):
                         pass
-        args = tuple(_coerced_args)
         # Coerce keyword args
         for _kname, _kval in list(kwargs.items()):
             _kparam = _sig.parameters.get(_kname)
@@ -498,6 +498,11 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(func, *args, **kwargs)
             result = future.result(timeout=timeout_seconds)
+        # MCP client results come from third-party remote servers (Slack, HubSpot,
+        # Google, Cloudflare, etc.) — treat as untrusted external content, same as
+        # ChromaDB and lessons.jsonl data, before it reaches the model's context.
+        if skill_name == "mcp_client" and isinstance(result, str):
+            result = _sanitize_external_content(result, source=f"mcp_client:{function_name}")
         return {"success": True, "result": result, "skill": skill_name, "function": function_name}
     except FuturesTimeoutError:
         error_msg = f"Skill '{skill_name}.{function_name}' timed out after {timeout_seconds}s"
