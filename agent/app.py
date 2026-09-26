@@ -470,9 +470,9 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
                 if _cfn:
                     try:
                         _coerced_args[_i] = _cfn(_val)
-        args = tuple(_coerced_args)
                     except (ValueError, TypeError):
                         pass
+        args = tuple(_coerced_args)
         # Coerce keyword args
         for _kname, _kval in list(kwargs.items()):
             _kparam = _sig.parameters.get(_kname)
