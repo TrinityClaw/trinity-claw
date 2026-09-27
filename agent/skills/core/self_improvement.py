@@ -91,9 +91,7 @@ PATTERNS_FILE = _MEM_DIR / "error_patterns.json"
 _AUTO_FIX_LOG = _MEM_DIR / "auto_fix_log.jsonl"
 _TESTS_DIR = _MEM_DIR / "tests"
 
-# ============================================================================
-# MISTAKE MEMORY: Learn from every error
-# ============================================================================
+_lessons_cache: Dict = {"data": None, "mtime": None}
 
 def _load_lessons() -> List[Dict]:
     """Load learned lessons from persistent storage, deduplicating by hash.
