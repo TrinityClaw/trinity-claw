@@ -32,43 +32,27 @@ services:
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
+    gpus: all
     ports:
-      - "11434:11434"
+      - "11435:11434"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_KEEP_ALIVE=5m
+      - OLLAMA_MAX_LOADED_MODELS=1   # forces ollama to unload one before loading another
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+      - OLLAMA_NUM_PREDICT=2048
+      - OLLAMA_NUM_CTX=8192
     volumes:
       - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 20
       start_period: 30s
     profiles:
-      - local # Only starts with: docker compose --profile local up -d
-
-  ollama-init:
-    image: curlimages/curl:latest
-    restart: "no"
-    entrypoint: ["curl", "-sf", "-X", "POST",
-                 "http://ollama:11434/api/pull",
-                 "-H", "Content-Type: application/json",
-                 "-d", "{\"name\":\"qwen3.5:9b\",\"stream\":false}",
-                 "--max-time", "0"]
-    depends_on:
-      ollama:
-        condition: service_healthy
-    profiles:
       - local
-
   web:
     image: nginx:alpine
     restart: unless-stopped
