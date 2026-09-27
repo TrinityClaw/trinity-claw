@@ -1672,7 +1672,7 @@ def save_session_history(session_id: str, messages: List[Dict], max_messages: in
         head_conv = []
         for m in head:
             if (
-                m.get("role") == "system"
+                m.get("role") == "user"
                 and isinstance(m.get("content"), str)
                 and m["content"].startswith("[EARLIER CONVERSATION SUMMARY]")
             ):
@@ -1684,8 +1684,14 @@ def save_session_history(session_id: str, messages: List[Dict], max_messages: in
             print(f"📝 Compressing {len(head_conv)} messages for session {session_id[:12]}..."
                   + (" (iterative update)" if existing_summary else ""))
             summary_text = summarize_messages(head_conv, existing_summary=existing_summary)
+            # NOTE: role is "user", not "system" — this message gets spliced into
+            # `history` and inserted mid-array (after the real system prompt) on the
+            # next turn. Some local model chat templates (e.g. Qwen3.8-27B GSQ-RCO)
+            # hard-error with "System message must be at the beginning" if a second
+            # system-role message appears anywhere but index 0. "user" avoids that
+            # for every model, local or cloud, with no behavior change in practice.
             summary_msg = {
-                "role": "system",
+                "role": "user",
                 "content": f"[EARLIER CONVERSATION SUMMARY]\n{summary_text}"
             }
             messages = [summary_msg] + tail
@@ -1835,6 +1841,54 @@ def _normalize_gemma_skill_tags(text: str) -> str:
     return re.sub(r'<skill_call:([\w.]+)\(([^)]*)\)>', _convert, text)
 
 
+def _normalize_qwen_tool_call_tags(text: str) -> str:
+    """Convert Qwen's native <tool_call>...</tool_call> blocks into Trinity's
+    <skill:name.func>args</skill:name.func> format."""
+    def _convert_tool_call(match):
+        block = match.group(1).strip()
+        # 1. JSON format: {"name": "...", "arguments": {...}}
+        if block.startswith("{") and block.endswith("}"):
+            try:
+                data = json.loads(block)
+                name = data.get("name", "")
+                args = data.get("arguments", {})
+                if isinstance(args, dict):
+                    content = json.dumps(args) if args else ""
+                else:
+                    content = str(args)
+                return f"<skill:{name}>{content}</skill:{name}>"
+            except Exception:
+                pass
+
+        # 2. XML format: <function=skill.func> ... </function> or <function name="skill.func">
+        fn_match = re.search(r'<function(?:=|\s+name=)["\']?([\w.]+)["\']?>(.*?)</function>', block, flags=re.DOTALL)
+        if fn_match:
+            skill_fn = fn_match.group(1).strip()
+            body = fn_match.group(2).strip()
+            # Extract parameters: <parameter=key>val</parameter> or <parameter name="key">val</parameter>
+            params = re.findall(r'<parameter(?:=|\s+name=)["\']?([\w.]+)["\']?>(.*?)</parameter>', body, flags=re.DOTALL)
+            if params:
+                param_dict = {k.strip(): v.strip() for k, v in params}
+                content = json.dumps(param_dict)
+            else:
+                content = body
+            return f"<skill:{skill_fn}>{content}</skill:{skill_fn}>"
+
+        # 3. Fallback: <function=skill.func> without closing </function>
+        fn_simple = re.search(r'<function(?:=|\s+name=)["\']?([\w.]+)["\']?>', block)
+        if fn_simple:
+            skill_fn = fn_simple.group(1).strip()
+            return f"<skill:{skill_fn}></skill:{skill_fn}>"
+
+        return match.group(0)
+
+    # Convert closed <tool_call>...</tool_call>
+    text = re.sub(r'<tool_call>(.*?)</tool_call>', _convert_tool_call, text, flags=re.DOTALL)
+    # Also handle unclosed <tool_call> if truncated
+    text = re.sub(r'<tool_call>(.*)$', _convert_tool_call, text, flags=re.DOTALL)
+    return text
+
+
 def _normalize_plain_skill_calls(text: str, known_skills: set) -> str:
     """Convert bare function-call style output like weather_api.get_weather(Nis) to
     <skill:weather_api.get_weather>Nis</skill:weather_api.get_weather>.
@@ -1885,6 +1939,10 @@ def execute_skill_tags(response_text: str) -> tuple:
     response_text = re.sub(r'\[skill:([\w.]+)\]', r'<skill:\1>', response_text)
     response_text = re.sub(r'\[/skill:([\w.]+)\]', r'</skill:\1>', response_text)
     response_text = re.sub(r'<(skill:[\w.]+)\]', r'<\1>', response_text)
+
+    # Normalize Gemma 4 and Qwen tool calls to <skill:...> tags
+    response_text = _normalize_gemma_skill_tags(response_text)
+    response_text = _normalize_qwen_tool_call_tags(response_text)
 
     # Rescue unclosed skill tags: if the model's output was truncated before the
     # closing tag (common with large file content), append the expected closing tag
@@ -2619,7 +2677,7 @@ def _call_llm(
             "stream": False,
             "think": _thinking_enabled,
             "options": {
-                "temperature": 1.0,
+                "temperature": float(os.getenv("OLLAMA_TEMPERATURE", "0.6" if _thinking_enabled else "1.0")),
                 "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "12288")),
                 "num_predict": _num_predict,
             }
@@ -2632,7 +2690,17 @@ def _call_llm(
         resp = requests.post(f"{ollama_base}/api/chat", json=payload, timeout=_ollama_timeout)
         resp.raise_for_status()
         _raw_msg = resp.json().get("message", {})
-        raw = _raw_msg.get("content") or ""
+        _content = (_raw_msg.get("content") or "").strip()
+        _thinking = (_raw_msg.get("thinking") or "").strip()
+
+        # If Ollama returned thinking as a separate field, wrap it in <think> tags
+        # so downstream tag-rescue and think-block handlers seamlessly process it.
+        if _thinking and _content:
+            raw = f"<think>{_thinking}</think>\n{_content}"
+        elif _thinking and not _content:
+            raw = f"<think>{_thinking}</think>"
+        else:
+            raw = _content
         # Normalize Ollama tool_calls → OpenAI format expected by _execute_tool_calls
         # Ollama: arguments is already a dict; OpenAI: arguments is a JSON string + needs id
         _ollama_tool_calls = _raw_msg.get("tool_calls") or []
@@ -3758,6 +3826,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 # We extract them and prepend to the response body so they still execute.
                 # Normalize Gemma 4's native <skill_call:name.func(args)> → <skill:name.func>args</skill:...>
                 ai_reply = _normalize_gemma_skill_tags(ai_reply)
+                ai_reply = _normalize_qwen_tool_call_tags(ai_reply)
 
                 _rescued_tags = []
                 for _think_match in re.finditer(r"<think>.*?</think>", ai_reply, flags=re.DOTALL):
@@ -3839,6 +3908,18 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                             ),
                         })
                         continue
+
+                    if not ai_reply.strip() and not all_execution_logs:
+                        if _local_continuation_pushes < 3:
+                            _local_continuation_pushes += 1
+                            print(f"⚠️  Iteration {iteration}: local thinking model output only reasoning with no content — push #{_local_continuation_pushes}")
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "You finished your thinking. Now output your final answer to the user or execute the appropriate skill tag immediately."
+                                ),
+                            })
+                            continue
 
                     print(f"✅ Agent loop complete after {iteration} iteration(s)")
                     ai_reply = executed_reply
