@@ -16,23 +16,24 @@ Security notes:
 import json
 import os
 import re
+import time
 import requests
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 NAME = "mcp_client"
-SHORT_DOC = "Connect to external MCP servers (Slack, HubSpot, Cloudflare, Google, etc.) and call their tools."
+SHORT_DOC = "Connect to external MCP servers (Slack, HubSpot, Cloudflare, Google, etc.), discover tools, and call them."
 DOC = (
     "Generic MCP client — register remote MCP servers once, then discover and call their tools "
     "without writing a custom skill per service. "
     "Functions: "
-    "connect_server(name, url, auth_token?)→register and test a connection to a remote MCP server; "
+    "connect_server(name, url, auth_token?, timeout?)→register and test connection to a remote MCP server; "
     "auth_token is stored in .env and loaded into environment, never in the registry file; "
     "list_servers()→show all registered MCP servers and when they last connected; "
-    "list_tools(server_name)→discover available tools on a registered server; "
-    "call_tool(server_name, tool_name, arguments_json)→invoke a tool on a remote MCP server; "
-    "arguments_json is a JSON string of the tool's parameters, e.g. '{\"channel\":\"general\",\"text\":\"hi\"}'; "
+    "ping_server(name, timeout?)→test server liveness and measure latency; "
+    "list_tools(server_name, timeout?)→discover available tools on a registered server (with cursor pagination); "
+    "call_tool(server_name, tool_name, arguments?, timeout?)→invoke a tool (accepts JSON string or dict, returns text/images/resources/structuredContent); "
     "remove_server(name)→unregister a server."
 )
 
@@ -42,6 +43,8 @@ if not _CONFIG_FILE.parent.exists() and not Path("/app").exists():
 
 _TIMEOUT = int(os.getenv("MCP_CLIENT_TIMEOUT", "30"))
 _PROTOCOL_VERSION = "2025-06-18"
+_RETRY_DELAYS = [1.0, 3.0]
+_TRANSIENT_STATUS_CODES = {429, 502, 503, 504}
 
 
 def _get_env_file() -> Path:
@@ -111,6 +114,31 @@ def _save_servers(servers: dict) -> None:
     _CONFIG_FILE.write_text(json.dumps(servers, indent=2), encoding="utf-8")
 
 
+def _format_content_item(item: Any) -> str:
+    """Format an MCP content block (text, image, resource, or generic)."""
+    if isinstance(item, str):
+        return item
+    if not isinstance(item, dict):
+        return str(item)
+
+    itype = item.get("type", "")
+    if itype == "text":
+        return item.get("text", "")
+    elif itype == "image":
+        mime = item.get("mimeType", "image/png")
+        data_len = len(item.get("data", ""))
+        return f"[Image: mimeType={mime}, data={data_len} bytes base64]"
+    elif itype == "resource":
+        res = item.get("resource", {})
+        uri = res.get("uri", "")
+        text = res.get("text", "")
+        blob = res.get("blob", "")
+        detail = text if text else (f"{len(blob)} bytes blob" if blob else "empty")
+        return f"[Resource uri='{uri}': {detail}]"
+    else:
+        return f"[{itype or 'content'}: {json.dumps(item, ensure_ascii=False)}]"
+
+
 def _rpc(
     url: str,
     token: str = "",
@@ -118,12 +146,15 @@ def _rpc(
     params: Optional[dict] = None,
     session_id: str = "",
     is_notification: bool = False,
+    timeout: Optional[int] = None,
 ) -> Tuple[dict, Optional[str]]:
-    """Minimal JSON-RPC 2.0 call over MCP's Streamable HTTP transport.
+    """JSON-RPC 2.0 call over MCP's Streamable HTTP transport.
 
     Handles:
     - Authorization header if token is provided
     - Mcp-Session-Id header forwarding & tracking
+    - Retries (2x with 1s -> 3s backoff) for transient errors (connection, timeout, 429/502/503/504)
+    - Detailed HTTP error extraction (401/403 token auth errors vs others)
     - JSON-RPC notifications (no id, no response expected)
     - Both JSON and SSE stream responses
     """
@@ -139,50 +170,91 @@ def _rpc(
     if params is not None:
         payload["params"] = params
 
-    resp = requests.post(url, json=payload, headers=headers, timeout=_TIMEOUT)
-    resp.raise_for_status()
+    eff_timeout = timeout if timeout is not None else _TIMEOUT
 
-    # Capture session ID returned by server in headers (Mcp-Session-Id)
-    resp_session_id = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
+    attempts = [0.0] + _RETRY_DELAYS
+    last_err: Optional[Exception] = None
 
-    # Notifications are one-way; server may return 204 or empty 200/202
-    if is_notification:
-        return {}, resp_session_id
-
-    content_type = resp.headers.get("content-type", "")
-    raw_text = resp.text.strip()
-
-    if not raw_text:
-        raise RuntimeError("Empty response body from MCP server")
-
-    if "text/event-stream" in content_type or raw_text.startswith(("event:", "data:")):
-        # Parse SSE frames — take the last 'data:' line as the JSON-RPC payload
-        # (the final message in the stream is the actual result for a single call).
-        data_lines = [
-            line[len("data:"):].strip()
-            for line in raw_text.splitlines()
-            if line.startswith("data:")
-        ]
-        if not data_lines:
-            raise RuntimeError(f"SSE response had no data lines: {raw_text[:200]!r}")
+    for attempt_idx, delay in enumerate(attempts):
+        if delay > 0:
+            time.sleep(delay)
         try:
-            data = json.loads(data_lines[-1])
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Could not parse SSE payload as JSON: {data_lines[-1][:200]!r}") from e
-    else:
-        try:
-            data = json.loads(raw_text)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(
-                f"Non-JSON response (content-type={content_type!r}): {raw_text[:200]!r}"
-            ) from e
+            resp = requests.post(url, json=payload, headers=headers, timeout=eff_timeout)
 
-    if "error" in data:
-        raise RuntimeError(data["error"].get("message", "Unknown MCP error"))
-    return data.get("result", {}), resp_session_id
+            # Check transient HTTP status codes (retryable)
+            if resp.status_code in _TRANSIENT_STATUS_CODES:
+                if attempt_idx < len(attempts) - 1:
+                    last_err = RuntimeError(f"Transient HTTP {resp.status_code}: {resp.text.strip()[:200]}")
+                    continue
+                raise RuntimeError(
+                    f"HTTP {resp.status_code} from MCP server after {len(attempts)} attempts: {resp.text.strip()[:300]}"
+                )
+
+            # Check non-transient HTTP errors (fail immediately)
+            if resp.status_code >= 400:
+                body_snippet = resp.text.strip()[:400]
+                if resp.status_code in (401, 403):
+                    raise RuntimeError(
+                        f"Authentication failed (HTTP {resp.status_code}): token may be missing, expired, or lacking required OAuth scopes. "
+                        f"Server response: {body_snippet}"
+                    )
+                raise RuntimeError(f"HTTP {resp.status_code} from MCP server: {body_snippet}")
+
+            # Capture session ID returned by server in headers (Mcp-Session-Id)
+            resp_session_id = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
+
+            # Notifications are one-way; server may return 204 or empty 200/202
+            if is_notification:
+                return {}, resp_session_id
+
+            content_type = resp.headers.get("content-type", "")
+            raw_text = resp.text.strip()
+
+            if not raw_text:
+                raise RuntimeError("Empty response body from MCP server")
+
+            if "text/event-stream" in content_type or raw_text.startswith(("event:", "data:")):
+                # Parse SSE frames — take the last 'data:' line as the JSON-RPC payload
+                data_lines = [
+                    line[len("data:"):].strip()
+                    for line in raw_text.splitlines()
+                    if line.startswith("data:")
+                ]
+                if not data_lines:
+                    raise RuntimeError(f"SSE response had no data lines: {raw_text[:200]!r}")
+                try:
+                    data = json.loads(data_lines[-1])
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"Could not parse SSE payload as JSON: {data_lines[-1][:200]!r}") from e
+            else:
+                try:
+                    data = json.loads(raw_text)
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(
+                        f"Non-JSON response (content-type={content_type!r}): {raw_text[:200]!r}"
+                    ) from e
+
+            if "error" in data:
+                err_msg = data["error"].get("message", "Unknown MCP error")
+                err_data = data["error"].get("data")
+                if err_data:
+                    err_msg = f"{err_msg} ({err_data})"
+                raise RuntimeError(err_msg)
+
+            return data.get("result", {}), resp_session_id
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as net_err:
+            last_err = net_err
+            if attempt_idx < len(attempts) - 1:
+                continue
+            raise RuntimeError(f"Network error after {len(attempts)} attempts: {net_err}") from net_err
+
+    if last_err:
+        raise last_err
+    raise RuntimeError("RPC call failed without specific error")
 
 
-def connect_server(name: str, url: str, auth_token: str = "") -> str:
+def connect_server(name: str, url: str, auth_token: str = "", timeout: Optional[int] = None) -> str:
     """Register a remote MCP server and verify the connection with an initialize handshake.
     auth_token (if provided) is persisted to .env and loaded into the environment."""
     try:
@@ -200,6 +272,7 @@ def connect_server(name: str, url: str, auth_token: str = "") -> str:
                 "capabilities": {},
                 "clientInfo": {"name": "TrinityClaw", "version": "1.3"},
             },
+            timeout=timeout,
         )
 
         session_id = resp_session_id or ""
@@ -212,6 +285,7 @@ def connect_server(name: str, url: str, auth_token: str = "") -> str:
                 method="notifications/initialized",
                 session_id=session_id,
                 is_notification=True,
+                timeout=timeout,
             )
         except Exception:
             # Spec requires sending initialized notification; continue even if server is stateless
@@ -244,8 +318,34 @@ def list_servers() -> str:
     return "\n".join(lines)
 
 
-def list_tools(server_name: str) -> str:
-    """Discover tools available on a registered MCP server."""
+def ping_server(name: str, timeout: int = 10) -> str:
+    """Ping a registered MCP server to verify responsiveness and measure latency."""
+    servers = _load_servers()
+    if name not in servers:
+        return f"❌ Server '{name}' not registered. Use connect_server() first."
+    info = servers[name]
+    token = _get_token(info.get("auth_token_env", ""))
+    session_id = info.get("session_id", "")
+    t0 = time.perf_counter()
+    try:
+        _, new_sid = _rpc(
+            url=info["url"],
+            token=token,
+            method="ping",
+            session_id=session_id,
+            timeout=timeout,
+        )
+        latency_ms = (time.perf_counter() - t0) * 1000
+        if new_sid and new_sid != session_id:
+            info["session_id"] = new_sid
+            _save_servers(servers)
+        return f"✅ Server '{name}' is healthy and responsive ({latency_ms:.1f}ms latency) at {info['url']}"
+    except Exception as e:
+        return f"❌ Server '{name}' ping failed: {e}"
+
+
+def list_tools(server_name: str, timeout: Optional[int] = None) -> str:
+    """Discover tools available on a registered MCP server, handling pagination cursors."""
     servers = _load_servers()
     if server_name not in servers:
         return f"❌ Server '{server_name}' not registered. Use connect_server() first."
@@ -253,20 +353,41 @@ def list_tools(server_name: str) -> str:
     token = _get_token(info.get("auth_token_env", ""))
     session_id = info.get("session_id", "")
     try:
-        result, new_sid = _rpc(
-            url=info["url"],
-            token=token,
-            method="tools/list",
-            session_id=session_id,
-        )
-        if new_sid and new_sid != session_id:
-            info["session_id"] = new_sid
-            _save_servers(servers)
-        tools = result.get("tools", [])
-        if not tools:
+        all_tools: List[dict] = []
+        cursor: Optional[str] = None
+        max_pages = 20
+
+        for _ in range(max_pages):
+            params: dict = {}
+            if cursor:
+                params["cursor"] = cursor
+
+            result, new_sid = _rpc(
+                url=info["url"],
+                token=token,
+                method="tools/list",
+                params=params if params else None,
+                session_id=session_id,
+                timeout=timeout,
+            )
+            if new_sid and new_sid != session_id:
+                session_id = new_sid
+                info["session_id"] = new_sid
+                _save_servers(servers)
+
+            tools = result.get("tools", [])
+            if isinstance(tools, list):
+                all_tools.extend(tools)
+
+            next_cursor = result.get("nextCursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        if not all_tools:
             return f"📭 No tools exposed by '{server_name}'"
-        lines = [f"🛠️ Tools on '{server_name}' ({len(tools)} total):"]
-        for t in tools:
+        lines = [f"🛠️ Tools on '{server_name}' ({len(all_tools)} total):"]
+        for t in all_tools:
             desc = (t.get("description") or "").strip()[:100]
             lines.append(f"  • {t['name']}: {desc}")
         return "\n".join(lines)
@@ -274,18 +395,37 @@ def list_tools(server_name: str) -> str:
         return f"❌ Failed to list tools on '{server_name}': {e}"
 
 
-def call_tool(server_name: str, tool_name: str, arguments_json: str = "{}") -> str:
-    """Call a tool on a registered MCP server. arguments_json is a JSON string of parameters."""
+def call_tool(
+    server_name: str,
+    tool_name: str,
+    arguments: Union[str, dict] = "{}",
+    arguments_json: Optional[Union[str, dict]] = None,
+    timeout: Optional[int] = None,
+) -> str:
+    """Call a tool on a registered MCP server.
+
+    arguments can be a JSON string or a python dict of tool parameters.
+    timeout overrides the default per-call timeout in seconds.
+    """
     servers = _load_servers()
     if server_name not in servers:
         return f"❌ Server '{server_name}' not registered."
     info = servers[server_name]
     token = _get_token(info.get("auth_token_env", ""))
     session_id = info.get("session_id", "")
-    try:
-        args = json.loads(arguments_json) if arguments_json else {}
-    except json.JSONDecodeError:
-        return f"❌ Invalid JSON in arguments_json: {arguments_json}"
+
+    # Handle arguments parameter (or arguments_json alias)
+    raw_args = arguments_json if arguments_json is not None else arguments
+    if isinstance(raw_args, dict):
+        args = raw_args
+    elif isinstance(raw_args, str):
+        try:
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError as e:
+            return f"❌ Invalid JSON in arguments: {raw_args} ({e})"
+    else:
+        return f"❌ Arguments must be a dict or JSON string, got {type(raw_args).__name__}"
+
     try:
         result, new_sid = _rpc(
             url=info["url"],
@@ -293,13 +433,32 @@ def call_tool(server_name: str, tool_name: str, arguments_json: str = "{}") -> s
             method="tools/call",
             params={"name": tool_name, "arguments": args},
             session_id=session_id,
+            timeout=timeout,
         )
         if new_sid and new_sid != session_id:
             info["session_id"] = new_sid
             _save_servers(servers)
+
+        output_parts: List[str] = []
+
+        # 1. Process content items (text, image, resource, etc.)
         content = result.get("content", [])
-        text_parts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
-        return "\n".join(text_parts) if text_parts else json.dumps(result, ensure_ascii=False)
+        if isinstance(content, list):
+            for c in content:
+                formatted = _format_content_item(c)
+                if formatted:
+                    output_parts.append(formatted)
+        elif content:
+            output_parts.append(_format_content_item(content))
+
+        # 2. Process structuredContent (newer MCP specification)
+        structured = result.get("structuredContent")
+        if structured is not None:
+            output_parts.append(json.dumps(structured, indent=2, ensure_ascii=False))
+
+        if output_parts:
+            return "\n".join(output_parts)
+        return json.dumps(result, ensure_ascii=False)
     except Exception as e:
         return f"❌ Tool call to '{tool_name}' on '{server_name}' failed: {e}"
 
@@ -328,5 +487,5 @@ def remove_server(name: str) -> str:
 
 __all__ = [
     "NAME", "DOC", "SHORT_DOC",
-    "connect_server", "list_servers", "list_tools", "call_tool", "remove_server",
+    "connect_server", "list_servers", "ping_server", "list_tools", "call_tool", "remove_server",
 ]
