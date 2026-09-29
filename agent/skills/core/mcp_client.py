@@ -31,8 +31,8 @@ DOC = (
     "connect_server(name, url, auth_token?, timeout?)→register and test connection to a remote MCP server; "
     "auth_token is stored in .env and loaded into environment, never in the registry file; "
     "list_servers()→show all registered MCP servers and when they last connected; "
-    "ping_server(name, timeout?)→test server liveness and measure latency; "
-    "list_tools(server_name, timeout?)→discover available tools on a registered server (with cursor pagination); "
+    "ping_server(name, timeout?)→test server liveness and measure latency (auto-reinitializes on stale sessions); "
+    "list_tools(server_name, timeout?)→discover available tools on a registered server (with cursor pagination and session recovery); "
     "call_tool(server_name, tool_name, arguments?, timeout?)→invoke a tool (accepts JSON string or dict, returns text/images/resources/structuredContent); "
     "remove_server(name)→unregister a server."
 )
@@ -79,10 +79,10 @@ def _get_token(env_key: str) -> str:
     return ""
 
 
-def _persist_token(env_key: str, auth_token: str) -> None:
+def _persist_token(env_key: str, auth_token: str) -> Tuple[bool, str]:
     """Write auth token to .env file and environment so it persists across container/process restarts."""
     if not env_key or not auth_token:
-        return
+        return True, ""
     os.environ[env_key] = auth_token
     env_file = _get_env_file()
     try:
@@ -96,8 +96,9 @@ def _persist_token(env_key: str, auth_token: str) -> None:
             content += f"{env_key}={auth_token}\n"
         env_file.parent.mkdir(parents=True, exist_ok=True)
         env_file.write_text(content, encoding="utf-8")
-    except Exception:
-        pass
+        return True, ""
+    except Exception as e:
+        return False, f"⚠️ Warning: Token set for current session, but failed to write to .env ({e}). It may vanish on restart."
 
 
 def _load_servers() -> dict:
@@ -139,6 +140,62 @@ def _format_content_item(item: Any) -> str:
         return f"[{itype or 'content'}: {json.dumps(item, ensure_ascii=False)}]"
 
 
+def _is_session_error(err: Exception) -> bool:
+    """Check if an exception indicates a stale, expired, or invalid Mcp-Session-Id."""
+    s = str(err).lower()
+    session_keywords = (
+        "session not found",
+        "invalid session",
+        "session expired",
+        "unknown session",
+        "session_id",
+        "mcp-session-id",
+    )
+    return any(k in s for k in session_keywords)
+
+
+def _reinitialize_session(server_name: str, info: dict, timeout: Optional[int] = None) -> str:
+    """Re-run initialization handshake to get a fresh session ID when an existing session is expired/invalid."""
+    token = _get_token(info.get("auth_token_env", ""))
+    url = info["url"]
+
+    # 1. initialize request
+    result, resp_session_id = _rpc(
+        url=url,
+        token=token,
+        method="initialize",
+        params={
+            "protocolVersion": _PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "TrinityClaw", "version": "1.3"},
+        },
+        timeout=timeout,
+    )
+
+    new_sid = resp_session_id or ""
+
+    # 2. notifications/initialized follow-up
+    try:
+        _rpc(
+            url=url,
+            token=token,
+            method="notifications/initialized",
+            session_id=new_sid,
+            is_notification=True,
+            timeout=timeout,
+        )
+    except Exception:
+        pass
+
+    info["session_id"] = new_sid
+    if "serverInfo" in result:
+        info["server_info"] = result["serverInfo"]
+    servers = _load_servers()
+    servers[server_name] = info
+    _save_servers(servers)
+    return new_sid
+
+
 def _rpc(
     url: str,
     token: str = "",
@@ -155,6 +212,7 @@ def _rpc(
     - Mcp-Session-Id header forwarding & tracking
     - Retries (2x with 1s -> 3s backoff) for transient errors (connection, timeout, 429/502/503/504)
     - Detailed HTTP error extraction (401/403 token auth errors vs others)
+    - Robust SSE event parsing matching request JSON-RPC id
     - JSON-RPC notifications (no id, no response expected)
     - Both JSON and SSE stream responses
     """
@@ -214,7 +272,7 @@ def _rpc(
                 raise RuntimeError("Empty response body from MCP server")
 
             if "text/event-stream" in content_type or raw_text.startswith(("event:", "data:")):
-                # Parse SSE frames — take the last 'data:' line as the JSON-RPC payload
+                # Parse SSE frames — extract all data: lines
                 data_lines = [
                     line[len("data:"):].strip()
                     for line in raw_text.splitlines()
@@ -222,10 +280,30 @@ def _rpc(
                 ]
                 if not data_lines:
                     raise RuntimeError(f"SSE response had no data lines: {raw_text[:200]!r}")
-                try:
-                    data = json.loads(data_lines[-1])
-                except json.JSONDecodeError as e:
-                    raise RuntimeError(f"Could not parse SSE payload as JSON: {data_lines[-1][:200]!r}") from e
+
+                parsed_frames = []
+                for dline in data_lines:
+                    try:
+                        parsed_frames.append(json.loads(dline))
+                    except json.JSONDecodeError:
+                        continue
+
+                if not parsed_frames:
+                    raise RuntimeError(f"Could not parse any SSE payload as JSON from data lines: {data_lines[-1][:200]!r}")
+
+                expected_id = payload.get("id")
+                data = None
+
+                if expected_id is not None:
+                    # Prefer frame matching requested JSON-RPC id
+                    for frame in reversed(parsed_frames):
+                        if isinstance(frame, dict) and frame.get("id") == expected_id:
+                            data = frame
+                            break
+
+                if data is None:
+                    # Fallback to last valid JSON frame
+                    data = parsed_frames[-1]
             else:
                 try:
                     data = json.loads(raw_text)
@@ -259,8 +337,9 @@ def connect_server(name: str, url: str, auth_token: str = "", timeout: Optional[
     auth_token (if provided) is persisted to .env and loaded into the environment."""
     try:
         env_key = f"MCP_{name.upper()}_TOKEN"
+        persist_warning = ""
         if auth_token:
-            _persist_token(env_key, auth_token)
+            _, persist_warning = _persist_token(env_key, auth_token)
 
         # 1. initialize request
         result, resp_session_id = _rpc(
@@ -301,7 +380,10 @@ def connect_server(name: str, url: str, auth_token: str = "", timeout: Optional[
         }
         _save_servers(servers)
         server_label = result.get("serverInfo", {}).get("name", name)
-        return f"✅ Connected to MCP server '{name}' ({server_label}) at {url}"
+        res_str = f"✅ Connected to MCP server '{name}' ({server_label}) at {url}"
+        if persist_warning:
+            res_str += f"\n{persist_warning}"
+        return res_str
     except Exception as e:
         return f"❌ Failed to connect to '{name}': {e}"
 
@@ -319,7 +401,7 @@ def list_servers() -> str:
 
 
 def ping_server(name: str, timeout: int = 10) -> str:
-    """Ping a registered MCP server to verify responsiveness and measure latency."""
+    """Ping a registered MCP server to verify responsiveness and measure latency. Auto-reinitializes stale sessions."""
     servers = _load_servers()
     if name not in servers:
         return f"❌ Server '{name}' not registered. Use connect_server() first."
@@ -328,13 +410,27 @@ def ping_server(name: str, timeout: int = 10) -> str:
     session_id = info.get("session_id", "")
     t0 = time.perf_counter()
     try:
-        _, new_sid = _rpc(
-            url=info["url"],
-            token=token,
-            method="ping",
-            session_id=session_id,
-            timeout=timeout,
-        )
+        try:
+            _, new_sid = _rpc(
+                url=info["url"],
+                token=token,
+                method="ping",
+                session_id=session_id,
+                timeout=timeout,
+            )
+        except Exception as e:
+            if session_id and _is_session_error(e):
+                new_sid_recon = _reinitialize_session(name, info, timeout)
+                _, new_sid = _rpc(
+                    url=info["url"],
+                    token=token,
+                    method="ping",
+                    session_id=new_sid_recon,
+                    timeout=timeout,
+                )
+            else:
+                raise e
+
         latency_ms = (time.perf_counter() - t0) * 1000
         if new_sid and new_sid != session_id:
             info["session_id"] = new_sid
@@ -345,14 +441,15 @@ def ping_server(name: str, timeout: int = 10) -> str:
 
 
 def list_tools(server_name: str, timeout: Optional[int] = None) -> str:
-    """Discover tools available on a registered MCP server, handling pagination cursors."""
+    """Discover tools available on a registered MCP server, handling pagination cursors and stale session recovery."""
     servers = _load_servers()
     if server_name not in servers:
         return f"❌ Server '{server_name}' not registered. Use connect_server() first."
     info = servers[server_name]
     token = _get_token(info.get("auth_token_env", ""))
     session_id = info.get("session_id", "")
-    try:
+
+    def _fetch_all_tools(cur_sid: str) -> Tuple[List[dict], str]:
         all_tools: List[dict] = []
         cursor: Optional[str] = None
         max_pages = 20
@@ -367,11 +464,11 @@ def list_tools(server_name: str, timeout: Optional[int] = None) -> str:
                 token=token,
                 method="tools/list",
                 params=params if params else None,
-                session_id=session_id,
+                session_id=cur_sid,
                 timeout=timeout,
             )
-            if new_sid and new_sid != session_id:
-                session_id = new_sid
+            if new_sid and new_sid != cur_sid:
+                cur_sid = new_sid
                 info["session_id"] = new_sid
                 _save_servers(servers)
 
@@ -383,11 +480,22 @@ def list_tools(server_name: str, timeout: Optional[int] = None) -> str:
             if not next_cursor or next_cursor == cursor:
                 break
             cursor = next_cursor
+        return all_tools, cur_sid
 
-        if not all_tools:
+    try:
+        try:
+            tools, _ = _fetch_all_tools(session_id)
+        except Exception as e:
+            if session_id and _is_session_error(e):
+                new_sid = _reinitialize_session(server_name, info, timeout)
+                tools, _ = _fetch_all_tools(new_sid)
+            else:
+                raise e
+
+        if not tools:
             return f"📭 No tools exposed by '{server_name}'"
-        lines = [f"🛠️ Tools on '{server_name}' ({len(all_tools)} total):"]
-        for t in all_tools:
+        lines = [f"🛠️ Tools on '{server_name}' ({len(tools)} total):"]
+        for t in tools:
             desc = (t.get("description") or "").strip()[:100]
             lines.append(f"  • {t['name']}: {desc}")
         return "\n".join(lines)
@@ -406,6 +514,7 @@ def call_tool(
 
     arguments can be a JSON string or a python dict of tool parameters.
     timeout overrides the default per-call timeout in seconds.
+    Auto-reinitializes handshake if the session is stale or expired.
     """
     servers = _load_servers()
     if server_name not in servers:
@@ -427,14 +536,29 @@ def call_tool(
         return f"❌ Arguments must be a dict or JSON string, got {type(raw_args).__name__}"
 
     try:
-        result, new_sid = _rpc(
-            url=info["url"],
-            token=token,
-            method="tools/call",
-            params={"name": tool_name, "arguments": args},
-            session_id=session_id,
-            timeout=timeout,
-        )
+        try:
+            result, new_sid = _rpc(
+                url=info["url"],
+                token=token,
+                method="tools/call",
+                params={"name": tool_name, "arguments": args},
+                session_id=session_id,
+                timeout=timeout,
+            )
+        except Exception as e:
+            if session_id and _is_session_error(e):
+                new_sid_recon = _reinitialize_session(server_name, info, timeout)
+                result, new_sid = _rpc(
+                    url=info["url"],
+                    token=token,
+                    method="tools/call",
+                    params={"name": tool_name, "arguments": args},
+                    session_id=new_sid_recon,
+                    timeout=timeout,
+                )
+            else:
+                raise e
+
         if new_sid and new_sid != session_id:
             info["session_id"] = new_sid
             _save_servers(servers)
