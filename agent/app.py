@@ -494,15 +494,19 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     _skill_module = skills.get(skill_name)
     _skill_declared_timeout = getattr(_skill_module, "SKILL_TIMEOUT", None)
     timeout_seconds = int(_skill_declared_timeout or os.getenv("SKILL_TIMEOUT_SECONDS", "30"))
+    import asyncio as _skill_asyncio
+
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(func, *args, **kwargs)
+            if _skill_asyncio.iscoroutinefunction(func):
+                future = executor.submit(lambda f, *a, **k: _skill_asyncio.run(f(*a, **k)), func, *args, **kwargs)
+            else:
+                future = executor.submit(func, *args, **kwargs)
             result = future.result(timeout=timeout_seconds)
-        # MCP client results come from third-party remote servers (Slack, HubSpot,
-        # Google, Cloudflare, etc.) — treat as untrusted external content, same as
-        # ChromaDB and lessons.jsonl data, before it reaches the model's context.
+
         if skill_name == "mcp_client" and isinstance(result, str):
             result = _sanitize_external_content(result, source=f"mcp_client:{function_name}")
+
         return {"success": True, "result": result, "skill": skill_name, "function": function_name}
     except FuturesTimeoutError:
         error_msg = f"Skill '{skill_name}.{function_name}' timed out after {timeout_seconds}s"
@@ -1672,7 +1676,7 @@ def save_session_history(session_id: str, messages: List[Dict], max_messages: in
         head_conv = []
         for m in head:
             if (
-                m.get("role") == "user"
+                m.get("role") == "system"
                 and isinstance(m.get("content"), str)
                 and m["content"].startswith("[EARLIER CONVERSATION SUMMARY]")
             ):
@@ -1684,14 +1688,8 @@ def save_session_history(session_id: str, messages: List[Dict], max_messages: in
             print(f"📝 Compressing {len(head_conv)} messages for session {session_id[:12]}..."
                   + (" (iterative update)" if existing_summary else ""))
             summary_text = summarize_messages(head_conv, existing_summary=existing_summary)
-            # NOTE: role is "user", not "system" — this message gets spliced into
-            # `history` and inserted mid-array (after the real system prompt) on the
-            # next turn. Some local model chat templates (e.g. Qwen3.8-27B GSQ-RCO)
-            # hard-error with "System message must be at the beginning" if a second
-            # system-role message appears anywhere but index 0. "user" avoids that
-            # for every model, local or cloud, with no behavior change in practice.
             summary_msg = {
-                "role": "user",
+                "role": "system",
                 "content": f"[EARLIER CONVERSATION SUMMARY]\n{summary_text}"
             }
             messages = [summary_msg] + tail
@@ -1842,8 +1840,14 @@ def _normalize_gemma_skill_tags(text: str) -> str:
 
 
 def _normalize_qwen_tool_call_tags(text: str) -> str:
-    """Convert Qwen's native <tool_call>...</tool_call> blocks into Trinity's
-    <skill:name.func>args</skill:name.func> format."""
+    # Convert Qwen's native tool_call XML blocks into Trinity's
+    # <skill:name.func>args</skill:name.func> format.
+    #
+    # Handles the hybrid format Qwen3.8-27B GSQ-RCO emits:
+    #    <tool_call> <function=skill:name.func>args</skill:name.func> </function> </tool_call>
+    # (no code fences, 'skill:' prefix inside <function=...>, inner closing
+    # tag </skill:...> instead of </function>), plus fenced ```tool_call
+    # blocks and the JSON format {"name": "...", "arguments": {...}}.
     def _convert_tool_call(match):
         block = match.group(1).strip()
         # 1. JSON format: {"name": "...", "arguments": {...}}
@@ -1856,15 +1860,22 @@ def _normalize_qwen_tool_call_tags(text: str) -> str:
                     content = json.dumps(args) if args else ""
                 else:
                     content = str(args)
-                return f"<skill:{name}>{content}</skill:{name}>"
+                # Tool names may use the skill__func convention - normalize
+                # to skill.func so execute_skill_tags can parse them.
+                _nm = name.replace("__", ".")
+                return f"<skill:{_nm}>{content}</skill:{_nm}>"
             except Exception:
                 pass
 
         # 2. XML format: <function=skill.func> ... </function> or <function name="skill.func">
-        fn_match = re.search(r'<function(?:=|\s+name=)["\']?([\w.]+)["\']?>(.*?)</function>', block, flags=re.DOTALL)
+        #    (?:skill:)? handles Qwen3.8 GSQ-RCO's <function=skill:name.func> hybrid.
+        #    The inner body may already be closed with </skill:name.func> - strip
+        #    that stray closing tag so it doesn't leak into the args.
+        fn_match = re.search(r'<function(?:=|\s+name=)["\']?(?:skill:)?([\w]+(?:\.[\w]+)?)["\']?>(.*?)</function>', block, flags=re.DOTALL)
         if fn_match:
             skill_fn = fn_match.group(1).strip()
             body = fn_match.group(2).strip()
+            body = re.sub(r'</skill:[\w.]+>\s*$', '', body).strip()
             # Extract parameters: <parameter=key>val</parameter> or <parameter name="key">val</parameter>
             params = re.findall(r'<parameter(?:=|\s+name=)["\']?([\w.]+)["\']?>(.*?)</parameter>', body, flags=re.DOTALL)
             if params:
@@ -1874,17 +1885,19 @@ def _normalize_qwen_tool_call_tags(text: str) -> str:
                 content = body
             return f"<skill:{skill_fn}>{content}</skill:{skill_fn}>"
 
-        # 3. Fallback: <function=skill.func> without closing </function>
-        fn_simple = re.search(r'<function(?:=|\s+name=)["\']?([\w.]+)["\']?>', block)
+        # 3. Fallback: <function=skill.func> without closing </function> (truncated)
+        fn_simple = re.search(r'<function(?:=|\s+name=)["\']?(?:skill:)?([\w]+(?:\.[\w]+)?)["\']?>', block)
         if fn_simple:
             skill_fn = fn_simple.group(1).strip()
             return f"<skill:{skill_fn}></skill:{skill_fn}>"
 
         return match.group(0)
 
-    # Convert closed <tool_call>...</tool_call>
+    # Convert fenced ```tool_call ... ``` blocks
+    text = re.sub(r'```tool_call(.*?)```', _convert_tool_call, text, flags=re.DOTALL)
+    # Convert closed tool_call blocks (Qwen3.8 GSQ-RCO emits them without fences)
     text = re.sub(r'<tool_call>(.*?)</tool_call>', _convert_tool_call, text, flags=re.DOTALL)
-    # Also handle unclosed <tool_call> if truncated
+    # Also handle an unclosed tool_call block if the output was truncated
     text = re.sub(r'<tool_call>(.*)$', _convert_tool_call, text, flags=re.DOTALL)
     return text
 
@@ -2655,7 +2668,22 @@ def _call_llm(
             if ollama_images and i == len(messages) - 1 and m.get("role") == "user":
                 m["images"] = ollama_images
             ollama_messages.append(m)
-            
+
+        # Strict-template models (e.g. Qwen3.8-27B) raise HTTP 500
+        # "System message must be at the beginning." if any system message
+        # sits at index > 0. Session compression stores its summary as a
+        # system message at history[0], which lands at index 1 once chat()
+        # prepends the main system prompt — merge all trailing system
+        # messages into the leading one (or hoist to index 0 if none).
+        _extra_system = [m.get("content") or "" for m in ollama_messages[1:] if m.get("role") == "system"]
+        if _extra_system:
+            _rest = [m for i, m in enumerate(ollama_messages) if i == 0 or m.get("role") != "system"]
+            if _rest and _rest[0].get("role") == "system":
+                _rest[0] = {**_rest[0], "content": "\n\n".join([_rest[0].get("content") or ""] + _extra_system)}
+            else:
+                _rest.insert(0, {"role": "system", "content": "\n\n".join(_extra_system)})
+            ollama_messages = _rest
+
         _tgt_model = model_name
         if not _tgt_model or "trinity-default" in _tgt_model or _tgt_model.startswith("placeholder"):
             _tgt_model = os.getenv("OLLAMA_MODEL", "llama3.2-vision")
@@ -2677,7 +2705,7 @@ def _call_llm(
             "stream": False,
             "think": _thinking_enabled,
             "options": {
-                "temperature": float(os.getenv("OLLAMA_TEMPERATURE", "0.6" if _thinking_enabled else "1.0")),
+                "temperature": 1.0,
                 "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "12288")),
                 "num_predict": _num_predict,
             }
@@ -2690,17 +2718,7 @@ def _call_llm(
         resp = requests.post(f"{ollama_base}/api/chat", json=payload, timeout=_ollama_timeout)
         resp.raise_for_status()
         _raw_msg = resp.json().get("message", {})
-        _content = (_raw_msg.get("content") or "").strip()
-        _thinking = (_raw_msg.get("thinking") or "").strip()
-
-        # If Ollama returned thinking as a separate field, wrap it in <think> tags
-        # so downstream tag-rescue and think-block handlers seamlessly process it.
-        if _thinking and _content:
-            raw = f"<think>{_thinking}</think>\n{_content}"
-        elif _thinking and not _content:
-            raw = f"<think>{_thinking}</think>"
-        else:
-            raw = _content
+        raw = _raw_msg.get("content") or ""
         # Normalize Ollama tool_calls → OpenAI format expected by _execute_tool_calls
         # Ollama: arguments is already a dict; OpenAI: arguments is a JSON string + needs id
         _ollama_tool_calls = _raw_msg.get("tool_calls") or []
@@ -3908,18 +3926,6 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                             ),
                         })
                         continue
-
-                    if not ai_reply.strip() and not all_execution_logs:
-                        if _local_continuation_pushes < 3:
-                            _local_continuation_pushes += 1
-                            print(f"⚠️  Iteration {iteration}: local thinking model output only reasoning with no content — push #{_local_continuation_pushes}")
-                            messages.append({
-                                "role": "user",
-                                "content": (
-                                    "You finished your thinking. Now output your final answer to the user or execute the appropriate skill tag immediately."
-                                ),
-                            })
-                            continue
 
                     print(f"✅ Agent loop complete after {iteration} iteration(s)")
                     ai_reply = executed_reply
