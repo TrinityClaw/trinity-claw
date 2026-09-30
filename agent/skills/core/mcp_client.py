@@ -1,49 +1,78 @@
 """
-MCP Client — connects Trinity to remote MCP servers (Slack, HubSpot, Cloudflare,
-Google Workspace, Google Maps, etc.) so their tools become callable without
-writing a custom skill per service.
+MCP Client — connects TrinityClaw to remote and local MCP servers.
+
+Designed specifically for the current TrinityClaw app.py dispatcher:
+- Public API is synchronous.
+- Persistent MCP connections are managed internally with threads/subprocesses.
+- No asyncio public functions are exposed, avoiding asyncio.run() loop issues.
+
+Supported transports:
+- Streamable HTTP (default, modern MCP HTTP transport)
+- Legacy HTTP+SSE (transport: "sse")
+- Local stdio subprocess servers (transport: "stdio")
 
 Security notes:
-- Auth tokens are stored as env vars in .env (referenced by name in
-  mcp_servers.json), persisted across restarts and never written in plaintext
-  inside the server registry file.
-- Tool results are returned as plain text/JSON for the caller (app.py) to run
-  through the same _sanitize_external_content() pipeline used for ChromaDB
-  and lessons.jsonl — remote MCP tool output is untrusted external content.
-- Register only the minimum OAuth scopes needed for each service at the
-  provider's end (e.g. read-only Slack scopes) — this skill has no way to
-  enforce scoping itself; that must be done when you create the token.
+- Auth tokens are stored in .env and referenced by env-var name in mcp_servers.json.
+- MCP tool output is untrusted external content. app.py sanitizes mcp_client results.
+- Workspace-discovered stdio servers are registered disabled by default.
 """
 
-import json
 import os
 import re
+import json
 import time
+import uuid
+import atexit
+import shlex
+import threading
+import subprocess
 import requests
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Union, Any
+from urllib.parse import urljoin
+
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
 
 
 NAME = "mcp_client"
-SHORT_DOC = "Connect to external MCP servers, discover tools, filter tools, and call them."
+SHORT_DOC = "Connect to MCP servers, discover tools, filter tools, and call them."
 DOC = (
-    "Generic MCP client — register remote MCP servers once, then discover, test, filter, and call their tools. "
-    "Functions: "
-    "connect_server(name, url, auth_token?, timeout?, verify_tools?)→register and test connection to a remote MCP server; "
-    "auth_token is stored in .env and loaded into environment, never in the registry file; "
-    "list_servers()→show all registered MCP servers, auth state, and cached tool counts; "
-    "ping_server(name, timeout?, full?)→quick liveness check with auth/tool summary, or full test when full=True; "
-    "test_server(name, timeout?, include_tools?, as_dict?)→detailed diagnostics: auth, latency, tools discovered, enabled/disabled counts; "
-    "list_tools(server_name, timeout?)→discover available tools on a registered server and show enabled/disabled state; "
-    "list_all_mcp_tools(refresh?, timeout?)→list MCP tools across all enabled servers with source tags; "
-    "enable_tool(server_name, tool_name)→enable one tool; "
-    "disable_tool(server_name, tool_name)→disable one tool; "
-    "set_server_enabled(server_name, enabled)→enable/disable an entire MCP server; "
-    "call_tool(server_name, tool_name, arguments?, arguments_json?, timeout?)→invoke a tool if enabled; "
-    "remove_server(name)→unregister a server; "
-    "discover_workspace_servers(root?, register?, trust?)→discover workspace-local HTTP MCP config safely."
+    "Generic MCP client — register remote/local MCP servers once, then discover, test, filter, and call their tools. "
+    "Supports Streamable HTTP, legacy HTTP+SSE, and stdio MCP servers. "
+    "Functions: connect_server, list_servers, ping_server, test_server, list_tools, list_all_mcp_tools, "
+    "enable_tool, disable_tool, set_server_enabled, call_tool, remove_server, discover_workspace_servers, "
+    "close_connection, shutdown."
 )
+
+# app.py reads SKILL_TIMEOUT from the skill module and uses it for execution timeout.
+SKILL_TIMEOUT = int(os.getenv("MCP_SKILL_TIMEOUT", "120"))
+
+__all__ = [
+    "NAME",
+    "SHORT_DOC",
+    "DOC",
+    "SKILL_TIMEOUT",
+    "connect_server",
+    "list_servers",
+    "ping_server",
+    "test_server",
+    "list_tools",
+    "list_all_mcp_tools",
+    "enable_tool",
+    "disable_tool",
+    "set_server_enabled",
+    "call_tool",
+    "remove_server",
+    "discover_workspace_servers",
+    "close_connection",
+    "shutdown",
+]
 
 
 _CONFIG_FILE = Path(os.getenv("MCP_CONFIG_FILE", "/app/memory/mcp_servers.json"))
@@ -54,12 +83,38 @@ _TIMEOUT = int(os.getenv("MCP_CLIENT_TIMEOUT", "30"))
 _PROTOCOL_VERSION = "2025-06-18"
 _RETRY_DELAYS = [1.0, 3.0]
 _TRANSIENT_STATUS_CODES = {429, 502, 503, 504}
+
+_TLS_VERIFY_DEFAULT = os.getenv("MCP_TLS_VERIFY", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
 _WORKSPACE_CONFIG_CANDIDATES = (
     ".trinity/mcp.json",
     ".mcp.json",
     ".vscode/mcp.json",
 )
 
+_DANGEROUS_ENV_KEYS = {
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "NODE_OPTIONS",
+    "BASH_ENV",
+    "ENV",
+    "HOME",
+    "SHELL",
+}
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
 
 class MCPError(RuntimeError):
     """Generic MCP / JSON-RPC error."""
@@ -83,7 +138,6 @@ class MCPHTTPError(MCPError):
 # ---------------------------------------------------------------------------
 
 def _get_env_file() -> Path:
-    """Resolve .env path in container or local workspace."""
     p = Path("/app/.env")
     if p.exists() or Path("/app").exists():
         return p
@@ -150,11 +204,11 @@ def _persist_token(env_key: str, auth_token: str) -> Tuple[bool, str]:
 
         return True, ""
     except Exception as e:
-        return False, f"⚠️ Warning: Token set for current session, but failed to write to .env ({e}). It may vanish on restart."
+        return False, f"⚠️ Warning: Token set for current session, but failed to write to .env ({e})."
 
 
 # ---------------------------------------------------------------------------
-# Server registry helpers
+# Registry helpers
 # ---------------------------------------------------------------------------
 
 def _load_servers() -> dict:
@@ -188,7 +242,6 @@ def _default_tool_policy() -> dict:
 
 
 def _ensure_server_defaults(info: dict) -> dict:
-    """Ensure a server entry has enabled flag, transport, and tool policy."""
     if not isinstance(info, dict):
         info = {}
 
@@ -207,7 +260,6 @@ def _ensure_server_defaults(info: dict) -> dict:
 
 
 def _is_tool_enabled(info: dict, tool_name: str) -> bool:
-    """Return True if a tool is allowed for this MCP server."""
     if not info.get("enabled", True):
         return False
 
@@ -264,23 +316,221 @@ def _set_tool_state(server_name: str, tool_name: str, enabled: bool) -> str:
 def _tool_cache_from_tools(tools: List[dict]) -> List[dict]:
     cache = []
     for t in tools:
-        if not isinstance(t, dict):
-            continue
-        cache.append(
-            {
-                "name": t.get("name", ""),
-                "description": t.get("description", ""),
-            }
-        )
+        if isinstance(t, dict):
+            cache.append(
+                {
+                    "name": t.get("name", ""),
+                    "description": t.get("description", ""),
+                }
+            )
     return cache
 
 
 # ---------------------------------------------------------------------------
-# MCP formatting / session helpers
+# Generic helpers
 # ---------------------------------------------------------------------------
 
+def _expand_env(value: Any) -> Any:
+    """Expand ${ENV_VAR} patterns in strings, lists, and dicts."""
+    if isinstance(value, str):
+        m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value.strip())
+        if m:
+            return os.getenv(m.group(1), "")
+
+        return re.sub(
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+            lambda mm: os.getenv(mm.group(1), ""),
+            value,
+        )
+
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+
+    return value
+
+
+def _get_verify(info: dict) -> Union[bool, str]:
+    """Return requests verify setting: True, False, or CA bundle path."""
+    if "verify" in info:
+        v = info["verify"]
+
+        if isinstance(v, bool):
+            return v
+
+        if isinstance(v, str):
+            lv = v.strip().lower()
+            if lv in ("0", "false", "no", "off"):
+                return False
+            if lv in ("1", "true", "yes", "on"):
+                return _TLS_VERIFY_DEFAULT
+            return v  # assume path to CA bundle
+
+    if "ca_bundle" in info:
+        return str(info["ca_bundle"])
+
+    return _TLS_VERIFY_DEFAULT
+
+
+def _build_headers(info: dict, extra: Optional[dict] = None) -> dict:
+    headers = {
+        "Accept": "application/json, text/event-stream",
+    }
+
+    token = _get_token(info.get("auth_token_env", ""))
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    custom = info.get("headers")
+    if isinstance(custom, dict):
+        expanded = _expand_env(custom)
+        for k, v in expanded.items():
+            if v is None:
+                continue
+            headers[str(k)] = str(v)
+
+    if extra:
+        headers.update(extra)
+
+    return headers
+
+
+def _parse_sse_frames(text: str) -> List[Tuple[str, str]]:
+    """Parse simple SSE text into (event, data) frames."""
+    frames: List[Tuple[str, str]] = []
+    event: Optional[str] = None
+    data_lines: List[str] = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            if data_lines:
+                frames.append((event or "message", "\n".join(data_lines)))
+                event = None
+                data_lines = []
+            continue
+
+        if line.startswith(":"):
+            continue
+
+        if line.startswith("event:"):
+            event = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:"):].strip())
+
+    if data_lines:
+        frames.append((event or "message", "\n".join(data_lines)))
+
+    return frames
+
+
+def _extract_jsonrpc_from_sse(raw_text: str, expected_id: Optional[str]) -> dict:
+    frames = _parse_sse_frames(raw_text)
+
+    parsed_frames = []
+    for _event, data in frames:
+        try:
+            parsed_frames.append(json.loads(data))
+        except Exception:
+            continue
+
+    if not parsed_frames:
+        raise MCPError(f"Could not parse JSON-RPC payload from SSE response: {raw_text[:200]!r}")
+
+    if expected_id is not None:
+        for frame in reversed(parsed_frames):
+            if isinstance(frame, dict) and frame.get("id") == expected_id:
+                return frame
+
+    return parsed_frames[-1]
+
+
+def _result_from_data(data: Any) -> dict:
+    if not isinstance(data, dict):
+        return {"value": data}
+
+    if "error" in data:
+        err = data.get("error") or {}
+        if not isinstance(err, dict):
+            err = {}
+
+        msg = err.get("message", "Unknown MCP error")
+        code = err.get("code")
+        err_data = err.get("data")
+
+        if err_data:
+            msg = f"{msg} ({err_data})"
+
+        raise MCPError(msg, code=code, data=err_data)
+
+    result = data.get("result", {})
+    if result is None:
+        result = {}
+
+    if not isinstance(result, dict):
+        result = {"value": result}
+
+    return result
+
+
+def _is_session_error(err: Exception) -> bool:
+    s = str(err).lower()
+    session_keywords = (
+        "session not found",
+        "invalid session",
+        "session expired",
+        "unknown session",
+        "session_id",
+        "mcp-session-id",
+    )
+    return any(k in s for k in session_keywords)
+
+
+def _is_method_not_found(err: Exception) -> bool:
+    code = getattr(err, "code", None)
+    if code == -32601:
+        return True
+
+    s = str(err).lower()
+    return "method not found" in s or "method not supported" in s
+
+
+def _should_recreate_connection(err: Exception, method: str) -> bool:
+    if isinstance(err, MCPHTTPError) and err.status_code in (401, 403):
+        return False
+
+    if _is_method_not_found(err):
+        return False
+
+    s = str(err).lower()
+
+    # Do not silently retry potentially non-idempotent tool calls on timeout.
+    if method == "tools/call" and "timeout" in s:
+        return False
+
+    keywords = (
+        "process not running",
+        "transport not ready",
+        "not connected",
+        "connection reset",
+        "broken pipe",
+        "eof occurred",
+        "timeout",
+        "sse",
+        "session closed",
+        "network error",
+        "failed to connect",
+        "connection aborted",
+        "connection refused",
+    )
+
+    return any(k in s for k in keywords)
+
+
 def _format_content_item(item: Any) -> str:
-    """Format an MCP content block (text, image, resource, or generic)."""
     if isinstance(item, str):
         return item
 
@@ -308,125 +558,883 @@ def _format_content_item(item: Any) -> str:
     return f"[{itype or 'content'}: {json.dumps(item, ensure_ascii=False)}]"
 
 
-def _is_session_error(err: Exception) -> bool:
-    """Check if an exception indicates a stale, expired, or invalid Mcp-Session-Id."""
-    s = str(err).lower()
-    session_keywords = (
-        "session not found",
-        "invalid session",
-        "session expired",
-        "unknown session",
-        "session_id",
-        "mcp-session-id",
-    )
-    return any(k in s for k in session_keywords)
+def _stderr_tail(lines: deque) -> str:
+    if not lines:
+        return ""
+    return "\n".join(list(lines)[-5:])
 
 
-def _reinitialize_session(server_name: str, info: dict, timeout: Optional[int] = None) -> str:
-    """Re-run initialization handshake to get a fresh session ID."""
-    token = _get_token(info.get("auth_token_env", ""))
-    url = info.get("url", "")
+# ---------------------------------------------------------------------------
+# Streamable HTTP transport
+# ---------------------------------------------------------------------------
 
-    if not url:
-        raise MCPError(f"Server '{server_name}' has no URL configured.")
+class StreamableHTTPTransport:
+    """Modern MCP Streamable HTTP transport: POST JSON-RPC to one endpoint."""
 
-    result, resp_session_id = _rpc(
-        url=url,
-        token=token,
-        method="initialize",
-        params={
-            "protocolVersion": _PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "TrinityClaw", "version": "1.3"},
-        },
-        timeout=timeout,
-    )
+    def __init__(self, info: dict):
+        self.info = info
+        self.url = info.get("url", "")
+        self.verify = _get_verify(info)
+        self.session_id = ""
+        self.server_info = {}
+        self.lock = threading.Lock()
+        self.closed = False
 
-    new_sid = resp_session_id or ""
+        if not self.url:
+            raise MCPError("Streamable HTTP server has no URL configured.")
 
-    try:
-        _rpc(
-            url=url,
-            token=token,
-            method="notifications/initialized",
-            session_id=new_sid,
-            is_notification=True,
+    def _headers(self) -> dict:
+        headers = _build_headers(
+            self.info,
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+
+        return headers
+
+    def _capture_session_id(self, resp: requests.Response) -> None:
+        sid = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
+        if sid:
+            self.session_id = sid
+
+    def _post(self, payload: dict, timeout: Optional[int]) -> requests.Response:
+        attempts = [0.0] + _RETRY_DELAYS
+        last_err: Optional[Exception] = None
+        eff_timeout = timeout if timeout is not None else _TIMEOUT
+
+        for attempt_idx, delay in enumerate(attempts):
+            if delay > 0:
+                time.sleep(delay)
+
+            try:
+                resp = requests.post(
+                    self.url,
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=eff_timeout,
+                    verify=self.verify,
+                )
+
+                if resp.status_code in _TRANSIENT_STATUS_CODES:
+                    last_err = MCPHTTPError(
+                        f"Transient HTTP {resp.status_code}: {resp.text.strip()[:200]}",
+                        status_code=resp.status_code,
+                    )
+                    continue
+
+                return resp
+
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError,
+            ) as net_err:
+                last_err = net_err
+                continue
+
+        raise MCPError(f"Network error after {len(attempts)} attempts: {last_err}")
+
+    def _parse_body(self, resp: requests.Response, req_id: Optional[str]) -> dict:
+        raw_text = resp.text.strip()
+
+        if not raw_text:
+            return {}
+
+        content_type = resp.headers.get("content-type", "")
+
+        if "text/event-stream" in content_type or raw_text.startswith(("event:", "data:")):
+            data = _extract_jsonrpc_from_sse(raw_text, req_id)
+        else:
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError as e:
+                raise MCPError(
+                    f"Non-JSON response (content-type={content_type!r}): {raw_text[:200]!r}"
+                ) from e
+
+        return _result_from_data(data)
+
+    def request(self, method: str, params: Optional[dict] = None, timeout: Optional[int] = None) -> dict:
+        with self.lock:
+            req_id = str(uuid.uuid4())
+            payload: Dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": method,
+            }
+
+            if params is not None:
+                payload["params"] = params
+
+            resp = self._post(payload, timeout)
+            self._capture_session_id(resp)
+
+            if resp.status_code in (401, 403):
+                raise MCPHTTPError(
+                    f"Authentication failed (HTTP {resp.status_code}): {resp.text.strip()[:300]}",
+                    status_code=resp.status_code,
+                )
+
+            if resp.status_code >= 400:
+                raise MCPHTTPError(
+                    f"HTTP {resp.status_code} from MCP server: {resp.text.strip()[:400]}",
+                    status_code=resp.status_code,
+                )
+
+            return self._parse_body(resp, req_id)
+
+    def notify(self, method: str, params: Optional[dict] = None, timeout: Optional[int] = None) -> None:
+        with self.lock:
+            payload: Dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "method": method,
+            }
+
+            if params is not None:
+                payload["params"] = params
+
+            resp = self._post(payload, timeout)
+            self._capture_session_id(resp)
+
+            if resp.status_code in (401, 403):
+                raise MCPHTTPError(
+                    f"Authentication failed (HTTP {resp.status_code}): {resp.text.strip()[:300]}",
+                    status_code=resp.status_code,
+                )
+
+            if resp.status_code >= 400:
+                raise MCPHTTPError(
+                    f"HTTP {resp.status_code} from MCP server: {resp.text.strip()[:400]}",
+                    status_code=resp.status_code,
+                )
+
+    def initialize(self, timeout: Optional[int] = None) -> dict:
+        result = self.request(
+            "initialize",
+            {
+                "protocolVersion": _PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "TrinityClaw", "version": "1.3"},
+            },
             timeout=timeout,
         )
-    except Exception:
-        pass
 
-    info["session_id"] = new_sid
-    if isinstance(result, dict) and "serverInfo" in result:
-        info["server_info"] = result.get("serverInfo", {})
+        try:
+            self.notify("notifications/initialized", {}, timeout=timeout)
+        except Exception:
+            pass
 
-    _save_server_info(server_name, info)
-    return new_sid
+        if isinstance(result, dict) and "serverInfo" in result:
+            self.server_info = result.get("serverInfo", {})
+
+        return result
+
+    def is_alive(self) -> bool:
+        return not self.closed and bool(self.url)
+
+    def close(self) -> None:
+        self.closed = True
 
 
-def _rpc_with_session_recovery(
+# ---------------------------------------------------------------------------
+# Legacy HTTP+SSE transport
+# ---------------------------------------------------------------------------
+
+def _iter_sse_response(resp: requests.Response):
+    """Yield (event, data) tuples from a streaming requests response."""
+    event: Optional[str] = None
+    data_lines: List[str] = []
+
+    for raw_line in resp.iter_lines(decode_unicode=True):
+        if raw_line is None:
+            continue
+
+        line = raw_line.strip()
+
+        if not line:
+            if data_lines:
+                yield (event or "message", "\n".join(data_lines))
+                event = None
+                data_lines = []
+            continue
+
+        if line.startswith(":"):
+            continue
+
+        if line.startswith("event:"):
+            event = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:"):].strip())
+
+    if data_lines:
+        yield (event or "message", "\n".join(data_lines))
+
+
+class SSETransport:
+    """Legacy MCP HTTP+SSE transport: GET SSE stream, then POST to endpoint."""
+
+    def __init__(self, info: dict):
+        self.info = info
+        self.sse_url = info.get("url", "")
+        self.verify = _get_verify(info)
+
+        self.post_url: Optional[str] = None
+        self.endpoint_event = threading.Event()
+        self.start_error: Optional[Exception] = None
+
+        self.pending: Dict[str, dict] = {}
+        self.pending_lock = threading.Lock()
+
+        self.listener: Optional[threading.Thread] = None
+        self.closed = False
+
+        if not self.sse_url:
+            raise MCPError("SSE server has no URL configured.")
+
+    def start(self, timeout: Optional[int] = None) -> None:
+        self.listener = threading.Thread(target=self._listen, daemon=True, name="mcp-sse-listener")
+        self.listener.start()
+
+        eff_timeout = timeout if timeout is not None else _TIMEOUT
+        got_endpoint = self.endpoint_event.wait(eff_timeout)
+
+        if self.start_error:
+            raise MCPError(f"SSE connection failed: {self.start_error}")
+
+        if not got_endpoint or not self.post_url:
+            raise MCPError("Timeout waiting for SSE 'endpoint' event from server.")
+
+    def _fail_pending(self, err: Exception) -> None:
+        with self.pending_lock:
+            for req_id, entry in list(self.pending.items()):
+                entry["error"] = err
+                entry["event"].set()
+            self.pending.clear()
+
+    def _handle_message(self, msg: dict) -> None:
+        if not isinstance(msg, dict):
+            return
+
+        req_id = msg.get("id")
+
+        if req_id is not None:
+            with self.pending_lock:
+                entry = self.pending.get(str(req_id))
+
+            if entry:
+                if "error" in msg:
+                    err = msg.get("error") or {}
+                    entry["error"] = MCPError(
+                        err.get("message", "MCP error"),
+                        code=err.get("code"),
+                        data=err.get("data"),
+                    )
+                else:
+                    entry["result"] = msg.get("result", {})
+
+                entry["event"].set()
+                return
+
+        # Respond to unsupported server-initiated requests.
+        if "method" in msg and req_id is not None and "result" not in msg and "error" not in msg:
+            try:
+                self._send_raw(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32601,
+                            "message": "Method not supported by TrinityClaw MCP client",
+                        },
+                    }
+                )
+            except Exception:
+                pass
+
+    def _listen(self) -> None:
+        try:
+            headers = _build_headers(self.info, {"Accept": "text/event-stream"})
+
+            with requests.get(
+                self.sse_url,
+                headers=headers,
+                stream=True,
+                verify=self.verify,
+                timeout=(10, None),
+            ) as resp:
+                if resp.status_code >= 400:
+                    self.start_error = MCPHTTPError(
+                        f"SSE GET failed with HTTP {resp.status_code}: {resp.text.strip()[:300]}",
+                        status_code=resp.status_code,
+                    )
+                    self.endpoint_event.set()
+                    return
+
+                for event, data in _iter_sse_response(resp):
+                    if self.closed:
+                        break
+
+                    if event == "endpoint":
+                        self.post_url = urljoin(str(self.sse_url), data.strip())
+                        self.endpoint_event.set()
+                    elif event in ("message", ""):
+                        try:
+                            msg = json.loads(data)
+                            self._handle_message(msg)
+                        except Exception:
+                            continue
+
+        except Exception as e:
+            self.start_error = e
+            self.endpoint_event.set()
+            self._fail_pending(e)
+
+    def _send_raw(self, payload: dict) -> None:
+        if not self.post_url:
+            raise MCPError("SSE transport not ready: no POST endpoint received.")
+
+        headers = _build_headers(self.info, {"Content-Type": "application/json"})
+
+        resp = requests.post(
+            self.post_url,
+            json=payload,
+            headers=headers,
+            timeout=_TIMEOUT,
+            verify=self.verify,
+        )
+
+        if resp.status_code in (401, 403):
+            raise MCPHTTPError(
+                f"Authentication failed (HTTP {resp.status_code}): {resp.text.strip()[:300]}",
+                status_code=resp.status_code,
+            )
+
+        if resp.status_code >= 400:
+            raise MCPHTTPError(
+                f"HTTP {resp.status_code} from MCP SSE endpoint: {resp.text.strip()[:400]}",
+                status_code=resp.status_code,
+            )
+
+    def request(self, method: str, params: Optional[dict] = None, timeout: Optional[int] = None) -> dict:
+        if self.closed or not self.post_url:
+            raise MCPError("SSE transport is not ready.")
+
+        req_id = str(uuid.uuid4())
+        event = threading.Event()
+
+        with self.pending_lock:
+            self.pending[req_id] = {
+                "event": event,
+                "result": None,
+                "error": None,
+            }
+
+        payload: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+        }
+
+        if params is not None:
+            payload["params"] = params
+
+        try:
+            self._send_raw(payload)
+        except Exception as e:
+            with self.pending_lock:
+                self.pending.pop(req_id, None)
+            raise e
+
+        eff_timeout = timeout if timeout is not None else _TIMEOUT
+        completed = event.wait(eff_timeout)
+
+        with self.pending_lock:
+            entry = self.pending.pop(req_id, None)
+
+        if not completed:
+            if not self.is_alive():
+                raise MCPError("SSE transport closed while waiting for response.")
+            raise MCPError(f"MCP request '{method}' timed out after {eff_timeout}s")
+
+        if entry is None:
+            raise MCPError("MCP response entry disappeared unexpectedly.")
+
+        if entry["error"] is not None:
+            raise entry["error"]
+
+        result = entry["result"]
+        if result is None:
+            result = {}
+
+        if not isinstance(result, dict):
+            result = {"value": result}
+
+        return result
+
+    def notify(self, method: str, params: Optional[dict] = None, timeout: Optional[int] = None) -> None:
+        payload: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "method": method,
+        }
+
+        if params is not None:
+            payload["params"] = params
+
+        self._send_raw(payload)
+
+    def is_alive(self) -> bool:
+        return (
+            not self.closed
+            and bool(self.listener)
+            and self.listener.is_alive()
+            and bool(self.post_url)
+        )
+
+    def close(self) -> None:
+        self.closed = True
+        self.endpoint_event.set()
+        self._fail_pending(MCPError("MCP session closed"))
+
+
+# ---------------------------------------------------------------------------
+# Stdio transport
+# ---------------------------------------------------------------------------
+
+class StdioTransport:
+    """Local stdio subprocess transport."""
+
+    def __init__(self, info: dict):
+        self.info = info
+        self.command = info.get("command", "")
+        self.args = info.get("args", [])
+        self.env = info.get("env", {})
+
+        self.proc: Optional[subprocess.Popen] = None
+        self.reader: Optional[threading.Thread] = None
+        self.err_reader: Optional[threading.Thread] = None
+
+        self.pending: Dict[str, dict] = {}
+        self.pending_lock = threading.Lock()
+        self.write_lock = threading.Lock()
+
+        self.stderr_tail: deque = deque(maxlen=30)
+        self.closed = False
+
+        if not self.command:
+            raise MCPError("stdio server has no command configured.")
+
+    def _build_cmd(self) -> List[str]:
+        args = self.args if isinstance(self.args, list) else []
+
+        if isinstance(self.command, str) and not args and " " in self.command.strip():
+            return shlex.split(self.command)
+
+        return [str(self.command)] + [str(a) for a in args]
+
+    def start(self, timeout: Optional[int] = None) -> None:
+        cmd = self._build_cmd()
+        merged_env = dict(os.environ)
+
+        expanded_env = _expand_env(self.env)
+        if isinstance(expanded_env, dict):
+            for k, v in expanded_env.items():
+                if k and isinstance(k, str):
+                    merged_env[k] = str(v)
+
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=merged_env,
+            )
+        except Exception as e:
+            raise MCPError(f"Failed to start stdio MCP server '{self.command}': {e}")
+
+        self.reader = threading.Thread(target=self._read_stdout, daemon=True, name="mcp-stdio-reader")
+        self.err_reader = threading.Thread(target=self._read_stderr, daemon=True, name="mcp-stderr-reader")
+
+        self.reader.start()
+        self.err_reader.start()
+
+    def _fail_pending(self, err: Exception) -> None:
+        with self.pending_lock:
+            for req_id, entry in list(self.pending.items()):
+                entry["error"] = err
+                entry["event"].set()
+            self.pending.clear()
+
+    def _handle_message(self, msg: dict) -> None:
+        if not isinstance(msg, dict):
+            return
+
+        req_id = msg.get("id")
+
+        if req_id is not None:
+            with self.pending_lock:
+                entry = self.pending.get(str(req_id))
+
+            if entry:
+                if "error" in msg:
+                    err = msg.get("error") or {}
+                    entry["error"] = MCPError(
+                        err.get("message", "MCP error"),
+                        code=err.get("code"),
+                        data=err.get("data"),
+                    )
+                else:
+                    entry["result"] = msg.get("result", {})
+
+                entry["event"].set()
+                return
+
+        if "method" in msg and req_id is not None and "result" not in msg and "error" not in msg:
+            try:
+                self._send_raw(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32601,
+                            "message": "Method not supported by TrinityClaw MCP client",
+                        },
+                    }
+                )
+            except Exception:
+                pass
+
+    def _read_stdout(self) -> None:
+        try:
+            if not self.proc or not self.proc.stdout:
+                return
+
+            while True:
+                line = self.proc.stdout.readline()
+                if not line:
+                    break
+
+                if self.closed:
+                    break
+
+                try:
+                    msg = json.loads(line.decode("utf-8").strip())
+                    self._handle_message(msg)
+                except Exception:
+                    continue
+
+            if not self.closed:
+                self._fail_pending(
+                    MCPError(
+                        "stdio MCP server exited unexpectedly.\n"
+                        f"stderr tail:\n{_stderr_tail(self.stderr_tail)}"
+                    )
+                )
+        except Exception as e:
+            if not self.closed:
+                self._fail_pending(e)
+
+    def _read_stderr(self) -> None:
+        try:
+            if not self.proc or not self.proc.stderr:
+                return
+
+            while True:
+                line = self.proc.stderr.readline()
+                if not line:
+                    break
+
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    self.stderr_tail.append(text)
+        except Exception:
+            pass
+
+    def _send_raw(self, payload: dict) -> None:
+        if not self.proc or not self.proc.stdin:
+            raise MCPError("stdio process is not running.")
+
+        if self.proc.poll() is not None:
+            raise MCPError(
+                "stdio process exited.\n"
+                f"stderr tail:\n{_stderr_tail(self.stderr_tail)}"
+            )
+
+        data = (json.dumps(payload) + "\n").encode("utf-8")
+
+        with self.write_lock:
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
+
+    def request(self, method: str, params: Optional[dict] = None, timeout: Optional[int] = None) -> dict:
+        if self.closed or not self.is_alive():
+            raise MCPError("stdio transport is not running.")
+
+        req_id = str(uuid.uuid4())
+        event = threading.Event()
+
+        with self.pending_lock:
+            self.pending[req_id] = {
+                "event": event,
+                "result": None,
+                "error": None,
+            }
+
+        payload: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+        }
+
+        if params is not None:
+            payload["params"] = params
+
+        try:
+            self._send_raw(payload)
+        except Exception as e:
+            with self.pending_lock:
+                self.pending.pop(req_id, None)
+            raise e
+
+        eff_timeout = timeout if timeout is not None else _TIMEOUT
+        completed = event.wait(eff_timeout)
+
+        with self.pending_lock:
+            entry = self.pending.pop(req_id, None)
+
+        if not completed:
+            if not self.is_alive():
+                raise MCPError(
+                    "stdio process exited while waiting for response.\n"
+                    f"stderr tail:\n{_stderr_tail(self.stderr_tail)}"
+                )
+            raise MCPError(f"MCP request '{method}' timed out after {eff_timeout}s")
+
+        if entry is None:
+            raise MCPError("MCP response entry disappeared unexpectedly.")
+
+        if entry["error"] is not None:
+            raise entry["error"]
+
+        result = entry["result"]
+        if result is None:
+            result = {}
+
+        if not isinstance(result, dict):
+            result = {"value": result}
+
+        return result
+
+    def notify(self, method: str, params: Optional[dict] = None, timeout: Optional[int] = None) -> None:
+        payload: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "method": method,
+        }
+
+        if params is not None:
+            payload["params"] = params
+
+        self._send_raw(payload)
+
+    def is_alive(self) -> bool:
+        return not self.closed and bool(self.proc) and self.proc.poll() is None
+
+    def close(self) -> None:
+        self.closed = True
+        self._fail_pending(MCPError("MCP session closed"))
+
+        if self.proc:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Connection wrapper / registry
+# ---------------------------------------------------------------------------
+
+class MCPConnection:
+    def __init__(self, server_name: str, info: dict, timeout: Optional[int] = None):
+        self.server_name = server_name
+        self.info = info
+        self.transport_type = str(info.get("transport", "http")).lower()
+        self.server_info = {}
+
+        if self.transport_type == "stdio":
+            self.transport = StdioTransport(info)
+            self.transport.start(timeout=timeout)
+            result = self._initialize(timeout)
+        elif self.transport_type in ("sse", "http_sse", "http+sse"):
+            self.transport = SSETransport(info)
+            self.transport.start(timeout=timeout)
+            result = self._initialize(timeout)
+        else:
+            self.transport = StreamableHTTPTransport(info)
+            result = self.transport.initialize(timeout=timeout)
+
+        if isinstance(result, dict) and "serverInfo" in result:
+            self.server_info = result.get("serverInfo", {})
+
+        info["server_info"] = self.server_info
+
+    def _initialize(self, timeout: Optional[int]) -> dict:
+        result = self.transport.request(
+            "initialize",
+            {
+                "protocolVersion": _PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "TrinityClaw", "version": "1.3"},
+            },
+            timeout=timeout,
+        )
+
+        try:
+            self.transport.notify("notifications/initialized", {}, timeout=timeout)
+        except Exception:
+            pass
+
+        return result
+
+    def request(self, method: str, params: Optional[dict] = None, timeout: Optional[int] = None) -> dict:
+        try:
+            return self.transport.request(method, params, timeout)
+        except MCPError as e:
+            # Streamable HTTP sessions can expire; reinitialize once.
+            if self.transport_type not in ("stdio", "sse", "http_sse", "http+sse") and _is_session_error(e):
+                self.transport.initialize(timeout)
+                return self.transport.request(method, params, timeout)
+            raise
+
+    def is_alive(self) -> bool:
+        try:
+            return self.transport.is_alive()
+        except Exception:
+            return False
+
+    def close(self) -> None:
+        try:
+            self.transport.close()
+        except Exception:
+            pass
+
+
+_CONNECTIONS: Dict[str, MCPConnection] = {}
+_CONNECTION_LOCKS: Dict[str, threading.Lock] = {}
+_GLOBAL_CONN_LOCK = threading.Lock()
+
+
+def _get_conn_lock(server_name: str) -> threading.Lock:
+    with _GLOBAL_CONN_LOCK:
+        if server_name not in _CONNECTION_LOCKS:
+            _CONNECTION_LOCKS[server_name] = threading.Lock()
+        return _CONNECTION_LOCKS[server_name]
+
+
+def _close_connection_unlocked(server_name: str) -> None:
+    conn = _CONNECTIONS.pop(server_name, None)
+    if conn:
+        conn.close()
+
+
+def close_connection(server_name: str) -> str:
+    """Close an active MCP connection if one exists."""
+    lock = _get_conn_lock(server_name)
+    with lock:
+        existed = server_name in _CONNECTIONS
+        _close_connection_unlocked(server_name)
+
+    if existed:
+        return f"✅ Closed active connection for MCP server '{server_name}'."
+    return f"📭 No active connection for MCP server '{server_name}'."
+
+
+def _get_connection(server_name: str, info: dict, timeout: Optional[int] = None) -> MCPConnection:
+    lock = _get_conn_lock(server_name)
+
+    with lock:
+        conn = _CONNECTIONS.get(server_name)
+
+        if conn and conn.is_alive():
+            return conn
+
+        _close_connection_unlocked(server_name)
+
+        conn = MCPConnection(server_name, info, timeout=timeout)
+        _CONNECTIONS[server_name] = conn
+        return conn
+
+
+def _request_server(
     server_name: str,
     info: dict,
     method: str,
     params: Optional[dict] = None,
     timeout: Optional[int] = None,
-    is_notification: bool = False,
-) -> Tuple[dict, Optional[str]]:
-    """RPC helper that recovers from stale session errors once."""
-    token = _get_token(info.get("auth_token_env", ""))
-    url = info.get("url", "")
-
-    if not url:
-        raise MCPError(f"Server '{server_name}' has no URL configured.")
-
-    session_id = info.get("session_id", "")
-
+) -> dict:
     try:
-        result, new_sid = _rpc(
-            url=url,
-            token=token,
-            method=method,
-            params=params,
-            session_id=session_id,
-            is_notification=is_notification,
-            timeout=timeout,
-        )
-    except Exception as e:
-        if session_id and _is_session_error(e):
-            new_sid = _reinitialize_session(server_name, info, timeout)
-            result, retry_sid = _rpc(
-                url=url,
-                token=token,
-                method=method,
-                params=params,
-                session_id=new_sid,
-                is_notification=is_notification,
-                timeout=timeout,
-            )
-            new_sid = retry_sid or new_sid
-        else:
+        conn = _get_connection(server_name, info, timeout=timeout)
+        return conn.request(method, params, timeout)
+    except MCPHTTPError as e:
+        if e.status_code in (401, 403):
             raise
 
-    if new_sid and new_sid != session_id:
-        info["session_id"] = new_sid
-        _save_server_info(server_name, info)
+        if _should_recreate_connection(e, method):
+            close_connection(server_name)
+            conn = _get_connection(server_name, info, timeout=timeout)
+            return conn.request(method, params, timeout)
 
-    return result, new_sid
+        raise
+    except Exception as e:
+        if _should_recreate_connection(e, method):
+            close_connection(server_name)
+            conn = _get_connection(server_name, info, timeout=timeout)
+            return conn.request(method, params, timeout)
 
+        raise
+
+
+def shutdown() -> str:
+    """Close all active MCP connections. Called automatically on process exit."""
+    with _GLOBAL_CONN_LOCK:
+        names = list(_CONNECTIONS.keys())
+
+    for name in names:
+        close_connection(name)
+
+    return "✅ Closed all active MCP connections."
+
+
+atexit.register(shutdown)
+
+
+# ---------------------------------------------------------------------------
+# Tool helpers
+# ---------------------------------------------------------------------------
 
 def _fetch_all_tools(server_name: str, info: dict, timeout: Optional[int] = None) -> List[dict]:
-    """Fetch all tools from a server, with pagination and session recovery."""
     all_tools: List[dict] = []
     cursor: Optional[str] = None
     max_pages = 20
 
     for _ in range(max_pages):
-        params: Optional[dict] = {"cursor": cursor} if cursor else None
+        params = {"cursor": cursor} if cursor else None
 
-        result, _ = _rpc_with_session_recovery(
-            server_name=server_name,
-            info=info,
-            method="tools/list",
+        result = _request_server(
+            server_name,
+            info,
+            "tools/list",
             params=params,
             timeout=timeout,
         )
@@ -444,184 +1452,49 @@ def _fetch_all_tools(server_name: str, info: dict, timeout: Optional[int] = None
     return all_tools
 
 
-# ---------------------------------------------------------------------------
-# Core JSON-RPC / MCP Streamable HTTP transport
-# ---------------------------------------------------------------------------
+def _format_test_report(diag: dict) -> str:
+    lines = []
 
-def _rpc(
-    url: str,
-    token: str = "",
-    method: str = "",
-    params: Optional[dict] = None,
-    session_id: str = "",
-    is_notification: bool = False,
-    timeout: Optional[int] = None,
-) -> Tuple[dict, Optional[str]]:
-    """
-    JSON-RPC 2.0 call over MCP's Streamable HTTP transport.
+    if diag.get("ok"):
+        lines.append(f"✅ MCP test for '{diag.get('server')}' succeeded")
+    else:
+        lines.append(f"❌ MCP test for '{diag.get('server')}' failed")
 
-    Handles:
-    - Authorization header if token is provided
-    - Mcp-Session-Id header forwarding & tracking
-    - Retries for transient errors
-    - Detailed HTTP error extraction
-    - SSE event parsing
-    - JSON-RPC notifications
-    """
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
+    if diag.get("destination"):
+        lines.append(f"Destination: {diag['destination']}")
 
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    lines.append(f"Transport: {diag.get('transport', 'http')}")
 
-    if session_id:
-        headers["Mcp-Session-Id"] = session_id
+    auth = diag.get("auth", {})
+    if auth:
+        lines.append(f"Auth: {auth.get('state', 'unknown')}")
 
-    payload: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+    latency = diag.get("latency_ms", {})
 
-    if not is_notification:
-        payload["id"] = 1
+    if latency.get("connect") is not None:
+        lines.append(f"Connect/init latency: {latency['connect']:.1f}ms")
 
-    if params is not None:
-        payload["params"] = params
+    if latency.get("ping") is not None:
+        lines.append(f"Ping latency: {latency['ping']:.1f}ms")
 
-    eff_timeout = timeout if timeout is not None else _TIMEOUT
-    attempts = [0.0] + _RETRY_DELAYS
-    last_err: Optional[Exception] = None
+    if latency.get("tools_list") is not None:
+        lines.append(f"Tools/list latency: {latency['tools_list']:.1f}ms")
 
-    for attempt_idx, delay in enumerate(attempts):
-        if delay > 0:
-            time.sleep(delay)
+    tools = diag.get("tools", {})
+    if tools.get("total") is not None:
+        lines.append(
+            f"Tools discovered: {tools.get('enabled', 0)}/{tools.get('total', 0)} enabled"
+        )
 
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=eff_timeout)
+        disabled = tools.get("disabled_tools", [])
+        if disabled:
+            lines.append("Disabled tools: " + ", ".join(disabled[:20]))
 
-            if resp.status_code in _TRANSIENT_STATUS_CODES:
-                if attempt_idx < len(attempts) - 1:
-                    last_err = MCPHTTPError(
-                        f"Transient HTTP {resp.status_code}: {resp.text.strip()[:200]}",
-                        status_code=resp.status_code,
-                    )
-                    continue
+    errors = diag.get("errors", [])
+    if errors:
+        lines.append("Errors: " + " | ".join(errors[:5]))
 
-                raise MCPHTTPError(
-                    f"HTTP {resp.status_code} from MCP server after {len(attempts)} attempts: {resp.text.strip()[:300]}",
-                    status_code=resp.status_code,
-                )
-
-            if resp.status_code >= 400:
-                body_snippet = resp.text.strip()[:400]
-
-                if resp.status_code in (401, 403):
-                    raise MCPHTTPError(
-                        f"Authentication failed (HTTP {resp.status_code}): token may be missing, expired, or lacking required OAuth scopes. "
-                        f"Server response: {body_snippet}",
-                        status_code=resp.status_code,
-                    )
-
-                raise MCPHTTPError(
-                    f"HTTP {resp.status_code} from MCP server: {body_snippet}",
-                    status_code=resp.status_code,
-                )
-
-            resp_session_id = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
-
-            if is_notification:
-                return {}, resp_session_id
-
-            if resp.status_code == 204:
-                return {}, resp_session_id
-
-            content_type = resp.headers.get("content-type", "")
-            raw_text = resp.text.strip()
-
-            if not raw_text:
-                if resp.status_code in (200, 202, 204):
-                    return {}, resp_session_id
-                raise MCPError("Empty response body from MCP server")
-
-            if "text/event-stream" in content_type or raw_text.startswith(("event:", "data:")):
-                data_lines = [
-                    line[len("data:"):].strip()
-                    for line in raw_text.splitlines()
-                    if line.startswith("data:")
-                ]
-
-                if not data_lines:
-                    raise MCPError(f"SSE response had no data lines: {raw_text[:200]!r}")
-
-                parsed_frames = []
-                for dline in data_lines:
-                    try:
-                        parsed_frames.append(json.loads(dline))
-                    except json.JSONDecodeError:
-                        continue
-
-                if not parsed_frames:
-                    raise MCPError(
-                        f"Could not parse any SSE payload as JSON from data lines: {data_lines[-1][:200]!r}"
-                    )
-
-                expected_id = payload.get("id")
-                data = None
-
-                if expected_id is not None:
-                    for frame in reversed(parsed_frames):
-                        if isinstance(frame, dict) and frame.get("id") == expected_id:
-                            data = frame
-                            break
-
-                if data is None:
-                    data = parsed_frames[-1]
-            else:
-                try:
-                    data = json.loads(raw_text)
-                except json.JSONDecodeError as e:
-                    raise MCPError(
-                        f"Non-JSON response (content-type={content_type!r}): {raw_text[:200]!r}"
-                    ) from e
-
-            if not isinstance(data, dict):
-                return {}, resp_session_id
-
-            if "error" in data:
-                err = data.get("error") or {}
-                if not isinstance(err, dict):
-                    err = {}
-
-                err_msg = err.get("message", "Unknown MCP error")
-                err_code = err.get("code")
-                err_data = err.get("data")
-
-                if err_data:
-                    err_msg = f"{err_msg} ({err_data})"
-
-                raise MCPError(err_msg, code=err_code, data=err_data)
-
-            result = data.get("result", {})
-            if result is None:
-                result = {}
-            if not isinstance(result, dict):
-                result = {"value": result}
-
-            return result, resp_session_id
-
-        except (
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.ChunkedEncodingError,
-        ) as net_err:
-            last_err = net_err
-            if attempt_idx < len(attempts) - 1:
-                continue
-            raise MCPError(f"Network error after {len(attempts)} attempts: {net_err}") from net_err
-
-    if last_err:
-        raise last_err
-
-    raise MCPError("RPC call failed without specific error")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -630,99 +1503,80 @@ def _rpc(
 
 def connect_server(
     name: str,
-    url: str,
+    url: str = "",
     auth_token: str = "",
     timeout: Optional[int] = None,
     verify_tools: bool = True,
+    config: Optional[dict] = None,
 ) -> str:
     """
-    Register a remote MCP server and verify the connection with an initialize handshake.
+    Register and connect to an MCP server.
 
-    If auth_token is provided, it is persisted to .env and loaded into the environment.
-    If omitted, an existing stored token for this server is reused if present.
+    Examples:
+      connect_server("example", "https://example.com/mcp", "token")
+      connect_server("fs", config={"transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]})
+      connect_server("legacy", config={"transport":"sse","url":"https://example.com/sse"})
     """
     try:
         servers = _load_servers()
         existing = _ensure_server_defaults(servers.get(name, {}))
 
+        if config:
+            cleaned = {k: v for k, v in config.items() if v is not None}
+            existing.update(cleaned)
+        elif url:
+            existing["url"] = url
+            existing.setdefault("transport", "http")
+
+        transport = str(existing.get("transport", "http")).lower()
+
+        if transport != "stdio" and not existing.get("url"):
+            return f"❌ Server '{name}' has no URL configured. Provide url or config."
+
         safe_name = re.sub(r"[^A-Z0-9_]", "_", name.upper()) or "SERVER"
         default_env_key = f"MCP_{safe_name}_TOKEN"
 
-        existing_env_key = existing.get("auth_token_env", "")
-        env_key = existing_env_key or default_env_key
-
-        token_to_use = auth_token
         persist_warning = ""
 
         if auth_token:
-            env_key = default_env_key
-            _, persist_warning = _persist_token(env_key, auth_token)
-            token_to_use = auth_token
-        else:
-            token_to_use = _get_token(env_key) if env_key else ""
+            _, persist_warning = _persist_token(default_env_key, auth_token)
+            existing["auth_token_env"] = default_env_key
 
-        result, resp_session_id = _rpc(
-            url=url,
-            token=token_to_use,
-            method="initialize",
-            params={
-                "protocolVersion": _PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "TrinityClaw", "version": "1.3"},
-            },
-            timeout=timeout,
-        )
+        # Force a fresh connection with the new config/token.
+        close_connection(name)
 
-        session_id = resp_session_id or ""
+        conn = _get_connection(name, existing, timeout=timeout)
 
-        try:
-            _rpc(
-                url=url,
-                token=token_to_use,
-                method="notifications/initialized",
-                session_id=session_id,
-                is_notification=True,
-                timeout=timeout,
-            )
-        except Exception:
-            pass
-
-        auth_token_env = env_key if (auth_token or token_to_use) else ""
-
-        info = _ensure_server_defaults(existing)
-        info.update(
-            {
-                "url": url,
-                "transport": "http",
-                "auth_token_env": auth_token_env,
-                "connected_at": datetime.now().isoformat(),
-                "server_info": result.get("serverInfo", {}),
-                "session_id": session_id,
-                "protocol_version": result.get("protocolVersion", _PROTOCOL_VERSION),
-            }
-        )
-
-        servers[name] = info
-        _save_servers(servers)
+        existing["connected_at"] = datetime.now().isoformat()
+        existing["server_info"] = conn.server_info
 
         tools_line = ""
+
         if verify_tools:
             try:
-                tools = _fetch_all_tools(name, info, timeout=timeout)
-                info["tools_cache"] = _tool_cache_from_tools(tools)
-                info["tools_cache_at"] = datetime.now().isoformat()
+                tools = _fetch_all_tools(name, existing, timeout=timeout)
+                existing["tools_cache"] = _tool_cache_from_tools(tools)
+                existing["tools_cache_at"] = datetime.now().isoformat()
 
                 enabled_count = sum(
-                    1 for t in tools if _is_tool_enabled(info, t.get("name", ""))
+                    1 for t in tools if _is_tool_enabled(existing, t.get("name", ""))
                 )
 
-                _save_server_info(name, info)
                 tools_line = f"\n🛠️ Tools discovered: {len(tools)} ({enabled_count} enabled)"
             except Exception as tool_err:
                 tools_line = f"\n⚠️ Connected, but tools/list failed: {tool_err}"
 
-        server_label = result.get("serverInfo", {}).get("name", name)
-        res_str = f"✅ Connected to MCP server '{name}' ({server_label}) at {url}{tools_line}"
+        servers[name] = existing
+        _save_servers(servers)
+
+        server_label = existing.get("server_info", {}).get("name", name)
+
+        if transport == "stdio":
+            dest = existing.get("command", "stdio")
+        else:
+            dest = existing.get("url", "?")
+
+        res_str = f"✅ Connected to MCP server '{name}' ({server_label}) at {dest}{tools_line}"
 
         if persist_warning:
             res_str += f"\n{persist_warning}"
@@ -750,6 +1604,7 @@ def list_servers() -> str:
 
         tool_summary = ""
         cached = info.get("tools_cache")
+
         if isinstance(cached, list):
             enabled_count = sum(
                 1 for t in cached if _is_tool_enabled(info, t.get("name", ""))
@@ -757,19 +1612,22 @@ def list_servers() -> str:
             tool_summary = f" | tools {enabled_count}/{len(cached)} enabled"
 
         connected = info.get("connected_at", "?")[:10]
+        transport = info.get("transport", "http")
+
+        if transport == "stdio":
+            dest = info.get("command", "stdio")
+        else:
+            dest = info.get("url", "?")
+
         lines.append(
-            f"  {state} {has_auth} {name} — {info.get('url', '?')} (connected {connected}){tool_summary}"
+            f"  {state} {has_auth} {name} — {transport}:{dest} (connected {connected}){tool_summary}"
         )
 
     return "\n".join(lines)
 
 
 def ping_server(name: str, timeout: int = 10, full: bool = False) -> str:
-    """
-    Ping a registered MCP server.
-
-    If full=True, runs a fuller test_server() diagnostic instead of a quick ping.
-    """
+    """Ping an MCP server. If full=True, run test_server() instead."""
     if full:
         return test_server(name, timeout=timeout, include_tools=True, as_dict=False)
 
@@ -779,42 +1637,35 @@ def ping_server(name: str, timeout: int = 10, full: bool = False) -> str:
         return f"❌ Server '{name}' not registered. Use connect_server() first."
 
     info = _ensure_server_defaults(servers[name])
-    token_env = info.get("auth_token_env", "")
-    token = _get_token(token_env)
 
     t0 = time.perf_counter()
 
     try:
+        conn = _get_connection(name, info, timeout=timeout)
+
         try:
-            _, _ = _rpc_with_session_recovery(
-                server_name=name,
-                info=info,
-                method="ping",
-                timeout=timeout,
-            )
+            conn.request("ping", timeout=timeout)
         except MCPError as e:
-            # Some servers may not implement ping; fall back to tools/list.
-            if e.code == -32601 or "method not found" in str(e).lower():
-                _, _ = _rpc_with_session_recovery(
-                    server_name=name,
-                    info=info,
-                    method="tools/list",
-                    timeout=timeout,
-                )
+            if _is_method_not_found(e):
+                conn.request("tools/list", timeout=timeout)
             else:
                 raise
 
         latency_ms = (time.perf_counter() - t0) * 1000
 
+        token_env = info.get("auth_token_env", "")
+        token = _get_token(token_env)
+
         if not token_env:
             auth_state = "no auth configured"
-        elif not token:
-            auth_state = "token missing"
-        else:
+        elif token:
             auth_state = "token configured"
+        else:
+            auth_state = "token missing"
 
         tool_state = ""
         cached = info.get("tools_cache")
+
         if isinstance(cached, list):
             enabled_count = sum(
                 1 for t in cached if _is_tool_enabled(info, t.get("name", ""))
@@ -823,52 +1674,10 @@ def ping_server(name: str, timeout: int = 10, full: bool = False) -> str:
         else:
             tool_state = " | Tools: not cached"
 
-        return (
-            f"✅ Server '{name}' is healthy and responsive ({latency_ms:.1f}ms latency) "
-            f"at {info.get('url', '?')} | Auth: {auth_state}{tool_state}"
-        )
+        return f"✅ Server '{name}' is healthy ({latency_ms:.1f}ms latency) | Auth: {auth_state}{tool_state}"
 
     except Exception as e:
         return f"❌ Server '{name}' ping failed: {e}"
-
-
-def _format_test_report(diag: dict) -> str:
-    lines = []
-
-    if diag.get("ok"):
-        lines.append(f"✅ MCP test for '{diag.get('server')}' succeeded")
-    else:
-        lines.append(f"❌ MCP test for '{diag.get('server')}' failed")
-
-    if diag.get("url"):
-        lines.append(f"URL: {diag['url']}")
-
-    auth = diag.get("auth", {})
-    if auth:
-        lines.append(f"Auth: {auth.get('state', 'unknown')}")
-
-    latency = diag.get("latency_ms", {})
-    if latency.get("ping") is not None:
-        lines.append(f"Ping latency: {latency['ping']:.1f}ms")
-
-    if latency.get("tools_list") is not None:
-        lines.append(f"Tools/list latency: {latency['tools_list']:.1f}ms")
-
-    tools = diag.get("tools", {})
-    if tools.get("total") is not None:
-        lines.append(
-            f"Tools discovered: {tools.get('enabled', 0)}/{tools.get('total', 0)} enabled"
-        )
-
-        disabled = tools.get("disabled_tools", [])
-        if disabled:
-            lines.append("Disabled tools: " + ", ".join(disabled[:20]))
-
-    errors = diag.get("errors", [])
-    if errors:
-        lines.append("Errors: " + " | ".join(errors[:5]))
-
-    return "\n".join(lines)
 
 
 def test_server(
@@ -877,23 +1686,15 @@ def test_server(
     include_tools: bool = True,
     as_dict: bool = False,
 ) -> Union[dict, str]:
-    """
-    Detailed MCP server health check.
-
-    Reports:
-    - auth state
-    - ping latency
-    - tools/list latency
-    - tools discovered
-    - enabled/disabled tool counts
-    """
+    """Detailed MCP server health check."""
     servers = _load_servers()
 
     if name not in servers:
         diag = {
             "server": name,
             "ok": False,
-            "url": "",
+            "destination": "",
+            "transport": "unknown",
             "auth": {"state": "unknown"},
             "latency_ms": {},
             "tools": {"total": None, "enabled": None, "disabled": None, "disabled_tools": []},
@@ -902,15 +1703,17 @@ def test_server(
         return diag if as_dict else f"❌ Server '{name}' not registered. Use connect_server() first."
 
     info = _ensure_server_defaults(servers[name])
-    url = info.get("url", "")
     token_env = info.get("auth_token_env", "")
     token = _get_token(token_env)
+    transport = str(info.get("transport", "http")).lower()
+
+    destination = info.get("command", "") if transport == "stdio" else info.get("url", "")
 
     diag: Dict[str, Any] = {
         "server": name,
         "ok": False,
-        "url": url,
-        "transport": info.get("transport", "http"),
+        "destination": destination,
+        "transport": transport,
         "auth": {
             "token_env": token_env,
             "configured": bool(token_env),
@@ -927,34 +1730,23 @@ def test_server(
         "errors": [],
     }
 
-    if not url:
-        diag["errors"].append("Server has no URL configured.")
-        return diag if as_dict else _format_test_report(diag)
-
-    # Ping / fallback liveness check
-    t0 = time.perf_counter()
-
     try:
+        t0 = time.perf_counter()
+        conn = _get_connection(name, info, timeout=timeout)
+        diag["latency_ms"]["connect"] = (time.perf_counter() - t0) * 1000
+        diag["ok"] = True
+
+        t1 = time.perf_counter()
+
         try:
-            _, _ = _rpc_with_session_recovery(
-                server_name=name,
-                info=info,
-                method="ping",
-                timeout=timeout,
-            )
+            conn.request("ping", timeout=timeout)
+            diag["latency_ms"]["ping"] = (time.perf_counter() - t1) * 1000
         except MCPError as e:
-            if e.code == -32601 or "method not found" in str(e).lower():
-                _, _ = _rpc_with_session_recovery(
-                    server_name=name,
-                    info=info,
-                    method="tools/list",
-                    timeout=timeout,
-                )
+            if _is_method_not_found(e):
+                conn.request("tools/list", timeout=timeout)
+                diag["latency_ms"]["ping"] = (time.perf_counter() - t1) * 1000
             else:
                 raise
-
-        diag["ok"] = True
-        diag["latency_ms"]["ping"] = (time.perf_counter() - t0) * 1000
 
     except MCPHTTPError as e:
         diag["errors"].append(str(e))
@@ -963,44 +1755,38 @@ def test_server(
     except Exception as e:
         diag["errors"].append(str(e))
 
-    # Tools discovery
     if include_tools:
-        t1 = time.perf_counter()
+        t2 = time.perf_counter()
 
         try:
             tools = _fetch_all_tools(name, info, timeout=timeout)
 
-            diag["latency_ms"]["tools_list"] = (time.perf_counter() - t1) * 1000
+            diag["latency_ms"]["tools_list"] = (time.perf_counter() - t2) * 1000
             diag["tools"]["total"] = len(tools)
 
-            enabled_names = []
-            disabled_names = []
+            enabled = []
+            disabled = []
 
             for t in tools:
                 tname = t.get("name", "")
-                if _is_tool_enabled(info, tname):
-                    enabled_names.append(tname)
-                else:
-                    disabled_names.append(tname)
 
-            diag["tools"]["enabled"] = len(enabled_names)
-            diag["tools"]["disabled"] = len(disabled_names)
-            diag["tools"]["disabled_tools"] = disabled_names[:50]
+                if _is_tool_enabled(info, tname):
+                    enabled.append(tname)
+                else:
+                    disabled.append(tname)
+
+            diag["tools"]["enabled"] = len(enabled)
+            diag["tools"]["disabled"] = len(disabled)
+            diag["tools"]["disabled_tools"] = disabled[:50]
 
             info["tools_cache"] = _tool_cache_from_tools(tools)
             info["tools_cache_at"] = datetime.now().isoformat()
 
-            # If ping failed but tools/list succeeded, server is still reachable.
             diag["ok"] = True
 
-        except MCPHTTPError as e:
-            diag["errors"].append(str(e))
-            if e.status_code in (401, 403):
-                diag["auth"]["state"] = "token rejected"
         except Exception as e:
             diag["errors"].append(str(e))
 
-    # Final auth state
     if diag["auth"]["state"] == "unknown":
         if not token_env:
             diag["auth"]["state"] = "no auth configured"
@@ -1015,9 +1801,6 @@ def test_server(
         "at": datetime.now().isoformat(),
         "ok": diag["ok"],
         "auth_state": diag["auth"]["state"],
-        "latency_ms": diag["latency_ms"],
-        "tools_total": diag["tools"]["total"],
-        "tools_enabled": diag["tools"]["enabled"],
         "errors": diag["errors"][:3],
     }
 
@@ -1027,11 +1810,11 @@ def test_server(
 
 
 def list_tools(server_name: str, timeout: Optional[int] = None) -> str:
-    """Discover tools available on a registered MCP server and show enabled/disabled state."""
+    """Discover tools available on a registered MCP server."""
     servers = _load_servers()
 
     if server_name not in servers:
-        return f"❌ Server '{server_name}' not registered. Use connect_server() first."
+        return f"❌ Server '{server_name}' not registered."
 
     info = _ensure_server_defaults(servers[server_name])
 
@@ -1078,7 +1861,6 @@ def list_all_mcp_tools(refresh: bool = False, timeout: Optional[int] = None) -> 
 
     for name, info in servers.items():
         info = _ensure_server_defaults(info)
-        servers[name] = info
 
         if not info.get("enabled", True):
             continue
@@ -1091,8 +1873,7 @@ def list_all_mcp_tools(refresh: bool = False, timeout: Optional[int] = None) -> 
                 cached = _tool_cache_from_tools(tools)
                 info["tools_cache"] = cached
                 info["tools_cache_at"] = datetime.now().isoformat()
-                servers[name] = info
-                _save_servers(servers)
+                _save_server_info(name, info)
             except Exception as e:
                 lines.append(f"⚠️ Failed to fetch tools from '{name}': {e}")
                 cached = info.get("tools_cache") if isinstance(info.get("tools_cache"), list) else []
@@ -1107,6 +1888,7 @@ def list_all_mcp_tools(refresh: bool = False, timeout: Optional[int] = None) -> 
 
             enabled = _is_tool_enabled(info, tool_name)
             total_tools += 1
+
             if enabled:
                 total_enabled += 1
 
@@ -1114,7 +1896,7 @@ def list_all_mcp_tools(refresh: bool = False, timeout: Optional[int] = None) -> 
             lines.append(f"{mark} mcp.{name}.{tool_name} [mcp:{name}]")
 
     if not lines:
-        return "📭 No MCP tools found. Register servers and run list_tools() or list_all_mcp_tools(refresh=True)."
+        return "📭 No MCP tools found."
 
     header = f"🧰 MCP tools ({total_enabled}/{total_tools} enabled):"
     return "\n".join([header] + lines)
@@ -1143,8 +1925,10 @@ def set_server_enabled(server_name: str, enabled: bool) -> str:
     servers[server_name] = info
     _save_servers(servers)
 
-    state = "enabled" if enabled else "disabled"
-    return f"✅ MCP server '{server_name}' is now {state}."
+    if not enabled:
+        close_connection(server_name)
+
+    return f"✅ MCP server '{server_name}' is now {'enabled' if enabled else 'disabled'}."
 
 
 def call_tool(
@@ -1154,12 +1938,7 @@ def call_tool(
     arguments_json: Optional[Union[str, dict]] = None,
     timeout: Optional[int] = None,
 ) -> str:
-    """
-    Call a tool on a registered MCP server.
-
-    arguments can be a JSON string or a Python dict of tool parameters.
-    timeout overrides the default per-call timeout in seconds.
-    """
+    """Call a tool on a registered MCP server."""
     servers = _load_servers()
 
     if server_name not in servers:
@@ -1168,7 +1947,7 @@ def call_tool(
     info = _ensure_server_defaults(servers[server_name])
 
     if not info.get("enabled", True):
-        return f"❌ MCP server '{server_name}' is disabled. Use set_server_enabled('{server_name}', True) to enable it."
+        return f"❌ MCP server '{server_name}' is disabled."
 
     if not _is_tool_enabled(info, tool_name):
         return (
@@ -1189,11 +1968,11 @@ def call_tool(
         return f"❌ Arguments must be a dict or JSON string, got {type(raw_args).__name__}"
 
     try:
-        result, _ = _rpc_with_session_recovery(
-            server_name=server_name,
-            info=info,
-            method="tools/call",
-            params={"name": tool_name, "arguments": args},
+        result = _request_server(
+            server_name,
+            info,
+            "tools/call",
+            {"name": tool_name, "arguments": args},
             timeout=timeout,
         )
 
@@ -1222,7 +2001,9 @@ def call_tool(
 
 
 def remove_server(name: str) -> str:
-    """Unregister an MCP server. Does not revoke the token at the provider — do that separately."""
+    """Unregister an MCP server and close any active connection."""
+    close_connection(name)
+
     servers = _load_servers()
 
     if name in servers:
@@ -1230,6 +2011,7 @@ def remove_server(name: str) -> str:
         _save_servers(servers)
 
         env_key = info.get("auth_token_env")
+
         if env_key:
             os.environ.pop(env_key, None)
 
@@ -1243,13 +2025,16 @@ def remove_server(name: str) -> str:
                 except Exception:
                     pass
 
-        return f"✅ Removed server '{name}' from registry (revoke its token at the provider separately)."
+        return f"✅ Removed server '{name}' from registry."
 
     return f"❌ Server '{name}' not found."
 
 
+# ---------------------------------------------------------------------------
+# Workspace discovery
+# ---------------------------------------------------------------------------
+
 def _find_workspace_config(root: str = ".") -> Optional[Path]:
-    """Find the first workspace MCP config file in root or its parents."""
     root_path = Path(root).resolve()
 
     if not root_path.exists():
@@ -1266,25 +2051,41 @@ def _find_workspace_config(root: str = ".") -> Optional[Path]:
     return None
 
 
+def _sanitize_workspace_env(env: Any) -> dict:
+    if not isinstance(env, dict):
+        return {}
+
+    clean = {}
+
+    for k, v in env.items():
+        if not isinstance(k, str):
+            continue
+
+        key = k.strip()
+        upper = key.upper()
+
+        if not key or upper in _DANGEROUS_ENV_KEYS:
+            continue
+
+        if isinstance(v, (str, int, float, bool)):
+            clean[key] = str(v)
+
+    return clean
+
+
 def discover_workspace_servers(root: str = ".", register: bool = False, trust: bool = False) -> str:
     """
     Discover workspace-local MCP config files.
 
-    This currently supports HTTP MCP servers only. Stdio/command-based servers
-    are reported as unsupported.
-
-    Safe default:
+    Safe defaults:
     - register=False, trust=False → dry-run discovery only
-    - register=True, trust=False → still refuses to register
+    - register=True, trust=False → refuses to register
     - register=True, trust=True → registers discovered servers as disabled
     """
     path = _find_workspace_config(root)
 
     if not path:
-        return (
-            "📭 No workspace MCP config found. Looked for: "
-            + ", ".join(_WORKSPACE_CONFIG_CANDIDATES)
-        )
+        return "📭 No workspace MCP config found. Looked for: " + ", ".join(_WORKSPACE_CONFIG_CANDIDATES)
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1307,35 +2108,55 @@ def discover_workspace_servers(root: str = ".", register: bool = False, trust: b
             unsupported.append(f"{sname} (invalid config)")
             continue
 
-        if cfg.get("command") or cfg.get("args"):
-            unsupported.append(f"{sname} (stdio not supported yet)")
-            continue
-
+        command = cfg.get("command")
         url = cfg.get("url")
-        if not url:
-            unsupported.append(f"{sname} (no url)")
-            continue
 
-        discovered.append(
-            (
-                sname,
-                {
-                    "url": url,
-                    "auth_token_env": cfg.get("auth_token_env", ""),
-                    "transport": "http",
-                },
+        if command:
+            command_str = str(command)
+
+            if re.search(r"[;&|<>$`]", command_str):
+                unsupported.append(f"{sname} (unsafe command)")
+                continue
+
+            discovered.append(
+                (
+                    sname,
+                    {
+                        "transport": "stdio",
+                        "command": command_str,
+                        "args": cfg.get("args", []),
+                        "env": _sanitize_workspace_env(cfg.get("env", {})),
+                    },
+                )
             )
-        )
+        elif url:
+            transport = str(cfg.get("transport", "http")).lower()
+
+            if transport not in ("http", "streamable-http", "streamable_http", "sse", "http_sse", "http+sse"):
+                transport = "http"
+
+            discovered.append(
+                (
+                    sname,
+                    {
+                        "transport": transport,
+                        "url": str(url),
+                        "auth_token_env": str(cfg.get("auth_token_env", "")),
+                    },
+                )
+            )
+        else:
+            unsupported.append(f"{sname} (no command or url)")
 
     lines = [f"📁 Workspace MCP config: {path}"]
 
     if discovered:
-        lines.append("Discovered HTTP MCP servers:")
+        lines.append("Discovered MCP servers:")
         for sname, cfg in discovered:
-            auth_note = f" (auth_token_env={cfg['auth_token_env']})" if cfg.get("auth_token_env") else ""
-            lines.append(f"  • {sname} — {cfg['url']}{auth_note}")
+            dest = cfg.get("url") or cfg.get("command")
+            lines.append(f"  • {sname} — {cfg.get('transport')}: {dest}")
     else:
-        lines.append("📭 No usable HTTP MCP servers found in workspace config.")
+        lines.append("📭 No usable MCP servers found in workspace config.")
 
     if unsupported:
         lines.append("Unsupported entries: " + ", ".join(unsupported))
@@ -1360,12 +2181,9 @@ def discover_workspace_servers(root: str = ".", register: bool = False, trust: b
             skipped.append(sname)
             continue
 
-        info = _ensure_server_defaults({})
+        info = _ensure_server_defaults(cfg)
         info.update(
             {
-                "url": cfg["url"],
-                "transport": "http",
-                "auth_token_env": cfg.get("auth_token_env", ""),
                 "enabled": False,
                 "source": "workspace",
                 "workspace_config": str(path),
@@ -1386,22 +2204,3 @@ def discover_workspace_servers(root: str = ".", register: bool = False, trust: b
         lines.append("Skipped existing servers: " + ", ".join(skipped))
 
     return "\n".join(lines)
-
-
-__all__ = [
-    "NAME",
-    "SHORT_DOC",
-    "DOC",
-    "connect_server",
-    "list_servers",
-    "ping_server",
-    "test_server",
-    "list_tools",
-    "list_all_mcp_tools",
-    "enable_tool",
-    "disable_tool",
-    "set_server_enabled",
-    "call_tool",
-    "remove_server",
-    "discover_workspace_servers",
-]
