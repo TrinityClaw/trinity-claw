@@ -119,11 +119,11 @@ _SKILL_DOMAIN_MAP: Dict[str, frozenset] = {
 
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
 SESSION_MAX_MESSAGES = 16        # 8 turns (user + assistant pairs) for cloud models
-SESSION_MAX_MESSAGES_LOCAL = 8   # 4 turns for local models — tighter context windows
+SESSION_MAX_MESSAGES_LOCAL = 6   # 3 turns for local models — tighter context windows
 SESSION_TIMEOUT_MINUTES = 120    # auto-expire after 2h inactivity
 SESSION_SUMMARY_KEEP = 4         # Keep only last 4 messages verbatim (reduced from 6)
 JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds this
-TOOL_RESULT_PRUNE_CHARS = 200    # prune tool results longer than this in older turns (reduced from 300)
+TOOL_RESULT_PRUNE_CHARS = 120    # prune tool results longer than this in older turns (reduced from 300)
 TOOL_RESULT_PROTECT_RECENT = 2   # always keep the last N tool results verbatim (reduced from 4)
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
 session_store: Dict[str, Dict] = {}
@@ -1189,7 +1189,7 @@ def _prune_tool_results(messages: List[Dict]) -> List[Dict]:
         elif (
             msg.get("role") == "tool"
             and isinstance(msg.get("content"), str)
-            and len(msg["content"]) > 1000  # Hard cap for ANY tool result
+            and len(msg["content"]) > 600  # Hard cap for ANY tool result
         ):
             msg = {**msg, "content": msg["content"][:1000] + f"\n...[truncated, {len(msg['content'])} chars total]"}
         pruned.append(msg)
@@ -3123,15 +3123,16 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     for name, meta in skill_metadata.items():
         funcs_meta = meta.get("functions", [])
         skill_names_list.append(name)
-        # Universal compact format for all models (local and cloud):
-        # short_doc keeps upfront token cost low; arg names let any model form a
-        # valid call on the first try without guessing. Full docs are injected
-        # on-demand inside the [✅ result] block when the skill is actually invoked
-        # (execute_skill_tags path). Native tool-calling models (Gemma4, Claude,
-        # GPT-4o) also receive full per-function schemas via _build_tools_schema().
-        # skills_doc is a discovery index only — args are already in the tools schema
-        # sent to the model on every request. Cap at 8 names to keep heavy skills
-        # (browser_session, web, notes) from bloating the system prompt.
+        # Keyword-gated compact format: for skills unrelated to this message,
+        # emit name-only (the one-line 'Skills you have' index keeps every skill
+        # discoverable, and full docs are injected on-demand inside the
+        # [✅ result] block when a skill actually runs). Relevant skills keep
+        # short_doc + function names so any model forms a valid call on the
+        # first try without guessing. Saves ~1k tokens per request.
+        _kw = _HEAVY_SKILL_KEYWORDS.get(name)
+        if _kw is not None and not (_msg_words & _kw):
+            available_skills.append(f"[SKILL: {name}]")
+            continue
         _MAX_FUNCS_IN_DOC = 8
         func_names = [f["name"] for f in funcs_meta]
         if len(func_names) > _MAX_FUNCS_IN_DOC:
@@ -3343,7 +3344,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             except Exception:
                 pass
         # Sort by timestamp descending, cap at 10 for local (tight ctx), 20 for cloud
-        _lessons_cap = 10 if _is_local_model else 20
+        _lessons_cap = 5 if _is_local_model else 20
         _sorted_all = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
         # Reorder: lessons for skills matching the current message's keywords come first.
         # Same cap, better signal — skills the user is about to use get their warnings up front.
@@ -3380,7 +3381,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
     if _is_new_session or session_id not in _session_daily_memory:
         _daily_memory_block = ""
         try:
-            _journal_days = 3 if _is_local_model else 7
+            _journal_days = 1 if _is_local_model else 7
             _cutoff_str = (_date.today() - _timedelta(days=_journal_days)).isoformat()
             _journal_entries = {}
             _journal_raw = _fcache.read_text("/app/memory/daily_journal.jsonl")
@@ -3396,10 +3397,10 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             _journal_lines = []
             for _je in sorted(_journal_entries.values(), key=lambda x: x["date"], reverse=True):
                 _label = "TODAY" if _je["date"] == _today_str else _je["date"]
-                _journal_lines.append(f"[{_label}] {_je.get('summary', '')}")
+                _journal_lines.append(f"[{_label}] {_je.get('summary', '')[:200]}")
                 if _je.get("learned"):
                     _learned_lines = [l for l in _je["learned"].splitlines() if l.strip()]
-                    _learned_cap   = 3
+                    _learned_cap   = 2
                     _learned_shown = _learned_lines[:_learned_cap]
                     _learned_rest  = len(_learned_lines) - _learned_cap
                     _learned_str   = " | ".join(_learned_shown)
@@ -3407,7 +3408,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         _learned_str += f" (+{_learned_rest} more)"
                     _journal_lines.append(f"  Learned: {_learned_str}")
                 if _je.get("user_insights"):
-                    _journal_lines.append(f"  User: {_je['user_insights']}")
+                    _journal_lines.append(f"  User: {_je['user_insights'][:200]}")
                 if _je.get("next_steps"):
                     _ns = _je["next_steps"]
                     # Skip next_steps that are purely about scheduled/recurring tasks —
