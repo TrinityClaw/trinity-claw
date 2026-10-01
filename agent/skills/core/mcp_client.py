@@ -111,6 +111,16 @@ _DANGEROUS_ENV_KEYS = {
     "SHELL",
 }
 
+# Only these variables (plus a server's explicitly configured env) are passed
+# to stdio MCP servers. Everything else - including every secret in .env - is
+# withheld. ${VAR} references in a server's env config still resolve at start
+# time, so a server that needs a specific secret can receive it explicitly.
+_SAFE_ENV_BASELINE = (
+    "PATH", "HOME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "TMPDIR", "TEMP", "TMP",
+    "SystemRoot", "COMSPEC", "PATHEXT", "WINDIR", "PROGRAMFILES",
+)
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -321,6 +331,7 @@ def _tool_cache_from_tools(tools: List[dict]) -> List[dict]:
                 {
                     "name": t.get("name", ""),
                     "description": t.get("description", ""),
+                    "inputSchema": t.get("inputSchema", {}),
                 }
             )
     return cache
@@ -1038,7 +1049,11 @@ class StdioTransport:
 
     def start(self, timeout: Optional[int] = None) -> None:
         cmd = self._build_cmd()
-        merged_env = dict(os.environ)
+        # Security: do NOT pass the full process environment to stdio servers -
+        # it contains every secret in .env (API keys, tokens). Pass only a safe
+        # baseline plus the explicitly configured env; ${VAR} references in the
+        # server config still resolve from the process environment.
+        merged_env = {k: os.environ[k] for k in _SAFE_ENV_BASELINE if k in os.environ}
 
         expanded_env = _expand_env(self.env)
         if isinstance(expanded_env, dict):
