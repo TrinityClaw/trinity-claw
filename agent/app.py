@@ -386,6 +386,107 @@ def _build_tools_schema() -> list:
     return tools
 
 
+def _get_mcp_tool_registry(servers: Optional[dict] = None) -> Dict[str, tuple]:
+    """Build a registry of MCP tools from connected MCP servers.
+
+    Maps registered tool name -> (server_name, tool_name, description, inputSchema).
+    Registered names follow Hermes' convention: mcp_<server>_<tool>, with
+    non-alphanumeric characters normalized to underscores (create-issue ->
+    mcp_github_create_issue). Tools respect each server's enable/disable
+    policy. Reads mcp_servers.json fresh (no network) so newly connected
+    servers appear on the next request.
+    """
+    if servers is None:
+        _mc = skills.get("mcp_client")
+        if not _mc or not hasattr(_mc, "_load_servers"):
+            return {}
+        try:
+            servers = _mc._load_servers()
+        except Exception:
+            return {}
+    if not isinstance(servers, dict):
+        return {}
+
+    registry: Dict[str, tuple] = {}
+    for server_name, info in servers.items():
+        if not isinstance(info, dict) or not info.get("enabled", True):
+            continue
+        policy = info.get("tool_policy") if isinstance(info.get("tool_policy"), dict) else {}
+        disabled = set(policy.get("disabled", []))
+        enabled_list = set(policy.get("enabled", []))
+        default_on = policy.get("default", "enabled") == "enabled"
+        cached = info.get("tools_cache")
+        if not isinstance(cached, list):
+            continue
+        safe_server = re.sub(r"[^A-Za-z0-9_]", "_", server_name)
+        for t in cached:
+            if not isinstance(t, dict):
+                continue
+            tool_name = t.get("name", "")
+            if not tool_name or tool_name in disabled:
+                continue
+            if not default_on and tool_name not in enabled_list:
+                continue
+            safe_tool = re.sub(r"[^A-Za-z0-9_]", "_", tool_name)
+            reg_name = f"mcp_{safe_server}_{safe_tool}"[:64]
+            registry[reg_name] = (server_name, tool_name, t.get("description", ""), t.get("inputSchema", {}))
+    return registry
+
+
+def _build_mcp_tools_schema(servers: Optional[dict] = None) -> List[Dict]:
+    """Build OpenAI-style tool entries for MCP tools from connected servers.
+
+    inputSchema comes from the server's tools_cache when available (saved on
+    connect); otherwise a generic object schema is used so the model can
+    still form a call.
+    """
+    if servers is None:
+        _mc = skills.get("mcp_client")
+        if not _mc or not hasattr(_mc, "_load_servers"):
+            return []
+        try:
+            servers = _mc._load_servers()
+        except Exception:
+            return []
+    if not isinstance(servers, dict):
+        return []
+
+    tools = []
+    for server_name, info in servers.items():
+        if not isinstance(info, dict) or not info.get("enabled", True):
+            continue
+        policy = info.get("tool_policy") if isinstance(info.get("tool_policy"), dict) else {}
+        disabled = set(policy.get("disabled", []))
+        enabled_list = set(policy.get("enabled", []))
+        default_on = policy.get("default", "enabled") == "enabled"
+        cached = info.get("tools_cache")
+        if not isinstance(cached, list):
+            continue
+        safe_server = re.sub(r"[^A-Za-z0-9_]", "_", server_name)
+        for t in cached:
+            if not isinstance(t, dict):
+                continue
+            tool_name = t.get("name", "")
+            if not tool_name or tool_name in disabled:
+                continue
+            if not default_on and tool_name not in enabled_list:
+                continue
+            safe_tool = re.sub(r"[^A-Za-z0-9_]", "_", tool_name)
+            reg_name = f"mcp_{safe_server}_{safe_tool}"[:64]
+            schema = t.get("inputSchema")
+            if not isinstance(schema, dict):
+                schema = {"type": "object", "properties": {}, "required": []}
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": reg_name,
+                    "description": (t.get("description", "") or reg_name),
+                    "parameters": schema,
+                },
+            })
+    return tools
+
+
 def _build_tools_schema_for_request(message: str, used_skills: Optional[set] = None) -> List[Dict]:
     """
     Return a per-request filtered tools schema from _TOOLS_SCHEMA_CACHE.
@@ -398,7 +499,7 @@ def _build_tools_schema_for_request(message: str, used_skills: Optional[set] = N
       cache is built, or after a failed reload).
     """
     if not _TOOLS_SCHEMA_CACHE:
-        return _build_tools_schema()
+        return _build_tools_schema() + _build_mcp_tools_schema()
 
     msg_words = set(message.lower().split())
     heavy_skills = set(_SKILL_DOMAIN_MAP.keys())
@@ -423,6 +524,16 @@ def _build_tools_schema_for_request(message: str, used_skills: Optional[set] = N
     _kept  = len(filtered)
     if _kept < _total:
         print(f"🔍 Skill preview: {_kept}/{_total} tool entries (saved ~{(_total - _kept) * 80} tokens)")
+
+    # MCP tools from connected servers are always appended - rebuilt fresh
+    # from the registry (mcp_servers.json) on every request, because MCP
+    # connections change at runtime and the skill schema cache does not.
+    try:
+        _mcp_tools = _build_mcp_tools_schema()
+    except Exception:
+        _mcp_tools = []
+    if _mcp_tools:
+        filtered = filtered + _mcp_tools
 
     return filtered
 
@@ -1137,6 +1248,24 @@ def _sanitize_external_content(text: str, source: str = "unknown") -> str:
         "\ufeff",                                           # BOM / zero-width no-break
     }
     cleaned = "".join(ch for ch in text if ch not in _INVISIBLE)
+
+    # Strip invisible Unicode TAG characters (U+E0000-U+E007F). They render as
+    # nothing in terminals and chat UIs but are fully visible to the model - a
+    # classic prompt-injection smuggling channel for a malicious or compromised
+    # server. Must run BEFORE the pattern check so injections hidden with tag
+    # chars are revealed. Legitimate regional-flag emoji (black flag + tag
+    # chars + cancel tag) are protected and preserved.
+    _flag_stash: list = []
+
+    def _stash_flag(m):
+        _flag_stash.append(m.group(0))
+        return f"\x00FLAG{len(_flag_stash) - 1}\x00"
+
+    import re as _re_sec
+    cleaned = _re_sec.sub("\U0001F3F4[\U000E0000-\U000E007F]+\U000E007F", _stash_flag, cleaned)
+    cleaned = _re_sec.sub("[\U000E0000-\U000E007F]", "", cleaned)
+    for _i, _flag in enumerate(_flag_stash):
+        cleaned = cleaned.replace(f"\x00FLAG{_i}\x00", _flag)
 
     # Classic prompt injection trigger phrases (case-insensitive).
     _INJECTION_PATTERNS = [
@@ -1978,6 +2107,48 @@ def execute_skill_tags(response_text: str) -> tuple:
         content = match.group(3).strip()
 
         try:
+            # MCP tools registered from connected servers: <skill:mcp_server_tool>
+            # calls the tool directly (single tag) instead of the 3-hop
+            # mcp_client.call_tool(server,tool,json). Positional args are mapped
+            # to the tool's inputSchema properties in order; JSON args pass as-is.
+            _mcp_key = skill_name if not func_name else skill_name + "." + func_name
+            if _mcp_key != "mcp_client":
+                _mcp_entry = _get_mcp_tool_registry().get(_mcp_key)
+                if _mcp_entry:
+                    _srv, _tool, _mcp_desc, _mcp_schema = _mcp_entry
+                    _args_obj = {}
+                    _raw = content.strip()
+                    if _raw.startswith("{") or _raw.startswith("["):
+                        try:
+                            _args_obj = json.loads(_raw)
+                        except Exception:
+                            _args_obj = {}
+                    elif _raw:
+                        _props = list((_mcp_schema or {}).get("properties", {}).keys())
+                        _vals = [v.strip().strip("\"'") for v in _raw.split(",")]
+                        for _vi, _vv in enumerate(_vals):
+                            _vk = _props[_vi] if _vi < len(_props) else "arg" + str(_vi)
+                            _args_obj[_vk] = _vv
+                    result = call_skill_improved("mcp_client", "call_tool", _srv, _tool, _args_obj)
+                    if result["success"]:
+                        result_str = str(result.get("result", ""))
+                        output = "\n[\u2705 mcp." + _srv + "." + _tool + " Result:\n" + result_str + "]\n"
+                        execution_log.append({"skill": "mcp_client", "function": _srv + "." + _tool, "status": "success", "result": result_str})
+                    else:
+                        error_msg = result.get("error", "Unknown error")
+                        output = "\n[\u274C mcp." + _srv + "." + _tool + " Error: " + error_msg + "]\n"
+                        execution_log.append({"skill": "mcp_client", "function": _srv + "." + _tool, "status": "error", "error": error_msg})
+                        if "self_improvement" in skills:
+                            try:
+                                skills["self_improvement"].record_mistake(
+                                    skill_name="mcp_client.call_tool",
+                                    error_type=_classify_skill_error(error_msg),
+                                    error_msg=error_msg,
+                                )
+                            except Exception:
+                                pass
+                    return output
+
             # Security: Only allow skills that are actually loaded
             if skill_name not in skills:
                 error_msg = f"[⚠️ Skill '{skill_name}' not found. Available: {list(skills.keys())[:5]}... Call /skills/reload if just created.]"
@@ -2276,6 +2447,31 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
                                 pass
             except (ValueError, TypeError):
                 pass
+
+        # MCP tools registered from connected servers: route directly to
+        # mcp_client.call_tool - no 3-hop (server + tool + JSON string) needed.
+        _mcp_entry = _get_mcp_tool_registry().get(tool_name)
+        if _mcp_entry:
+            _srv, _tool, _mcp_desc, _mcp_schema = _mcp_entry
+            result = call_skill_improved("mcp_client", "call_tool", _srv, _tool, arguments)
+            if result["success"]:
+                content = str(result.get("result", ""))
+                execution_log.append({"skill": "mcp_client", "function": _srv + "." + _tool, "status": "success", "result": content})
+            else:
+                err = result.get("error", "Unknown error")
+                content = "Error in mcp_client.call_tool (" + _srv + "." + _tool + "): " + err
+                execution_log.append({"skill": "mcp_client", "function": _srv + "." + _tool, "status": "error", "error": err})
+                if "self_improvement" in skills:
+                    try:
+                        skills["self_improvement"].record_mistake(
+                            skill_name="mcp_client.call_tool",
+                            error_type=_classify_skill_error(err),
+                            error_msg=err,
+                        )
+                    except Exception:
+                        pass
+            tool_result_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
+            continue
 
         # Pre-dispatch lesson check — same guard as the local execute_skill_tags path.
         # Warn the model before the call fires so it can correct arguments or skip.
@@ -3145,6 +3341,19 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
 
     skills_doc = "\n".join(available_skills)
     _skill_index_line = "Skills you have: " + ", ".join(skill_names_list)
+
+    # MCP tools from connected servers are first-class: listed with their
+    # registered name so the model calls them directly (single tag).
+    try:
+        _mcp_registry = _get_mcp_tool_registry()
+    except Exception:
+        _mcp_registry = {}
+    if _mcp_registry:
+        _mcp_doc_lines = ["MCP tools (call directly like a skill; args as JSON object or comma-separated):"]
+        for _reg_name in sorted(_mcp_registry):
+            _srv, _tool, _desc, _sch = _mcp_registry[_reg_name]
+            _mcp_doc_lines.append("  <skill:" + _reg_name + ">args</skill:" + _reg_name + "> - " + (_desc or _reg_name)[:90])
+        skills_doc += "\n" + "\n".join(_mcp_doc_lines)
 
     # Detect whether the current message is web-dev related so we can gate the
     # website build workflow block (60+ lines). Injecting it on every request
