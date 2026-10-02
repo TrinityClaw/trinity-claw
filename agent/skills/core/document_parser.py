@@ -114,7 +114,13 @@ def _resolve(path: str) -> Path:
             candidate = (_BASE / p).resolve()
     else:
         candidate = p.resolve()
-    if not str(candidate).startswith(str(_BASE.resolve())):
+    # /tmp/trinity_doc_* uploads (written by chat()) are readable here.
+    _candidate_str = str(candidate)
+    if not (
+        _candidate_str.startswith(str(_BASE.resolve()))
+        or _candidate_str.startswith("/tmp/trinity_doc_")
+        or _candidate_str.startswith("/tmp/trinity_img_")
+    ):
         raise ValueError(f"Path escapes /app/: {path}")
     return candidate
 

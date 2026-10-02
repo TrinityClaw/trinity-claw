@@ -61,7 +61,15 @@ def _read_path(path: str) -> Path:
     """Resolve path; reads are confined to /app except for sensitive files."""
     p = Path(path) if Path(path).is_absolute() else _APP / path
     resolved = p.resolve()
-    if not resolved.is_relative_to(_APP.resolve()):
+    # /tmp/trinity_doc_ and /tmp/trinity_img_ are the upload areas written
+    # by chat() - it explicitly points the model at these paths with
+    # files__cat / document_parser__read, so they must be readable here.
+    _resolved_str = str(resolved)
+    if not (
+        resolved.is_relative_to(_APP.resolve())
+        or _resolved_str.startswith("/tmp/trinity_doc_")
+        or _resolved_str.startswith("/tmp/trinity_img_")
+    ):
         raise PermissionError(f"🔒 Access denied: path escapes /app: {path}")
     if _is_sensitive(resolved):
         raise PermissionError(f"🔒 Access denied: '{resolved.name}' is a protected credential file.")
