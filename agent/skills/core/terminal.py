@@ -30,6 +30,10 @@ import shlex
 from pathlib import Path
 from typing import Optional
 
+# Executor headroom (app.py reads this): the FIRST docker-sandbox call may
+# pull the sandbox image, which can take 30s+ on a cold cache.
+SKILL_TIMEOUT = int(os.getenv("TERMINAL_SKILL_TIMEOUT", "90"))
+
 # ── Skill metadata (required by skill loader) ────────────────────────────────
 NAME = "terminal"
 SHORT_DOC = "Run Python snippets, test skills, execute bash commands, and evaluate math expressions safely."
@@ -284,6 +288,67 @@ def test_skill(skill_name: str, fn_name: str, args_json: str = "[]", timeout: in
     return _run_in_subprocess(harness, timeout)
 
 
+def _get_docker_sandbox_client():
+    """Lazy docker client for the sandbox. Returns None when unavailable."""
+    try:
+        import docker as _docker
+        return _docker.from_env()
+    except Exception:
+        return None
+
+
+def _run_in_docker_sandbox(command: str, timeout: int):
+    """Run the command in an ephemeral sibling container when the Docker socket
+    is available: no /app mount (agent files and secrets are invisible), no
+    docker.sock, environment stripped, memory/CPU capped. Returns None when
+    Docker is unavailable so the caller falls back to direct execution."""
+    client = _get_docker_sandbox_client()
+    if client is None:
+        return None
+
+    image = os.getenv("TERMINAL_SANDBOX_IMAGE", "python:3.11-slim")
+    network_mode = os.getenv("TERMINAL_SANDBOX_NETWORK", "bridge")
+    container = None
+    try:
+        try:
+            client.images.get(image)
+        except Exception:
+            client.images.pull(image)  # first use only - needs internet
+        container = client.containers.run(
+            image,
+            command=["sh", "-c", command],
+            detach=True,
+            network_mode=network_mode,
+            environment={},
+            mem_limit=os.getenv("TERMINAL_SANDBOX_MEM", "512m"),
+            nano_cpus=int(float(os.getenv("TERMINAL_SANDBOX_CPUS", "1")) * 1e9),
+        )
+        try:
+            _wait_result = container.wait(timeout=timeout)
+        except Exception:
+            return f"⏛ TIMEOUT: Command exceeded {timeout}s (docker sandbox)."
+        logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace").strip()
+        exit_code = 0
+        if isinstance(_wait_result, dict):
+            exit_code = _wait_result.get("StatusCode", 0) or 0
+        if exit_code != 0:
+            body = _truncate(logs) if logs else "(no output)"
+            return f"❌ Exit {exit_code} (docker sandbox):\n{body}"
+        body = logs if logs else "(no output)"
+        return f"✅ (docker sandbox):\n{body}"
+    except Exception as e:
+        # Sandbox infrastructure error (image pull failed, daemon hiccup) -
+        # fall back to direct execution, loudly.
+        print(f"⚠️  Docker sandbox error, falling back to direct execution: {e}")
+        return None
+    finally:
+        if container:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+
+
 def run_bash(command: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """
     Run a whitelisted bash command in a subprocess (no shell=True).
@@ -324,6 +389,24 @@ def run_bash(command: str, timeout: int = DEFAULT_TIMEOUT) -> str:
             f"  Allowed commands: {sorted(_BASH_WHITELIST)}\n"
             f"  Tip: use run_snippet() to run Python code."
         )
+
+    # Docker sandbox: when the Docker socket is available, run the command in
+    # an ephemeral sibling container - no /app mount (no secrets), environment
+    # stripped. Returns None (fallback to direct execution) without Docker.
+    _sandbox_result = _run_in_docker_sandbox(command, timeout)
+    if _sandbox_result is not None:
+        # Targeted hint: the sandbox is isolated - /app reads must go through
+        # the files skill. Fires only when an /app read actually failed, so
+        # the model pivots instead of retrying the same command.
+        if (
+            "/app" in command
+            and ("No such file" in _sandbox_result or "cannot access" in _sandbox_result)
+        ):
+            return _sandbox_result + (
+                "\n\U0001F4CA The terminal sandbox is isolated and cannot see /app files. "
+                "Use <skill:files.cat>path</skill:files.cat> to read agent files."
+            )
+        return _sandbox_result
 
     try:
         result = subprocess.run(
