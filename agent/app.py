@@ -2316,6 +2316,11 @@ def execute_skill_tags(response_text: str) -> tuple:
 
                 args = [filename, code]
                 kwargs = {}
+            elif skill_name == 'script_runner' and func_name == 'run_script':
+                # The tag content IS the script - pass it whole. Comma-splitting
+                # or key=value parsing would shred multi-line code into args/kwargs.
+                args = [content]
+                kwargs = {}
             else:
                 # Standard argument parsing for all other skills.
                 # Look up the function's parameter count so parse_skill_args can
@@ -3616,6 +3621,25 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
             "immediately call notes__set_preference for each specific preference detected (key=preference_name, value=preference_value, source='user'). "
             "Also keep the human-readable summary current by calling notes__save with title='user_preferences' and the updated full preferences list."
         )
+
+    # Script-calling: multi-step tasks (3+ tool calls) collapse into ONE
+    # zero-context turn - the script calls skills via RPC with no LLM in the
+    # loop, so there is no full system-prompt re-send per step. Applies to
+    # both modes: local models use the tag form, cloud models call the
+    # script_runner__run_script tool directly.
+    _script_usage = (
+        "\n## MULTI-STEP TASKS \u2014 WRITE ONE SCRIPT\n\n"
+        "For tasks needing 3+ tool calls, write ONE Python script and run it with\n"
+        "<skill:script_runner.run_script> \u2014 skills are called inside via the tool() helper:\n"
+        "<skill:script_runner.run_script>\n"
+        "print(tool('files', 'ls', '/app/memory'))\n"
+        "print(tool('files', 'cat', '/app/memory/notes.json')[:500])\n"
+        "print(tool('web', 'search', 'current gold price')[:500])\n"
+        "</skill:script_runner.run_script>\n"
+        "tool(skill, function, *args, **kwargs) returns the result; failures raise RuntimeError.\n"
+        "Print only what matters (output capped at 3000 chars). Single quick command \u2192 plain skill tag.\n"
+    )
+    _skill_usage_section += _script_usage
 
     # Determine if this is a new session BEFORE any code that references _is_new_session
     _is_new_session = len(history) == 0
