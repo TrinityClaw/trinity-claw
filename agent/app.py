@@ -1746,6 +1746,70 @@ def load_session_from_disk(session_id: str) -> List[Dict]:
     return messages
 
 
+# ── Cross-session checkpoints ──────────────────────────────────────────────────────────────────────────────
+# Written when a session expires (2h inactivity) or via /session/compress.
+# Re-injected once at the start of the next session so conversation context
+# survives across days — the piece in-session auto-compaction can't provide.
+CHECKPOINT_MAX_AGE_HOURS = 48
+CHECKPOINT_MAX_CHARS = 800
+_CHECKPOINTS_KEEP = 10
+
+def _checkpoints_file() -> Path:
+    p = Path("/app/memory/session_checkpoints.json")
+    if p.exists() or Path("/app").exists():
+        return p
+    return Path("memory/session_checkpoints.json")
+
+def _load_session_checkpoints() -> dict:
+    try:
+        raw = _checkpoints_file().read_text(encoding="utf-8")
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _save_session_checkpoint(session_id: str, summary: str, turns: int) -> None:
+    """Persist a session checkpoint (summary + timestamp), keeping the most recent N."""
+    try:
+        data = _load_session_checkpoints()
+        data[session_id] = {
+            "summary": summary[:CHECKPOINT_MAX_CHARS],
+            "timestamp": datetime.now().isoformat(),
+            "turns": turns,
+        }
+        items = sorted(data.items(), key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)[:_CHECKPOINTS_KEEP]
+        _f = _checkpoints_file()
+        _f.parent.mkdir(parents=True, exist_ok=True)
+        _f.write_text(json.dumps(dict(items), indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"💾 Checkpoint saved for session {session_id[:12]}...")
+    except Exception as e:
+        print(f"⚠️  Checkpoint save failed: {e}")
+
+def _load_session_checkpoint(session_id: str) -> str:
+    """Return the most relevant recent checkpoint: this session's if present,
+    else the most recent one (single-user setup). Empty if none are recent."""
+    data = _load_session_checkpoints()
+    if not data:
+        return ""
+    from datetime import timedelta as _td
+    cutoff = datetime.now() - _td(hours=CHECKPOINT_MAX_AGE_HOURS)
+    candidates = []
+    for sid, ck in data.items():
+        if not isinstance(ck, dict):
+            continue
+        try:
+            ts = datetime.fromisoformat(ck.get("timestamp", ""))
+        except Exception:
+            continue
+        if ts < cutoff:
+            continue
+        candidates.append((ts, sid == session_id, ck.get("summary", "")))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda c: (c[1], c[0]), reverse=True)
+    return candidates[0][2][:CHECKPOINT_MAX_CHARS]
+
+
 def get_session_history(session_id: str) -> List[Dict]:
     """Return active session message history, auto-expiring stale sessions."""
     if not session_id:
@@ -1759,19 +1823,25 @@ def get_session_history(session_id: str) -> List[Dict]:
     elapsed_minutes = (datetime.now() - entry["last_active"]).total_seconds() / 60
     if elapsed_minutes > SESSION_TIMEOUT_MINUTES:
         msgs = [m for m in entry["messages"] if m.get("role") != "system"]
-        if msgs and collection:
+        if msgs:
             try:
                 summary = summarize_messages(msgs)
-                if summary:
-                    now_iso = datetime.now().isoformat()
-                    collection.add(
-                        documents=[summary],
-                        ids=[f"session_summary_{str(uuid.uuid4())[:12]}"],
-                        metadatas=[{"type": "session_summary", "session_id": session_id, "timestamp": now_iso, "turn_count": len(msgs) // 2, "hit_count": 0, "last_accessed": now_iso}]
-                    )
-                    print(f"💾 Stored expiry summary for session {session_id[:12]}...")
-            except Exception as e:
-                print(f"⚠️  Session expiry summary failed: {e}")
+            except Exception:
+                summary = ""
+            if summary:
+                if collection:
+                    try:
+                        now_iso = datetime.now().isoformat()
+                        collection.add(
+                            documents=[summary],
+                            ids=[f"session_summary_{str(uuid.uuid4())[:12]}"],
+                            metadatas=[{"type": "session_summary", "session_id": session_id, "timestamp": now_iso, "turn_count": len(msgs) // 2, "hit_count": 0, "last_accessed": now_iso}]
+                        )
+                        print(f"💾 Stored expiry summary for session {session_id[:12]}...")
+                    except Exception as e:
+                        print(f"⚠️  Session expiry summary failed: {e}")
+                # Cross-session checkpoint: survives even if ChromaDB failed
+                _save_session_checkpoint(session_id, summary, len(msgs) // 2)
         del session_store[session_id]
         _session_daily_memory.pop(session_id, None)
         print(f"🕐 Session {session_id[:12]}... expired after {elapsed_minutes:.0f}min")
@@ -2693,6 +2763,41 @@ def clear_session(session_id: str):
         del session_store[session_id]
         return {"success": True, "message": f"Session cleared — next message starts fresh"}
     return {"success": True, "message": "Session not found (already empty)"}
+
+@app.post("/session/compress", dependencies=[Depends(verify_api_key)])
+def compress_session_endpoint(session_id: str):
+    """Manually compress a session now (Hermes-style /compress): summarize the
+    conversation, persist a cross-session checkpoint, store the summary in
+    ChromaDB, then clear the in-memory session so the next message starts fresh."""
+    sid = session_id or "default"
+    entry = session_store.get(sid)
+    if entry:
+        msgs = [m for m in entry["messages"] if m.get("role") != "system"]
+    else:
+        msgs = load_session_from_disk(sid)
+    if not msgs:
+        return {"success": True, "message": "Nothing to compress — session is empty", "summary": ""}
+    summary = summarize_messages(msgs)
+    if summary:
+        if collection:
+            try:
+                now_iso = datetime.now().isoformat()
+                collection.add(
+                    documents=[summary],
+                    ids=[f"session_summary_{str(uuid.uuid4())[:12]}"],
+                    metadatas=[{"type": "session_summary", "session_id": sid, "timestamp": now_iso, "turn_count": len(msgs) // 2, "hit_count": 0, "last_accessed": now_iso}]
+                )
+            except Exception:
+                pass
+        _save_session_checkpoint(sid, summary, len(msgs) // 2)
+    if sid in session_store:
+        del session_store[sid]
+    _session_daily_memory.pop(sid, None)
+    return {
+        "success": True,
+        "message": "Session compressed — checkpoint saved, next message starts fresh",
+        "summary": summary[:400],
+    }
 
 @app.get("/session/info", dependencies=[Depends(verify_api_key)])
 def session_info(session_id: str):
@@ -3649,6 +3754,14 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 _dm_parts.append("User Profile:\n" + _user_model_block)
             if _proactive_block:
                 _dm_parts.append("Proactive Suggestions:\n" + _proactive_block)
+            # Cross-session checkpoint: continuity from the previous session.
+            # Injected once per session start (cached with the daily block).
+            try:
+                _ckpt = _load_session_checkpoint(session_id)
+                if _ckpt:
+                    _dm_parts.append("Last conversation checkpoint:\n" + _ckpt)
+            except Exception:
+                pass
             _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
             # Cache for subsequent turns in this session
             _session_daily_memory[session_id] = _daily_memory_block
