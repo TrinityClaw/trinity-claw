@@ -1746,6 +1746,34 @@ def load_session_from_disk(session_id: str) -> List[Dict]:
     return messages
 
 
+def _remove_last_turn_from_disk(session_id: str) -> bool:
+    """Remove the newest session_logs.jsonl entry for a session (one line
+    per turn). Used by /session/undo and /chat/retry."""
+    try:
+        if not os.path.exists(MEMORY_FILE):
+            return False
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        last_idx = None
+        for i in range(len(lines) - 1, -1, -1):
+            try:
+                e = json.loads(lines[i])
+                if (e.get("session_id") or "default") == session_id:
+                    last_idx = i
+                    break
+            except json.JSONDecodeError:
+                continue
+        if last_idx is None:
+            return False
+        del lines[last_idx]
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        return True
+    except Exception as e:
+        print(f"⚠️  Disk undo failed: {e}")
+        return False
+
+
 # ── Cross-session checkpoints ──────────────────────────────────────────────────────────────────────────────
 # Written when a session expires (2h inactivity) or via /session/compress.
 # Re-injected once at the start of the next session so conversation context
@@ -2798,6 +2826,28 @@ def compress_session_endpoint(session_id: str):
         "message": "Session compressed — checkpoint saved, next message starts fresh",
         "summary": summary[:400],
     }
+
+@app.post("/session/undo", dependencies=[Depends(verify_api_key)])
+def undo_session(session_id: str):
+    """Remove the last turn (user + assistant) from the session (RAM + disk).
+    Hermes-style /undo."""
+    sid = session_id or "default"
+    entry = session_store.get(sid)
+    if not entry:
+        load_session_from_disk(sid)
+        entry = session_store.get(sid)
+    removed = False
+    if entry and entry["messages"]:
+        while entry["messages"] and entry["messages"][-1].get("role") == "assistant":
+            entry["messages"].pop()
+            removed = True
+        if entry["messages"] and entry["messages"][-1].get("role") == "user":
+            entry["messages"].pop()
+            removed = True
+    disk_removed = _remove_last_turn_from_disk(sid)
+    if not removed and not disk_removed:
+        return {"success": False, "message": "Nothing to undo"}
+    return {"success": True, "message": f"Last turn removed (RAM: {removed}, disk: {disk_removed})"}
 
 @app.get("/session/info", dependencies=[Depends(verify_api_key)])
 def session_info(session_id: str):
@@ -4804,6 +4854,39 @@ async def chat_stream(req: PromptRequest, api_key: str = Depends(verify_api_key)
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
+
+class RetryRequest(BaseModel):
+    session_id: Optional[str] = None
+    model: str = "trinity-default"
+
+@app.post("/chat/retry", dependencies=[Depends(verify_api_key)])
+def retry_chat(req: RetryRequest, api_key: str = Depends(verify_api_key)):
+    """Re-run the last turn (Hermes-style /retry): pop the previous user+assistant
+    pair (RAM + disk) and call chat() again with the same user message."""
+    _check_rate_limit(api_key)
+    sid = req.session_id or "default"
+    entry = session_store.get(sid)
+    if not entry:
+        load_session_from_disk(sid)
+        entry = session_store.get(sid)
+    msgs = entry["messages"] if entry else []
+    if len(msgs) < 2:
+        raise HTTPException(status_code=400, detail="Nothing to retry — no previous turn")
+    last_user = ""
+    for m in reversed(msgs):
+        if m.get("role") == "user":
+            last_user = m.get("content", "")
+            break
+    if not last_user:
+        raise HTTPException(status_code=400, detail="No user message to retry")
+    if sid in session_store:
+        _e = session_store[sid]
+        while _e["messages"] and _e["messages"][-1].get("role") == "assistant":
+            _e["messages"].pop()
+        if _e["messages"] and _e["messages"][-1].get("role") == "user":
+            _e["messages"].pop()
+    _remove_last_turn_from_disk(sid)
+    return chat(PromptRequest(message=last_user, session_id=sid, model=req.model or "trinity-default"), api_key)
 
 @app.get("/download/{filename}", dependencies=[Depends(verify_api_key)])
 def download_file(filename: str):
