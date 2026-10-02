@@ -72,6 +72,10 @@ __all__ = [
     "discover_workspace_servers",
     "close_connection",
     "shutdown",
+    "list_resources",
+    "read_resource",
+    "list_prompts",
+    "get_prompt",
 ]
 
 
@@ -1418,6 +1422,116 @@ def _request_server(
             return conn.request(method, params, timeout)
 
         raise
+
+
+def list_resources(server_name: str, timeout: Optional[int] = None) -> str:
+    """List resources exposed by a registered MCP server."""
+    servers = _load_servers()
+    if server_name not in servers:
+        return f"❌ Server '{server_name}' not registered."
+    info = _ensure_server_defaults(servers[server_name])
+    if not info.get("enabled", True):
+        return f"❌ MCP server '{server_name}' is disabled."
+    try:
+        result = _request_server(server_name, info, "resources/list", None, timeout=timeout)
+        resources = result.get("resources", [])
+        if not resources:
+            return f"📭 No resources on '{server_name}'."
+        lines = [f"📄 Resources on '{server_name}' ({len(resources)}):"]
+        for r in resources[:50]:
+            if isinstance(r, dict):
+                lines.append(f"  {r.get('uri', '?')} — {r.get('name', '')}: {str(r.get('description', ''))[:80]}")
+        return "\n".join(lines)
+    except MCPError as e:
+        if _is_method_not_found(e):
+            return f"⚠️ Server '{server_name}' does not support resources."
+        return f"❌ resources/list failed: {e}"
+    except Exception as e:
+        return f"❌ resources/list failed: {e}"
+
+
+def read_resource(server_name: str, uri: str, timeout: Optional[int] = None) -> str:
+    """Read a resource by URI from a registered MCP server."""
+    servers = _load_servers()
+    if server_name not in servers:
+        return f"❌ Server '{server_name}' not registered."
+    info = _ensure_server_defaults(servers[server_name])
+    if not info.get("enabled", True):
+        return f"❌ MCP server '{server_name}' is disabled."
+    try:
+        result = _request_server(server_name, info, "resources/read", {"uri": uri}, timeout=timeout)
+        contents = result.get("contents", [])
+        parts = []
+        for c in contents if isinstance(contents, list) else [contents]:
+            parts.append(_format_content_item(c))
+        if not parts:
+            return f"📭 Empty resource '{uri}'."
+        return "\n".join(parts)
+    except MCPError as e:
+        if _is_method_not_found(e):
+            return f"⚠️ Server '{server_name}' does not support resources."
+        return f"❌ resources/read failed: {e}"
+    except Exception as e:
+        return f"❌ resources/read failed: {e}"
+
+
+def list_prompts(server_name: str, timeout: Optional[int] = None) -> str:
+    """List prompts exposed by a registered MCP server."""
+    servers = _load_servers()
+    if server_name not in servers:
+        return f"❌ Server '{server_name}' not registered."
+    info = _ensure_server_defaults(servers[server_name])
+    if not info.get("enabled", True):
+        return f"❌ MCP server '{server_name}' is disabled."
+    try:
+        result = _request_server(server_name, info, "prompts/list", None, timeout=timeout)
+        prompts = result.get("prompts", [])
+        if not prompts:
+            return f"📭 No prompts on '{server_name}'."
+        lines = [f"💬 Prompts on '{server_name}' ({len(prompts)}):"]
+        for p in prompts[:50]:
+            if isinstance(p, dict):
+                lines.append(f"  {p.get('name', '?')}: {str(p.get('description', ''))[:80]}")
+        return "\n".join(lines)
+    except MCPError as e:
+        if _is_method_not_found(e):
+            return f"⚠️ Server '{server_name}' does not support prompts."
+        return f"❌ prompts/list failed: {e}"
+    except Exception as e:
+        return f"❌ prompts/list failed: {e}"
+
+
+def get_prompt(server_name: str, prompt_name: str, arguments: Optional[dict] = None, timeout: Optional[int] = None) -> str:
+    """Get a prompt (rendered messages) from a registered MCP server."""
+    servers = _load_servers()
+    if server_name not in servers:
+        return f"❌ Server '{server_name}' not registered."
+    info = _ensure_server_defaults(servers[server_name])
+    if not info.get("enabled", True):
+        return f"❌ MCP server '{server_name}' is disabled."
+    params = {"name": prompt_name}
+    if arguments:
+        params["arguments"] = arguments
+    try:
+        result = _request_server(server_name, info, "prompts/get", params, timeout=timeout)
+        messages = result.get("messages", [])
+        parts = []
+        for m in messages if isinstance(messages, list) else []:
+            if isinstance(m, dict):
+                c = m.get("content", "")
+                if isinstance(c, dict):
+                    parts.append(f"{m.get('role', '?')}: {c.get('text', json.dumps(c, ensure_ascii=False))[:400]}")
+                else:
+                    parts.append(f"{m.get('role', '?')}: {str(c)[:400]}")
+        if not parts:
+            return f"📭 Empty prompt '{prompt_name}'."
+        return "\n".join(parts)
+    except MCPError as e:
+        if _is_method_not_found(e):
+            return f"⚠️ Server '{server_name}' does not support prompts."
+        return f"❌ prompts/get failed: {e}"
+    except Exception as e:
+        return f"❌ prompts/get failed: {e}"
 
 
 def shutdown() -> str:
