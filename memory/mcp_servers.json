@@ -1,0 +1,87 @@
+{
+  "playground": {
+    "url": "https://mcpplaygroundonline.com/mcp-complex-server",
+    "auth_token_env": "",
+    "connected_at": "2026-09-26T19:35:34.574742",
+    "server_info": {
+      "name": "mcp-playground-complex-server",
+      "version": "2.0.0",
+      "title": "MCP Playground Complex Server (legacy)"
+    }
+  },
+  "cloudflare": {
+    "enabled": true,
+    "transport": "http",
+    "tool_policy": {
+      "default": "enabled",
+      "enabled": [],
+      "disabled": []
+    },
+    "url": "https://mcp.cloudflare.com/mcp",
+	"usage_notes": "Code-mode server. Both tools take one argument named code containing a JavaScript async arrow function. search: the global spec is the OpenAPI spec, use Object.keys(spec.paths) or spec.paths['/zones/{zone_id}/dns_records']?.get?.parameters, and return only small results. execute: call await cloudflare.request({method: 'GET', path: '/zones'}) and return response.result. The server already authenticates, so never use fetch, tokens or process.env. Always run search before execute. Account-scoped paths need the account id (list accounts with GET /accounts).",
+    "auth_token_env": "MCP_CLOUDFLARE_TOKEN",
+    "server_info": {
+      "name": "cloudflare-api",
+      "version": "0.1.0"
+    },
+    "connected_at": "2026-10-03T19:20:50.837293",
+    "tools_cache": [
+      {
+        "name": "docs",
+        "description": "Search the Cloudflare documentation.\n\n\t\tThis tool should be used to answer any question about Cloudflare products or features, including:\n\t\t- Workers, Pages, R2, Images, Stream, D1, Durable Objects, KV, Workflows, Hyperdrive, Queues\n\t\t- AI Search, Workers AI, Vectorize, AI Gateway, Browser Rendering\n\t\t- Zero Trust, Access, Tunnel, Gateway, Browser Isolation, WARP, DDOS, Magic Transit, Magic WAN\n\t\t- CDN, Cache, DNS, Zaraz, Argo, Rulesets, Terraform, Account and Billing\n\n\t\tResults are returned as semantically similar chunks to the query.\n\t\t",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Cloudflare documentation search query"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      },
+      {
+        "name": "search",
+        "description": "Search the Cloudflare OpenAPI spec. All $refs are pre-resolved inline.\n\nProducts: cloudforce-one, access, workers, magic, dlp, email-security, realtime, devices, ai-gateway, email, intel, gateway, stream, settings, brand-protection, data-security, ai-search, builds, security-center, browser-rendering, dex, images, logpush, api_gateway, addressing, load_balancers, rulesets, vectorize, firewall, logs... (172 total)\n\nTypes:\n\ninterface OperationInfo {\n  summary?: string;\n  description?: string;\n  tags?: string[];\n  parameters?: Array<{ name: string; in: string; required?: boolean; schema?: unknown; description?: string }>;\n  requestBody?: { required?: boolean; content?: Record<string, { schema?: unknown }> };\n  responses?: Record<string, { description?: string; content?: Record<string, { schema?: unknown }> }>;\n}\n\ninterface PathItem {\n  get?: OperationInfo;\n  post?: OperationInfo;\n  put?: OperationInfo;\n  patch?: OperationInfo;\n  delete?: OperationInfo;\n}\n\ndeclare const spec: {\n  paths: Record<string, PathItem>;\n};\n\n\nExamples:\n\n// Find endpoints by product\nasync () => {\n  const results = [];\n  for (const [path, methods] of Object.entries(spec.paths)) {\n    for (const [method, op] of Object.entries(methods)) {\n      if (op.tags?.some(t => t.toLowerCase() === 'workers')) {\n        results.push({ method: method.toUpperCase(), path, summary: op.summary });\n      }\n    }\n  }\n  return results;\n}\n\n// Get endpoint with requestBody schema (refs are resolved)\nasync () => {\n  const op = spec.paths['/accounts/{account_id}/d1/database']?.post;\n  return { summary: op?.summary, requestBody: op?.requestBody };\n}\n\n// Get endpoint parameters\nasync () => {\n  const op = spec.paths['/accounts/{account_id}/workers/scripts']?.get;\n  return op?.parameters;\n}",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "JavaScript async arrow function to search the OpenAPI spec"
+            }
+          },
+          "required": [
+            "code"
+          ]
+        }
+      },
+      {
+        "name": "execute",
+        "description": "Execute JavaScript code that can read, create, update, or delete resources through the Cloudflare API. First use the 'search' tool to find the right endpoints, then write code using the cloudflare.request() function.\n\nAvailable in your code:\n\ninterface CloudflareRequestOptions {\n  method: \"GET\" | \"POST\" | \"PUT\" | \"PATCH\" | \"DELETE\";\n  path: string;\n  query?: Record<string, string | number | boolean | undefined>;\n  body?: unknown;\n  contentType?: string;  // Custom Content-Type header (defaults to application/json if body is present)\n  rawBody?: boolean;     // If true, sends body as-is without JSON.stringify\n}\n\ninterface CloudflareResponse<T = unknown> {\n  success: boolean;\n  status: number;\n  result: T;\n  errors: Array<{ code: number; message: string }>;\n  messages: Array<{ code: number; message: string }>;\n  result_info?: {\n    page: number;\n    per_page: number;\n    total_pages: number;\n    count: number;\n    total_count: number;\n  };\n}\n\ndeclare const cloudflare: {\n  request<T = unknown>(options: CloudflareRequestOptions): Promise<CloudflareResponse<T>>;\n};\n\ndeclare const accountId: string;\n\n// accountId is the account_id tool argument when passed; otherwise the session's account when it is authorized for exactly one. Reading it when neither applies throws an error.\n\nWhen the session has access to multiple accounts, pass account_id. Call GET /accounts to discover available accounts. Paginate as needed, or filter by exact name with GET /accounts?name=<exact account name>.\n\nYour code must be an async arrow function that returns the result.\n\nExample: Worker with bindings (requires multipart/form-data):\nasync () => {\n  const code = `addEventListener('fetch', e => e.respondWith(MY_KV.get('key').then(v => new Response(v || 'none'))));`;\n  const metadata = { body_part: \"script\", bindings: [{ type: \"kv_namespace\", name: \"MY_KV\", namespace_id: \"your-kv-id\" }] };\n  const b = `--F${Date.now()}`;\n  const body = [`--${b}`, 'Content-Disposition: form-data; name=\"metadata\"', 'Content-Type: application/json', '', JSON.stringify(metadata), `--${b}`, 'Content-Disposition: form-data; name=\"script\"', 'Content-Type: application/javascript', '', code, `--${b}--`].join(\"\\r\\n\");\n  return cloudflare.request({ method: \"PUT\", path: `/accounts/${accountId}/workers/scripts/my-worker`, body, contentType: `multipart/form-data; boundary=${b}`, rawBody: true });\n}",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "JavaScript async arrow function to execute"
+            },
+            "account_id": {
+              "description": "Cloudflare account ID to run against. Optional when the session is authorized for exactly one account, and for account-independent calls such as GET /accounts.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code"
+          ]
+        }
+      }
+    ],
+    "tools_cache_at": "2026-10-03T19:30:24.412167"
+  }
+}
