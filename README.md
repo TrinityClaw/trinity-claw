@@ -25,6 +25,7 @@ A self-modifying AI agent with persistent memory, dynamic skill creation, and in
 
 ## ⚠️ Security Notice
 
+> **Use at your own risk.**
 
 TrinityClaw is **secure by design** in its original form:
 - All skills run inside an isolated Docker container with no host access
@@ -54,6 +55,7 @@ This project follows responsible AI agent design practices, but **no system is u
 - **Web Browsing**: Fetch and analyze web content, including JS-rendered pages
 - **Browser Automation**: Full Playwright-powered browser control — navigate, click, type, screenshot, evaluate JS, fill forms
 - **Live Browser Session**: Attach to your existing logged-in Chrome via CDP — post to Twitter/X, LinkedIn, Instagram, and any platform directly from the agent using your real sessions, no API keys required
+- **MCP Client (Model Context Protocol)**: Connect to remote and local MCP servers — discover, test, filter, and call their tools; connected tools become first-class agent skills automatically
 - **Scheduler**: Run automated tasks
 - **Telegram Integration**: Chat with your agent via text, voice messages, and photos
 - **Google Calendar**: Read, create, update, and delete calendar events — just ask naturally
@@ -157,7 +159,7 @@ Docker Engine is installed automatically if not present. That's it.
 
 During installation you will be asked to choose:
 - **Cloud** — use a remote provider (OpenAI, NVIDIA, Anthropic, etc.) — requires API key
-- **Local** — use Ollama with `qwen3.5:9b` running on your machine — no API key needed (~6.6 GB download)
+- **Local** — use Ollama with `qwen3.5:9b` running on your machine — no API key needed (~6.6 GB download) if you have 16GB or more VRAM recomendation is to go with qwen3.8 27b quantized to 12gb
 
 After installation, open the Web UI at: **http://localhost:8080**
 
@@ -324,7 +326,7 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 
 ---
 
-## Core Skills (31)
+## Core Skills (32)
 
 | Skill | Description | Functions |
 |-------|-------------|-----------|
@@ -359,6 +361,7 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 | `google_maps` | Maps & location — geocoding, directions, place search. No API key required (uses OpenStreetMap/Nominatim + OSRM). | `map_url`, `geocode`, `reverse_geocode`, `search_places`, `nearby_search`, `get_directions`, `distance_matrix`, `status` |
 | `weather_api` | Real-time weather, multi-day forecast (up to 16 days), and air quality. No API key required. | `get_weather`, `get_forecast`, `get_air_quality` |
 | `website_cloner` | Scrape a live website's design tokens (CSS variables, colors, fonts, section structure) and scaffold a `web_builder` project from them. | `extract_tokens`, `clone` |
+| `mcp_client` | Connect to MCP servers (Streamable HTTP, legacy HTTP+SSE, stdio), discover/test/filter tools — connected tools become first-class agent skills (see MCP Client section) | `connect_server`, `list_servers`, `ping_server`, `test_server`, `list_tools`, `list_all_mcp_tools`, `enable_tool`, `disable_tool`, `set_server_enabled`, `call_tool`, `remove_server`, `discover_workspace_servers`, `list_resources`, `read_resource`, `list_prompts`, `get_prompt` |
 
 ---
 
@@ -437,6 +440,83 @@ browser_session.click('[data-testid="tweetButtonInline"]')
 ### What This Replaces
 
 Instead of building separate Twitter API, LinkedIn API, and Instagram API integrations — each requiring OAuth app approval, developer accounts, and rate limits — the agent uses your real browser session on every platform simultaneously. Any site you can use in a browser, the agent can use too.
+
+---
+
+## MCP Client (Model Context Protocol)
+
+TrinityClaw includes a built-in MCP client (`agent/skills/core/mcp_client.py`) that connects it to remote and local MCP servers. Register a server once and its tools become **first-class agent skills** — the model calls them directly during normal chat, no extra setup.
+
+### Supported Transports
+
+| Transport | Use for | Config |
+|-----------|---------|--------|
+| **Streamable HTTP** (default) | Modern remote MCP servers | `{"url": "https://example.com/mcp"}` |
+| **HTTP+SSE** (legacy) | Older remote servers | `{"transport": "sse", "url": "https://example.com/sse"}` |
+| **stdio** | Local subprocess servers | `{"transport": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]}` |
+
+### Connecting a Server
+
+**Easiest — just ask the agent** (Web UI at http://localhost:8080, or Telegram):
+
+> "Connect to the Context7 MCP server at https://mcp.context7.com/mcp"
+
+**Or via the API:**
+
+```bash
+curl -X POST http://localhost:8001/skill/call \
+  -H "Authorization: Bearer $TRINITY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"skill": "mcp_client", "function": "connect_server", "args": ["ctx", "https://mcp.context7.com/mcp"]}'
+```
+
+**With authentication** — pass `auth_token` and it is saved to `.env` as `MCP_<NAME>_TOKEN` automatically (the registry references it by env-var name, never in plain config):
+
+```bash
+curl -X POST http://localhost:8001/skill/call \
+  -H "Authorization: Bearer $TRINITY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"skill": "mcp_client", "function": "connect_server", "args": ["github", "https://api.githubcopilot.com/mcp"], "kwargs": {"auth_token": "ghp_xxx"}}'
+```
+
+**Local stdio servers** (subprocess inside the agent container):
+
+```bash
+curl -X POST http://localhost:8001/skill/call \
+  -H "Authorization: Bearer $TRINITY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"skill": "mcp_client", "function": "connect_server", "args": ["fs"], "kwargs": {"config": {"transport": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]}}}'
+```
+
+### Managing Servers
+
+| Function | What it does |
+|----------|-------------|
+| `list_servers()` | Registered servers, auth state, tool counts |
+| `list_tools(name)` / `list_all_mcp_tools()` | Discover tools (per server / across all enabled servers) |
+| `ping_server(name)` / `test_server(name)` | Health check with latency + auth diagnostics |
+| `enable_tool(server, tool)` / `disable_tool(server, tool)` | Allow/deny a specific tool |
+| `set_server_enabled(name, true/false)` | Enable/disable an entire server |
+| `remove_server(name)` | Unregister and remove its token from `.env` |
+| `discover_workspace_servers()` | Detect `.trinity/mcp.json`, `.mcp.json`, `.vscode/mcp.json` — dry-run by default; `register=True, trust=True` registers servers as **disabled** |
+| `list_resources(name)` / `read_resource(name, uri)` | Browse and read server resources |
+| `list_prompts(name)` / `get_prompt(name, prompt)` | Browse and render server prompts |
+
+### Calling Tools
+
+Once connected, tools are exposed to the model as `mcp_<server>_<tool>` and are called automatically during normal conversation ("create an issue in my repo"). You can also call them directly:
+
+```
+<skill:mcp_client.call_tool>github,create_issue,{"repo":"owner/repo","title":"Bug report"}</skill:mcp_client.call_tool>
+```
+
+### Security
+
+- Auth tokens live in `.env`, referenced by env-var name — never hardcoded in `mcp_servers.json`
+- MCP tool output is treated as untrusted external content and sanitized before reaching the model
+- stdio servers receive a minimal environment — your `.env` secrets are withheld unless explicitly configured via `${VAR}` references
+- Workspace-discovered stdio servers are registered **disabled** by default
+- Registry file: `memory/mcp_servers.json` (inside the container: `/app/memory/mcp_servers.json`)
 
 ---
 
@@ -1169,6 +1249,7 @@ trinity-claw/
 │       │   ├── youtube.py
 │       │   ├── autoimprove.py  # Autoresearch loops + web research (see AutoImprove section)
 │       │   ├── meta_review.py  # Weekly synthesis: errors, loop ROI, journal themes
+│       │   ├── mcp_client.py   # MCP client (see MCP Client section)
 │       │   └── _user_model_store.py  # Internal: user model data layer (used by notes.py)
 │       └── dynamic/            # User skills (AI agent can read-write)
 │
@@ -1261,6 +1342,7 @@ docker-compose up -d
 | **Search returns no results / blocked** | Set `TAVILY_API_KEY` in `.env` for reliable search. Without it, `search()` falls back to DuckDuckGo → Bing scraping which can be rate-limited. |
 | **Knowledge base ChromaDB error** | Ensure ChromaDB container is running: `docker-compose ps`. Restart with `docker-compose restart chroma`. |
 | **File not ingested** | Check the file extension is supported (`list_supported` via `document_parser`). PDF needs `pdfplumber` — it's in `requirements.txt`. |
+| **MCP server won't connect** | Run `test_server("<name>")` for full diagnostics. HTTP 401/403 = token rejected — check the key in `.env`. For stdio servers: verify the command runs inside the container. For SSE servers: try the modern `http` transport instead. |
 
 ### Debug Commands
 
@@ -1307,4 +1389,4 @@ MIT License - see LICENSE file for details.
 ---
 
 **Version**: TrinityClaw v1.4.0
-**Last Updated**: 2026-04-23
+**Last Updated**: 2026-10-03
