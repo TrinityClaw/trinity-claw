@@ -6,6 +6,77 @@ fi
 
 # install.sh - TrinityClaw Installation Wizard (Linux/Mac)
 
+# ---------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------
+
+# Returns success as soon as the URL answers with ANY HTTP response
+# (even a 404 means the server is up); fails on timeout.
+wait_for_url() {
+    local url="$1" timeout="${2:-180}" code
+    local deadline=$(( $(date +%s) + timeout ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "$url" 2>/dev/null)
+        if [ -n "$code" ] && [ "$code" != "000" ]; then
+            return 0
+        fi
+        sleep 3
+    done
+    return 1
+}
+
+# Verify an API key against the provider before writing config (advisory only).
+verify_api_key() {
+    local api_base="$1" key="$2" code
+    echo "   Verifying API key against $api_base ..."
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+        -H "Authorization: Bearer $key" "$api_base/models" 2>/dev/null)
+    case "$code" in
+        2??)
+            echo "   ✅ API key verified"
+            ;;
+        401|403)
+            echo "   ⚠️  Key was rejected (HTTP $code) - check it in .env if the agent fails to start."
+            ;;
+        000|"")
+            echo "   ⚠️  Could not verify the key (server unreachable) - continuing anyway."
+            ;;
+        *)
+            echo "   ⚠️  Could not verify the key: HTTP $code - continuing anyway."
+            ;;
+    esac
+}
+
+# Back up a file before overwriting it (re-run safety).
+backup_file() {
+    local f="$1" ts
+    if [ -f "$f" ]; then
+        ts=$(date +%Y%m%d-%H%M%S)
+        cp "$f" "${f}.bak-${ts}"
+        echo "   [!] Existing $f backed up to ${f}.bak-${ts}"
+    fi
+}
+
+# Portable port-in-use check (bash /dev/tcp, no nc dependency).
+port_in_use() {
+    local port="$1"
+    (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null || return 1
+    return 0
+}
+
+# Copy text to the clipboard when a clipboard tool is available.
+copy_to_clipboard() {
+    local text="$1"
+    if command -v pbcopy &>/dev/null 2>&1; then
+        printf '%s' "$text" | pbcopy 2>/dev/null && return 0
+    elif command -v wl-copy &>/dev/null 2>&1; then
+        printf '%s' "$text" | wl-copy 2>/dev/null && return 0
+    elif command -v xclip &>/dev/null 2>&1; then
+        printf '%s' "$text" | xclip -selection clipboard 2>/dev/null && return 0
+    fi
+    return 1
+}
+
 echo ""
 echo -e "\033[32m╔══════════════════════════════════════════════════════╗"
 echo -e "║        TrinityClaw AI Agent - Installation Wizard    ║"
@@ -97,8 +168,44 @@ else
         curl -fsSL https://get.docker.com | sh
         sudo systemctl enable --now docker
         sudo usermod -aG docker "$USER"
-        newgrp docker
+    elif ! sudo docker info &>/dev/null 2>&1; then
+        echo "   🚀 Starting Docker daemon..."
+        sudo systemctl enable --now docker
+        for i in $(seq 1 30); do
+            sleep 2
+            sudo docker info &>/dev/null 2>&1 && break
+        done
     fi
+
+    # Fresh docker installs: this shell can't use Docker yet because group
+    # membership only applies on a new login. `newgrp` would drop into an
+    # interactive shell (and can eat the rest of this script when piped via
+    # curl | bash), so re-exec the whole installer through the group instead.
+    if ! docker info &>/dev/null 2>&1 \
+        && [ -z "${TRINITY_SG_REEXEC:-}" ] \
+        && command -v sg &>/dev/null 2>&1; then
+        echo "   🔄 Applying docker group to this session (installer will restart)..."
+        SCRIPT_SRC="$0"
+        if [ ! -f "$SCRIPT_SRC" ]; then
+            # Piped via curl | bash - fetch a copy we can re-exec
+            SCRIPT_SRC=$(mktemp /tmp/trinity-install-XXXXXX.sh)
+            curl -fsSL https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.sh -o "$SCRIPT_SRC" 2>/dev/null
+        fi
+        if [ -f "$SCRIPT_SRC" ]; then
+            export TRINITY_SG_REEXEC=1
+            exec sg docker -c "bash '$SCRIPT_SRC' $*"
+        fi
+        echo "   ⚠️  Could not apply the docker group automatically."
+        echo "      Log out and back in (or run 'newgrp docker'), then re-run this script."
+        exit 1
+    fi
+fi
+
+# Final gate: Docker must actually answer before we continue.
+if ! docker info &>/dev/null 2>&1; then
+    echo "   ❌ Docker is installed but not responding."
+    echo "   👉 Make sure Docker is running, then re-run this script."
+    exit 1
 fi
 
 echo "   ✅ Docker installed"
@@ -167,14 +274,25 @@ echo "   Options:"
 echo "   [cloud]  Use a cloud provider (OpenAI, NVIDIA, Anthropic, etc.)"
 echo "   [local]  Use a local Ollama model (qwen3.5:9b, ~6.6GB, no API key needed)"
 echo ""
-read -p "   Choose model source [cloud/local]: " model_source
-model_source=$(echo "$model_source" | tr '[:upper:]' '[:lower:]' | xargs)
+while :; do
+    read -p "   Choose model source [cloud/local] (default: cloud): " model_source
+    model_source=$(echo "$model_source" | tr '[:upper:]' '[:lower:]' | xargs)
+    case "$model_source" in
+        "") model_source="cloud"; break ;;
+        cloud|local) break ;;
+        *) echo "   ⚠️  Please type 'cloud' or 'local' (or press Enter for cloud)." ;;
+    esac
+done
 
 # ─────────────────────────────────────────────────────────
 # [3/5] Configure environment
 # ─────────────────────────────────────────────────────────
 echo ""
 echo -e "\033[33m[3/5] Configuring environment...\033[0m"
+
+# Re-run safety: back up any existing config before overwriting
+backup_file ".env"
+backup_file "trinity-key.txt"
 
 two_key=$(python3 -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null)
 [ -z "$two_key" ] && two_key=$(LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32)
@@ -197,16 +315,27 @@ if [ "$model_source" = "local" ]; then
             echo "   ✅ Ollama already installed"
         fi
 
+        # Start the Ollama server BEFORE pulling: `ollama pull` is a client
+        # command that needs the server at localhost:11434 already running.
+        if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+            echo "   ✅ Ollama already running"
+        else
+            echo "   🚀 Starting Ollama service..."
+            if ! brew services start ollama &>/dev/null 2>&1; then
+                nohup ollama serve >/dev/null 2>&1 &
+            fi
+            for i in $(seq 1 15); do
+                sleep 2
+                curl -s http://localhost:11434/api/tags >/dev/null 2>&1 && break
+            done
+            if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+                echo "   ❌ Ollama service did not start. Try: brew services start ollama"
+                exit 1
+            fi
+        fi
+
         echo "   📥 Pulling qwen3.5:9b (~6.6GB, this may take several minutes)..."
         ollama pull qwen3.5:9b || { echo "   ❌ Failed to pull qwen3.5:9b. Check your internet and try again."; exit 1; }
-
-        if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
-            echo "   🚀 Starting Ollama service..."
-            ollama serve &>/dev/null &
-            sleep 3
-        else
-            echo "   ✅ Ollama already running"
-        fi
 
         OLLAMA_API_BASE="http://host.docker.internal:11434"
         COMPOSE_FILE="docker-compose.mac.yml"
@@ -247,32 +376,106 @@ EOF
 else
 
     echo ""
-    echo -e "   \033[36mCloud API Configuration\033[0m"
+    echo -e "   \033[36mLLM Cloud Provider\033[0m"
     echo ""
-    echo "   Provider examples:"
-    echo "   - OpenAI:     openai/gpt-4o"
-    echo "   - NVIDIA:     openai/moonshotai/kimi-k2-instruct"
-    echo "   - Anthropic:  anthropic/claude-3-5-sonnet-20241022"
+    echo "   [1] OpenAI      (gpt-4o, vision-capable)"
+    echo "   [2] NVIDIA      (kimi-k2-instruct + llama vision)"
+    echo "   [3] Anthropic   (claude-3-5-sonnet, vision-capable)"
+    echo "   [4] Custom      (enter model, base URL and key variable manually)"
     echo ""
-    read -p "   1. Model name: " model
-    model=${model:-gpt-4o}
+    while :; do
+        read -p "   Choose provider [1-4] (default: 1): " provider
+        case "$provider" in
+            "") provider="1"; break ;;
+            1|2|3|4) break ;;
+            *) echo "   ⚠️  Please enter 1, 2, 3, 4 (or press Enter for 1)." ;;
+        esac
+    done
+
+    case "$provider" in
+        1)
+            model_default="openai/gpt-4o"
+            vision_default="openai/gpt-4o"
+            api_base_default="https://api.openai.com/v1"
+            api_key_name_default="OPENAI_API_KEY"
+            ;;
+        2)
+            model_default="openai/moonshotai/kimi-k2-instruct"
+            vision_default="openai/meta/llama-3.2-90b-vision-instruct"
+            api_base_default="https://integrate.api.nvidia.com/v1"
+            api_key_name_default="NVIDIA_API_KEY"
+            ;;
+        3)
+            model_default="anthropic/claude-3-5-sonnet-20241022"
+            vision_default="anthropic/claude-3-5-sonnet-20241022"
+            api_base_default="https://api.anthropic.com"
+            api_key_name_default="ANTHROPIC_API_KEY"
+            ;;
+        4)
+            model_default=""
+            vision_default=""
+            api_base_default=""
+            api_key_name_default=""
+            ;;
+    esac
 
     echo ""
-    echo "   API Base examples:"
-    echo "   - OpenAI:  https://api.openai.com/v1"
-    echo "   - NVIDIA:  https://integrate.api.nvidia.com/v1"
+    echo "   Press Enter to accept each default."
     echo ""
-    read -p "   2. API Base URL (default: https://api.openai.com/v1): " api_base
-    api_base=${api_base:-https://api.openai.com/v1}
+
+    if [ -n "$model_default" ]; then
+        read -p "   1. Model name [default: $model_default]: " model
+        model=${model:-$model_default}
+    else
+        read -p "   1. Model name (required, e.g. openai/gpt-4o): " model
+        if [ -z "$model" ]; then
+            echo "   ❌ Model name is required."
+            exit 1
+        fi
+    fi
+
+    if [ -z "$vision_default" ]; then
+        vision_default="$model"
+    fi
+    read -p "   2. Vision model (for photos) [default: $vision_default]: " vision_model
+    vision_model=${vision_model:-$vision_default}
+
+    if [ -n "$api_base_default" ]; then
+        read -p "   3. API Base URL [default: $api_base_default]: " api_base
+        api_base=${api_base:-$api_base_default}
+    else
+        read -p "   3. API Base URL (required, e.g. https://api.openai.com/v1): " api_base
+    fi
+    if [ -z "$api_base" ]; then
+        echo "   ❌ API Base URL is required."
+        exit 1
+    fi
+    case "$api_base" in
+        https://*|http://*) ;;
+        *) echo "   ❌ '$api_base' is not a valid URL."
+           exit 1 ;;
+    esac
+
+    if [ -n "$api_key_name_default" ]; then
+        api_key_name="$api_key_name_default"
+    else
+        read -p "   4. API Key environment variable name (e.g. MYPROVIDER_API_KEY): " api_key_name
+        if [ -z "$api_key_name" ]; then
+            echo "   ❌ Key variable name is required."
+            exit 1
+        fi
+    fi
 
     echo ""
-    echo "   Example: NVIDIA_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY"
-    read -p "   3. API Key variable name: " api_key_name
-    api_key_name=${api_key_name:-OPENAI_API_KEY}
+    read -s -p "   5. API Key value (hidden): " api_key_value
+    echo ""
+    if [ -z "$api_key_value" ]; then
+        echo "   ❌ API key is required."
+        exit 1
+    fi
 
-    echo ""
-    read -s -p "   4. API Key value (hidden): " api_key_value
-    echo ""
+    # Fail fast: verify the key against the provider before writing any config
+    verify_api_key "$api_base" "$api_key_value"
 
     cat > .env << EOF
 # TrinityClaw Secrets
@@ -291,9 +494,10 @@ model_list:
       api_key: os.environ/${api_key_name}
       api_base: ${api_base}
 
+  # Vision model -- used automatically when photos are sent.
   - model_name: trinity-vision
     litellm_params:
-      model: ${model}
+      model: ${vision_model}
       api_key: os.environ/${api_key_name}
       api_base: ${api_base}
 
@@ -337,12 +541,29 @@ OPTIONAL_KEYS
 echo "   ✅ .env created at $(pwd)/.env"
 echo "      → Add Tavily, Telegram, SMTP and other optional keys there anytime."
 
+# Port conflict warning (advisory only - Trinity may own them on re-run)
+for p in 8080 8001; do
+    if port_in_use "$p"; then
+        echo "   [!] Port $p is already in use."
+        echo "       If TrinityClaw isn't already running, free this port or the containers will fail."
+    fi
+done
+if [ "${LOCAL_MODE:-}" = true ] && [ "$IS_MAC" = false ] && port_in_use 11434; then
+    echo "   [!] Port 11434 is already in use."
+    echo "       If TrinityClaw isn't already running, free this port or the Ollama container will fail."
+fi
+
 # ─────────────────────────────────────────────────────────
 # [4/5] Building containers
 # ─────────────────────────────────────────────────────────
 echo ""
 echo -e "\033[33m[4/5] Building containers...\033[0m"
-$DC -f "$COMPOSE_FILE" build
+$DC -f "$COMPOSE_FILE" build || {
+    echo ""
+    echo "   ❌ Docker failed to build containers."
+    echo "      Make sure Docker is running, then re-run this script."
+    exit 1
+}
 
 # ─────────────────────────────────────────────────────────
 # [5/5] Starting services
@@ -351,9 +572,44 @@ echo ""
 echo -e "\033[33m[5/5] Starting services...\033[0m"
 
 if [ "$LOCAL_MODE" = true ] && [ "$IS_MAC" = false ]; then
-    $DC -f "$COMPOSE_FILE" --profile local up -d
+    $DC -f "$COMPOSE_FILE" --profile local up -d || {
+        echo ""
+        echo "   ❌ Docker failed to start containers."
+        echo "      Make sure Docker is running, then re-run this script."
+        exit 1
+    }
 else
-    $DC -f "$COMPOSE_FILE" up -d
+    $DC -f "$COMPOSE_FILE" up -d || {
+        echo ""
+        echo "   ❌ Docker failed to start containers."
+        echo "      Make sure Docker is running, then re-run this script."
+        exit 1
+    }
+fi
+
+# Guarantee the auto-restart promise: explicit restart policy on each container
+CONTAINER_IDS=$($DC -f "$COMPOSE_FILE" ps -q 2>/dev/null)
+if [ -n "$CONTAINER_IDS" ]; then
+    for cid in $CONTAINER_IDS; do
+        docker update --restart unless-stopped "$cid" >/dev/null 2>&1 || true
+    done
+    echo "   ✅ Containers set to auto-restart (unless-stopped)"
+fi
+
+# ─────────────────────────────────────────────────────────
+# Wait for services before declaring victory
+# ─────────────────────────────────────────────────────────
+echo ""
+echo "   Waiting for TrinityClaw services to come up..."
+backend_ready=false
+ui_ready=false
+if wait_for_url "http://localhost:8001/health" 180; then backend_ready=true; fi
+if wait_for_url "http://localhost:8080" 180; then ui_ready=true; fi
+if [ "$backend_ready" = true ] && [ "$ui_ready" = true ]; then
+    echo "   ✅ TrinityClaw is up and responding!"
+else
+    echo "   ⚠️  Services are still starting - they can take a few minutes on first run."
+    echo "      Check status with: $DC -f $COMPOSE_FILE ps"
 fi
 
 # ─────────────────────────────────────────────────────────
@@ -365,9 +621,14 @@ echo ""
 echo "   🌐 Web UI:  http://localhost:8080"
 echo "   🔌 API:     http://localhost:8001"
 echo "   📖 Docs:    http://localhost:8001/docs"
+echo "   Status:  backend $(if [ "$backend_ready" = true ]; then printf 'reachable'; else printf 'still starting...'; fi), web UI $(if [ "$ui_ready" = true ]; then printf 'reachable'; else printf 'still starting...'; fi)"
 echo ""
 # Save the key to a plain text file so it is never lost
 echo "${two_key}" > trinity-key.txt
+clipboard_note=""
+if copy_to_clipboard "${two_key}"; then
+    clipboard_note=" (also copied to your clipboard)"
+fi
 
 echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "   🔑  AGENT API KEY — copy and save this:"
@@ -375,7 +636,7 @@ echo ""
 echo "       ${two_key}"
 echo ""
 echo "   Enter it in: Settings ⚙️ → Agent Security → Agent API Key"
-echo "   (also saved to trinity-key.txt in this folder)"
+echo "   (also saved to trinity-key.txt in this folder${clipboard_note})"
 echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -495,3 +756,12 @@ echo -e "   \033[33m🎤 Voice: Whisper (~150MB) downloads on first voice messag
 echo -e "   \033[33m📸 Vision: uses trinity-vision model in litellm_config.yaml.\033[0m"
 echo -e "   \033[33m🌐 Browser: Playwright + Chromium installed automatically.\033[0m"
 echo ""
+
+# Open the Web UI if it's ready
+if [ "$ui_ready" = true ]; then
+    if [ "$IS_MAC" = true ]; then
+        open http://localhost:8080 2>/dev/null || true
+    elif command -v xdg-open &>/dev/null 2>&1; then
+        xdg-open http://localhost:8080 2>/dev/null || true
+    fi
+fi
