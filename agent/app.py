@@ -66,6 +66,7 @@ print("🚀 TrinityClaw Agent is starting up...")
 SKILLS_DIR = Path(__file__).parent / "skills"
 sys.path.insert(0, str(SKILLS_DIR))
 sys.path.insert(0, str(Path(__file__).parent))
+from mcp_universal import render_mcp_docs, normalize_mcp_tags, parse_mcp_args
 
 app = FastAPI()
 
@@ -2179,6 +2180,11 @@ def execute_skill_tags(response_text: str) -> tuple:
     response_text = re.sub(r'\[skill:([\w.]+)\]', r'<skill:\1>', response_text)
     response_text = re.sub(r'\[/skill:([\w.]+)\]', r'</skill:\1>', response_text)
     response_text = re.sub(r'<(skill:[\w.]+)\]', r'<\1>', response_text)
+    # MCP: repair wrong tag shapes (e.g. mcp_client.<server>.<tool>) before parsing
+    try:
+        response_text = normalize_mcp_tags(response_text, _get_mcp_tool_registry())
+    except Exception:
+        pass
 
     # Normalize Gemma 4 and Qwen tool calls to <skill:...> tags
     response_text = _normalize_gemma_skill_tags(response_text)
@@ -2214,20 +2220,11 @@ def execute_skill_tags(response_text: str) -> tuple:
                 _mcp_entry = _get_mcp_tool_registry().get(_mcp_key)
                 if _mcp_entry:
                     _srv, _tool, _mcp_desc, _mcp_schema = _mcp_entry
-                    _args_obj = {}
-                    _raw = content.strip()
-                    if _raw.startswith("{") or _raw.startswith("["):
-                        try:
-                            _args_obj = json.loads(_raw)
-                        except Exception:
-                            _args_obj = {}
-                    elif _raw:
-                        _props = list((_mcp_schema or {}).get("properties", {}).keys())
-                        _vals = [v.strip().strip("\"'") for v in _raw.split(",")]
-                        for _vi, _vv in enumerate(_vals):
-                            _vk = _props[_vi] if _vi < len(_props) else "arg" + str(_vi)
-                            _args_obj[_vk] = _vv
-                    result = call_skill_improved("mcp_client", "call_tool", _srv, _tool, _args_obj)
+                    _args_obj, _mcp_err = parse_mcp_args(_mcp_entry, content)
+                    if _mcp_err:
+                        result = {"success": False, "error": _mcp_err, "skill": "mcp_client", "function": "call_tool"}
+                    else:
+                        result = call_skill_improved("mcp_client", "call_tool", _srv, _tool, _args_obj)
                     if result["success"]:
                         result_str = str(result.get("result", ""))
                         output = "\n[\u2705 mcp." + _srv + "." + _tool + " Result:\n" + result_str + "]\n"
@@ -3509,11 +3506,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     except Exception:
         _mcp_registry = {}
     if _mcp_registry:
-        _mcp_doc_lines = ["MCP tools (call directly like a skill; args as JSON object or comma-separated):"]
-        for _reg_name in sorted(_mcp_registry):
-            _srv, _tool, _desc, _sch = _mcp_registry[_reg_name]
-            _mcp_doc_lines.append("  <skill:" + _reg_name + ">args</skill:" + _reg_name + "> - " + (_desc or _reg_name)[:90])
-        skills_doc += "\n" + "\n".join(_mcp_doc_lines)
+        skills_doc += "\n" + render_mcp_docs(_mcp_registry)
 
     # Detect whether the current message is web-dev related so we can gate the
     # website build workflow block (60+ lines). Injecting it on every request
