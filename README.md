@@ -541,7 +541,7 @@ The agent will open composio.dev in your browser, walk you through each step, an
 **Or manually:**
 
 1. **Create a free account** at [composio.dev](https://composio.dev)
-2. **Copy your API key** from the Composio dashboard
+2. **Copy your API key** from the Composio dashboard (Copy your Project API key -starts with "ak_" from Settings → API Keys")
 3. **Add it to your `.env`:**
 
 ```
