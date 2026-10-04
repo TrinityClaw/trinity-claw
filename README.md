@@ -11,7 +11,11 @@ pinned: false
 
 A self-modifying AI agent that runs entirely on your own machine: it browses the web, automates your browser, chats with you over Telegram, reads your Gmail and calendar, remembers everything, and writes itself new skills overnight.
 
-<!-- DEMO: add a GIF or a 2-minute demo video here — this is the highest-impact spot on the page -->
+
+
+https://github.com/user-attachments/assets/8a1c1424-cb01-4f25-8047-978221b7ba27
+
+
 
 ---
 
