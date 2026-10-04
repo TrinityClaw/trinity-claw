@@ -32,6 +32,10 @@ DOC = (
 
 SKILL_TIMEOUT = int(os.getenv("COMPOSIO_SKILL_TIMEOUT", "60"))
 
+# The current Composio SDK ties every connection to a "user id". TrinityClaw is
+# single-user, so one fixed id is enough. Override with COMPOSIO_USER_ID if needed.
+USER_ID = os.getenv("COMPOSIO_USER_ID", "trinityclaw").strip() or "trinityclaw"
+
 __all__ = [
     "NAME",
     "SHORT_DOC",
@@ -70,12 +74,13 @@ def _get_composio():
         return None
 
     try:
-        from composio import ComposioToolSet
-        _composio = ComposioToolSet(api_key=api_key)
+        from composio import Composio
+        _composio = Composio(api_key=api_key)
         return _composio
-    except ImportError:
+    except ImportError as e:
         _sdk_error = (
-            "composio package not installed. Run: pip install composio"
+            f"Could not import the Composio SDK ({e}). Add 'composio' to "
+            "agent/requirements.txt and rebuild the image."
         )
         return None
     except Exception as e:
@@ -89,6 +94,32 @@ def _err(msg: str) -> str:
 
 def _ok(msg: str) -> str:
     return f"✅ {msg}"
+
+
+def _get(obj: Any, name: str, default: Any = None) -> Any:
+    """Read a field from either a dict or an object."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _toolkit_slug(obj: Any) -> str:
+    """Return the toolkit/app slug of a tool or connected-account record."""
+    tk = _get(obj, "toolkit")
+    if tk is None:
+        return str(_get(obj, "app", "") or "")
+    if isinstance(tk, str):
+        return tk
+    return str(_get(tk, "slug", "") or "")
+
+
+def _accounts(client, toolkit: str = "") -> list:
+    """Connected accounts for this TrinityClaw user (optionally one toolkit)."""
+    kwargs: Dict[str, Any] = {"user_ids": [USER_ID], "limit": 100}
+    if toolkit:
+        kwargs["toolkit_slugs"] = [toolkit.lower()]
+    resp = client.connected_accounts.list(**kwargs)
+    return list(_get(resp, "items", []) or [])
 
 
 # ── Public functions ─────────────────────────────────────────────────────────
@@ -112,8 +143,7 @@ def setup(api_key: str = "") -> str:
         client = _get_composio()
         if client is not None:
             try:
-                accounts = client.get_connected_accounts()
-                count = len(accounts) if accounts else 0
+                count = len(_accounts(client))
                 return (
                     f"✅ Composio is already set up (key: ...{existing[-4:]}, "
                     f"{count} connected accounts).\n"
@@ -151,7 +181,7 @@ def setup(api_key: str = "") -> str:
 
     if not sdk_installed:
         steps.append("")
-        steps.append("I'll also install the SDK automatically once you paste your key.")
+        steps.append("Note: the SDK is not installed in this container. Add 'composio' to agent/requirements.txt and rebuild the image.")
 
     steps.append("")
     steps.append("Just paste your API key and I'll handle the rest.")
@@ -213,26 +243,16 @@ def _save_api_key(api_key: str) -> str:
     _composio = None
     _sdk_error = None
 
-    # Install SDK if missing
+    # The SDK must be baked into the Docker image (runtime pip installs are lost on rebuild)
     sdk_msg = ""
     try:
         import composio  # noqa
     except ImportError:
-        import subprocess
-        import sys
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "composio", "-q"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=120,
-            )
-            sdk_msg = "\n📦 SDK installed (composio package)"
-        except Exception as e:
-            sdk_msg = (
-                f"\n⚠️ Could not auto-install SDK. Run manually:\n"
-                f"   pip install composio\n   Error: {e}"
-            )
+        sdk_msg = (
+            "\n⚠️ The composio package is not installed in this container. "
+            "Add 'composio' to agent/requirements.txt, then run: "
+            "docker-compose build --no-cache trinity-agent"
+        )
 
     # Verify the key works
     client = _get_composio()
@@ -243,8 +263,7 @@ def _save_api_key(api_key: str) -> str:
         )
 
     try:
-        accounts = client.get_connected_accounts()
-        count = len(accounts) if accounts else 0
+        count = len(_accounts(client))
         return (
             f"✅ Composio connected! (key: ...{api_key[-4:]}){sdk_msg}\n"
             f"   Connected accounts: {count}\n\n"
@@ -278,107 +297,103 @@ def status() -> str:
         return f"❌ {_sdk_error}"
 
     try:
-        accounts = client.get_connected_accounts()
-        count = len(accounts) if accounts else 0
+        count = len(_accounts(client))
         return (
             f"✅ Composio configured (key: ...{api_key[-4:]})\n"
-            f"   SDK: installed | Connected accounts: {count}"
+            f"   SDK: installed | User id: {USER_ID} | Connected accounts: {count}"
         )
     except Exception as e:
         return f"⚠️ Composio key set but connection failed: {e}"
 
 
+def _all_toolkits(client, max_pages: int = 10) -> list:
+    """Fetch toolkits (apps), following pagination."""
+    items: list = []
+    cursor = None
+    for _ in range(max_pages):
+        kwargs: Dict[str, Any] = {"limit": 100, "sort_by": "alphabetically"}
+        if cursor:
+            kwargs["cursor"] = cursor
+        resp = client.toolkits.list(**kwargs)
+        items.extend(_get(resp, "items", []) or [])
+        cursor = _get(resp, "next_cursor")
+        if not cursor:
+            break
+    return items
+
+
 def list_apps() -> str:
-    """List all apps available through Composio (200+)."""
+    """List all apps (toolkits) available through Composio (200+)."""
     client = _get_composio()
     if client is None:
         return _err(_sdk_error)
 
     try:
-        tools = client.get_tools()
-        apps = sorted({t.app for t in tools if hasattr(t, "app") and t.app})
-        if not apps:
+        slugs = sorted({str(_get(t, "slug", "")) for t in _all_toolkits(client) if _get(t, "slug")})
+        if not slugs:
             return "No apps found. Check your COMPOSIO_API_KEY."
-        lines = [f"Available apps ({len(apps)}):\n"]
-        for i in range(0, len(apps), 6):
-            lines.append("  " + ", ".join(apps[i:i+6]))
+        lines = [f"Available apps ({len(slugs)}):\n"]
+        for i in range(0, len(slugs), 6):
+            lines.append("  " + ", ".join(slugs[i:i + 6]))
         return "\n".join(lines)
     except Exception as e:
         return _err(f"Failed to list apps: {e}")
+
+
+def _format_tools(tools: list, limit: int, desc_len: int) -> list:
+    lines = []
+    for t in tools[:limit]:
+        slug = _get(t, "slug", "?")
+        app = _toolkit_slug(t) or "?"
+        desc = (_get(t, "description", "") or "")[:desc_len]
+        lines.append(f"  [{app}] {slug}: {desc}")
+    return lines
 
 
 def search_tools(query: str = "") -> str:
     """Search Composio tools by name or description.
 
     Args:
-        query: Search term (e.g. 'slack', 'send email', 'create issue').
-                Empty query returns a summary of all tools.
+        query: Search term (e.g. 'slack send message', 'create issue').
+               Empty query returns the list of apps instead.
     """
     client = _get_composio()
     if client is None:
         return _err(_sdk_error)
 
+    if not query.strip():
+        return list_apps()
+
     try:
-        tools = client.get_tools()
-        if not query:
-            apps = {}
-            for t in tools:
-                app = getattr(t, "app", "unknown")
-                apps[app] = apps.get(app, 0) + 1
-            lines = [f"Total tools: {len(tools)} across {len(apps)} apps\n"]
-            for app, count in sorted(apps.items()):
-                lines.append(f"  {app}: {count} tools")
-            return "\n".join(lines)
-
-        q = query.lower()
-        matches = [
-            t for t in tools
-            if q in getattr(t, "name", "").lower()
-            or q in getattr(t, "description", "").lower()
-            or q in getattr(t, "app", "").lower()
-        ]
-        if not matches:
+        tools = client.tools.get_raw_composio_tools(search=query.strip(), limit=20)
+        if not tools:
             return f"No tools matching '{query}'. Try list_apps() to see available apps."
-
-        lines = [f"Found {len(matches)} tool(s) for '{query}':\n"]
-        for t in matches[:20]:
-            name = getattr(t, "name", "?")
-            app = getattr(t, "app", "?")
-            desc = getattr(t, "description", "")[:100]
-            lines.append(f"  [{app}] {name}: {desc}")
-        if len(matches) > 20:
-            lines.append(f"  ... and {len(matches) - 20} more")
+        lines = [f"Found {len(tools)} tool(s) for '{query}':\n"]
+        lines.extend(_format_tools(tools, 20, 100))
         return "\n".join(lines)
     except Exception as e:
         return _err(f"Search failed: {e}")
 
 
 def list_tools(app: str = "") -> str:
-    """List tools for a specific app, or all tools if app is empty.
+    """List tools for a specific app.
 
     Args:
-        app: App name (e.g. 'slack', 'gmail', 'notion'). Empty = all.
+        app: App name (e.g. 'slack', 'gmail', 'notion'). Required by the Composio API.
     """
     client = _get_composio()
     if client is None:
         return _err(_sdk_error)
 
-    try:
-        tools = client.get_tools()
-        if app:
-            q = app.lower()
-            tools = [t for t in tools if q in getattr(t, "app", "").lower()]
-            if not tools:
-                return f"No tools for '{app}'. Use list_apps() to see available apps."
+    if not app.strip():
+        return _err("app is required (e.g. 'slack'). Use list_apps() to see available apps.")
 
-        lines = [f"Tools ({len(tools)}):\n"]
-        for t in tools[:50]:
-            name = getattr(t, "name", "?")
-            app_name = getattr(t, "app", "?")
-            desc = getattr(t, "description", "")[:80]
-            lines.append(f"  [{app_name}] {name}: {desc}")
-        if len(tools) > 50:
-            lines.append(f"  ... and {len(tools) - 50} more")
+    try:
+        tools = client.tools.get_raw_composio_tools(toolkits=[app.strip().lower()], limit=50)
+        if not tools:
+            return f"No tools for '{app}'. Use list_apps() to see available apps."
+        lines = [f"Tools for {app} ({len(tools)}):\n"]
+        lines.extend(_format_tools(tools, 50, 80))
         return "\n".join(lines)
     except Exception as e:
         return _err(f"Failed to list tools: {e}")
@@ -388,7 +403,7 @@ def execute_tool(tool_name: str, params: str = "{}") -> str:
     """Execute a Composio tool by name with JSON parameters.
 
     Args:
-        tool_name: The Composio tool name (e.g. 'SLACK_SEND_MESSAGE').
+        tool_name: The Composio tool slug (e.g. 'SLACK_SEND_MESSAGE').
         params: JSON string of parameters (e.g. '{"channel":"#general","text":"hello"}').
     """
     client = _get_composio()
@@ -407,7 +422,12 @@ def execute_tool(tool_name: str, params: str = "{}") -> str:
         return _err(f"Invalid JSON in params: {e}")
 
     try:
-        result = client.execute_tool(tool_name, params_dict)
+        result = client.tools.execute(
+            tool_name.strip().upper(),
+            params_dict,
+            user_id=USER_ID,
+            dangerously_skip_version_check=True,
+        )
         if isinstance(result, (dict, list)):
             return json.dumps(result, indent=2, ensure_ascii=False, default=str)
         return str(result)
@@ -422,7 +442,7 @@ def list_connected_accounts() -> str:
         return _err(_sdk_error)
 
     try:
-        accounts = client.get_connected_accounts()
+        accounts = _accounts(client)
         if not accounts:
             return (
                 "No connected accounts yet.\n"
@@ -431,9 +451,7 @@ def list_connected_accounts() -> str:
             )
         lines = [f"Connected accounts ({len(accounts)}):\n"]
         for acc in accounts:
-            app = getattr(acc, "app_name", getattr(acc, "app", "?"))
-            status_val = getattr(acc, "status", "unknown")
-            lines.append(f"  {app}: {status_val}")
+            lines.append(f"  {_toolkit_slug(acc) or '?'}: {_get(acc, 'status', 'unknown')}")
         return "\n".join(lines)
     except Exception as e:
         return _err(f"Failed to list accounts: {e}")
@@ -449,11 +467,13 @@ def get_auth_url(app: str = "") -> str:
     if client is None:
         return _err(_sdk_error)
 
-    if not app:
+    if not app.strip():
         return _err("app name is required. Use list_apps() to see available apps.")
 
+    app = app.strip().lower()
     try:
-        url = client.get_auth_url(app)
+        req = client.toolkits.authorize(user_id=USER_ID, toolkit=app)
+        url = _get(req, "redirect_url")
         if not url:
             return _err(f"No auth URL available for '{app}'. It may use API key auth instead.")
         return (
@@ -477,23 +497,19 @@ def check_connection(app: str = "") -> str:
         return _err(_sdk_error)
 
     try:
-        accounts = client.get_connected_accounts()
-        if not app:
-            count = len(accounts) if accounts else 0
-            return f"Connected accounts: {count}. Use list_connected_accounts() for details."
+        if not app.strip():
+            return f"Connected accounts: {len(_accounts(client))}. Use list_connected_accounts() for details."
 
-        q = app.lower()
+        accounts = _accounts(client, app.strip())
+        if not accounts:
+            return (
+                f"❌ {app} not connected.\n"
+                f"Call get_auth_url('{app}') to start the OAuth flow."
+            )
         for acc in accounts:
-            acc_app = getattr(acc, "app_name", getattr(acc, "app", ""))
-            if q in acc_app.lower():
-                st = getattr(acc, "status", "unknown")
-                if st == "active":
-                    return _ok(f"{acc_app}: connected and active")
-                return f"⚠️ {acc_app}: status={st}"
-
-        return (
-            f"❌ {app} not connected.\n"
-            f"Call get_auth_url('{app}') to start the OAuth flow."
-        )
+            if str(_get(acc, "status", "")).upper() == "ACTIVE":
+                return _ok(f"{_toolkit_slug(acc) or app}: connected and active")
+        st = _get(accounts[0], "status", "unknown")
+        return f"⚠️ {_toolkit_slug(accounts[0]) or app}: status={st}"
     except Exception as e:
         return _err(f"Connection check failed: {e}")
