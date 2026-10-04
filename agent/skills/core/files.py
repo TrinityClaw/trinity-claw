@@ -381,7 +381,11 @@ def checkpoint(path: str, label: str = "") -> str:
 
         dest = dest_dir / src.name
         if src.is_dir():
-            shutil.copytree(src, dest)
+            # Never copy credential files (.env, *_token.json, ...) into memory/
+            shutil.copytree(
+                src, dest,
+                ignore=lambda d, names: [n for n in names if _is_sensitive(Path(d) / n)],
+            )
             size_bytes = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
         else:
             shutil.copy2(src, dest)
@@ -515,6 +519,8 @@ def find_duplicates(path: str) -> str:
         skipped = 0
         for item in p.rglob("*"):
             if item.is_file():
+                if _is_sensitive(item):
+                    continue
                 try:
                     if item.stat().st_size > _MAX_HASH_SIZE:
                         skipped += 1

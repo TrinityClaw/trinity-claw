@@ -32,6 +32,29 @@ __all__ = ["NAME", "SHORT_DOC", "DOC", "SKILL_TIMEOUT", "run_script"]
 _DEFAULT_SCRIPT_TIMEOUT = int(os.getenv("SCRIPT_RUNNER_TIMEOUT", "300"))
 _SCRIPT_OUTPUT_CAP = 3000
 
+# Speed-bump scan for the model's script (not a hard boundary). The agent container has the
+# Docker socket mounted, so the docker SDK must not be reachable from a script, and scripts
+# must not read the .env file directly. Skills are reached through tool() instead.
+_BLOCKED_PATTERNS = [
+    (r"(^|\n)\s*(import|from)\s+docker\b", "importing the docker SDK"),
+    (r"(^|\n)\s*(import|from)\s+(importlib|pty|ctypes|cffi|socket)\b", "importing importlib/pty/ctypes/socket"),
+    (r"import_module\s*\(", "import_module()"),
+    (r"__import__\s*\(", "__import__()"),
+    (r"\.env\b", "reference to a .env file"),
+    (r"docker\.sock", "reference to the Docker socket"),
+    (r"/proc/", "reference to /proc"),
+    (r"os\.system\s*\(|os\.popen\s*\(|os\.exec[a-z]*\s*\(", "shell execution via os.*"),
+    (r"shell\s*=\s*True", "subprocess with shell=True"),
+]
+
+
+def _scan_script(code: str):
+    """Return a reason string if the script is blocked, else None."""
+    for pattern, label in _BLOCKED_PATTERNS:
+        if re.search(pattern, code):
+            return f"BLOCKED: {label} is not permitted in scripts. Use tool(skill, function, ...) instead."
+    return None
+
 # The script subprocess gets only a safe baseline plus what it needs to talk
 # to the agent's own endpoint (the API key) — same posture as mcp_client stdio.
 _SCRIPT_ENV_BASELINE = (
@@ -87,6 +110,10 @@ def run_script(code: str, timeout: int = None) -> str:
     md = re.search(r"```(?:python|py)?\s*(.*?)\s*```", code, re.DOTALL)
     if md:
         code = md.group(1).strip()
+
+    block_reason = _scan_script(code)
+    if block_reason:
+        return f"❌ REJECTED by security scanner:\n  {block_reason}"
 
     try:
         timeout = int(timeout) if timeout else _DEFAULT_SCRIPT_TIMEOUT

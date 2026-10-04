@@ -51,10 +51,30 @@ MAX_OUTPUT   = 2000   # chars — keeps LLM context clean
 MAX_TIMEOUT  = 30     # hard ceiling regardless of caller request
 DEFAULT_TIMEOUT = 10
 
-# Imports that signal dangerous intent inside untrusted snippets
+# Imports that signal dangerous intent inside untrusted snippets.
+# "docker"/"importlib"/"pty": the agent container has the Docker socket mounted, so the
+# docker SDK would give a snippet control of the host; importlib/pty are scanner bypasses.
 _BLOCKED_IMPORTS = frozenset({
     "ctypes", "cffi", "socket", "multiprocessing",
+    "docker", "importlib", "pty",
 })
+
+# Snippets and fallback commands get ONLY these environment variables. Everything else
+# (API keys, tokens, passwords loaded from .env) is withheld. test_skill is the one
+# exception because the skills it tests legitimately read their own keys.
+_SAFE_ENV_BASELINE = (
+    "PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "TEMP", "TMP",
+    "PYTHONUNBUFFERED", "PYTHONIOENCODING", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+)
+
+
+def _safe_env() -> dict:
+    return {k: os.environ[k] for k in _SAFE_ENV_BASELINE if k in os.environ}
+
+
+# Set TERMINAL_ALLOW_UNSANDBOXED=1 to let run_bash fall back to running directly inside
+# the agent container when the Docker sandbox is unavailable. Default: fail closed.
+_ALLOW_UNSANDBOXED = os.getenv("TERMINAL_ALLOW_UNSANDBOXED", "0").strip().lower() in ("1", "true", "yes")
 
 # Regex patterns for shell-injection calls that AST alone can't catch reliably
 _BLOCKED_PATTERNS = [
@@ -63,6 +83,10 @@ _BLOCKED_PATTERNS = [
     (r"os\.popen\s*\(",   "os.popen()"),
     (r"os\.execv[ep]?\s*\(", "os.exec*()"),
     (r"__import__\s*\(",  "__import__()"),
+    (r"\.env\b",           "reference to a .env file"),
+    (r"docker\.sock",      "reference to the Docker socket"),
+    (r"/proc/",            "reference to /proc"),
+    (r"import_module\s*\(", "import_module()"),
 ]
 
 # Bash commands Trinity is allowed to run via run_bash()
@@ -120,10 +144,13 @@ def _scan_snippet(code: str) -> Optional[str]:
     return None  # Clean
 
 
-def _run_in_subprocess(code: str, timeout: int) -> str:
+def _run_in_subprocess(code: str, timeout: int, scrub_env: bool = True) -> str:
     """
     Write code to a temp file, execute with the current Python interpreter,
     capture stdout/stderr, clean up. Returns formatted result string.
+
+    scrub_env=True (default): the child gets only _SAFE_ENV_BASELINE, so secrets from
+    .env are not inherited. test_skill passes False (trusted harness, skills need keys).
     """
     tmp_path = None
     try:
@@ -140,6 +167,7 @@ def _run_in_subprocess(code: str, timeout: int) -> str:
             text=True,
             timeout=timeout,
             cwd="/tmp",   # neutral working directory
+            env=_safe_env() if scrub_env else None,
         )
 
         stdout = _truncate(result.stdout)
@@ -284,8 +312,9 @@ def test_skill(skill_name: str, fn_name: str, args_json: str = "[]", timeout: in
             sys.exit(1)
     """)
 
-    # The harness itself is trusted code — skip scanner, run directly
-    return _run_in_subprocess(harness, timeout)
+    # The harness itself is trusted code — skip scanner, run directly.
+    # Keep the full environment: the skill under test reads its own API keys.
+    return _run_in_subprocess(harness, timeout, scrub_env=False)
 
 
 def _get_docker_sandbox_client():
@@ -382,6 +411,11 @@ def run_bash(command: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     if not args:
         return "❌ REJECTED: Empty command."
 
+    # Never allow touching secrets or the Docker socket, in any mode
+    for a in args:
+        if ".env" in a or "docker.sock" in a or a.startswith("/proc"):
+            return "❌ REJECTED: that path is protected (secrets / Docker socket / /proc)."
+
     base = args[0]
     if base not in _BASH_WHITELIST:
         return (
@@ -408,12 +442,30 @@ def run_bash(command: str, timeout: int = DEFAULT_TIMEOUT) -> str:
             )
         return _sandbox_result
 
+    # Docker sandbox unavailable. Running directly inside the agent container would expose
+    # its environment and files, so fail closed unless explicitly allowed.
+    if not _ALLOW_UNSANDBOXED:
+        return (
+            "❌ run_bash is disabled: the Docker sandbox is not available, and running commands "
+            "directly inside the agent container is not allowed by default.\n"
+            "  Check that the Docker socket is mounted and the sandbox image can be pulled, "
+            "or set TERMINAL_ALLOW_UNSANDBOXED=1 in .env to accept the risk."
+        )
+    # Opt-in fallback: block the whitelist's known escape hatches and strip the environment.
+    if base == "find" and any(a in ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf") for a in args):
+        return "❌ REJECTED: find actions that run commands or write files are not allowed."
+    if base == "git" and any(a == "-c" or a.startswith("--config") or a.startswith("--exec-path") for a in args):
+        return "❌ REJECTED: git -c / --config can run arbitrary commands."
+    if base == "pip" and any(a in ("install", "download", "wheel") for a in args):
+        return "❌ REJECTED: pip install runs arbitrary code; it is only allowed inside the Docker sandbox."
+
     try:
         result = subprocess.run(
             args,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_safe_env(),
         )
         output = _truncate(result.stdout if result.returncode == 0 else result.stderr)
         label = "✅" if result.returncode == 0 else f"❌ Exit {result.returncode}"
@@ -457,6 +509,8 @@ def status() -> str:
         f"  • Max timeout:      {MAX_TIMEOUT}s",
         "  • Isolation:        subprocess (never exec() in-process)",
         "  • Working dir:      /tmp (neutral, not /app/skills)",
+        "  • Environment:      snippets/commands get a minimal env (no .env secrets)",
+        f"  • run_bash:         Docker sandbox only (unsandboxed fallback {'ON' if _ALLOW_UNSANDBOXED else 'OFF'})",
         "",
         "Self-improvement integration loop:",
         "  1. self_improvement.audit('my_skill')           → find issues",
