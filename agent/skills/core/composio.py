@@ -59,6 +59,43 @@ _composio = None
 _sdk_error = None
 
 
+def _load_sdk_class():
+    """Import ``Composio`` from the real pip-installed SDK.
+
+    This skill file is itself named ``composio.py`` and lives in a folder that can be on
+    sys.path, so a plain ``from composio import Composio`` may import THIS file instead of
+    the SDK. We temporarily hide the skill's own folder (and any stale module entry) so the
+    real package in site-packages is found, whatever the Python version or install path.
+    """
+    import importlib
+    import sys
+
+    this_file = os.path.abspath(__file__)
+    here = os.path.dirname(this_file)
+
+    def _is_self(mod) -> bool:
+        f = getattr(mod, "__file__", None)
+        return bool(f) and os.path.abspath(f) == this_file
+
+    mod = sys.modules.get("composio")
+    if mod is not None and not _is_self(mod) and hasattr(mod, "Composio"):
+        return mod.Composio  # real SDK already imported
+
+    saved_path = list(sys.path)
+    saved_mod = mod
+    try:
+        sys.path = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != here]
+        sys.modules.pop("composio", None)
+        sdk = importlib.import_module("composio")
+        return sdk.Composio
+    except Exception:
+        if saved_mod is not None:
+            sys.modules["composio"] = saved_mod  # put things back if the SDK truly isn't there
+        raise
+    finally:
+        sys.path = saved_path
+
+
 def _get_composio():
     """Lazily import and initialize the Composio SDK. Returns client or None."""
     global _composio, _sdk_error
@@ -74,7 +111,7 @@ def _get_composio():
         return None
 
     try:
-        from composio import Composio
+        Composio = _load_sdk_class()
         _composio = Composio(api_key=api_key)
         return _composio
     except ImportError as e:
@@ -165,9 +202,9 @@ def setup(api_key: str = "") -> str:
 
     sdk_installed = False
     try:
-        import composio  # noqa
+        _load_sdk_class()
         sdk_installed = True
-    except ImportError:
+    except Exception:
         pass
 
     steps = [
@@ -246,8 +283,8 @@ def _save_api_key(api_key: str) -> str:
     # The SDK must be baked into the Docker image (runtime pip installs are lost on rebuild)
     sdk_msg = ""
     try:
-        import composio  # noqa
-    except ImportError:
+        _load_sdk_class()
+    except Exception:
         sdk_msg = (
             "\n⚠️ The composio package is not installed in this container. "
             "Add 'composio' to agent/requirements.txt, then run: "
