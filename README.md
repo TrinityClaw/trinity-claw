@@ -21,11 +21,15 @@ A self-modifying AI agent with persistent memory, dynamic skill creation, and in
 >
 > **Recommended setup:** run on your home machine or a local network server, accessed via your LAN or a private VPN (e.g. Tailscale, WireGuard). Do **not** open ports 8001, 8080, or 8090 to the public internet.
 
+
+
+https://github.com/user-attachments/assets/8ef1ddcf-b816-4566-87af-ce6511ed52fd
+
+
+
 ---
 
 ## ⚠️ Security Notice
-
-> **Use at your own risk.**
 
 TrinityClaw is **secure by design** in its original form:
 - All skills run inside an isolated Docker container with no host access
