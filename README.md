@@ -9,40 +9,37 @@ pinned: false
 
 # TrinityClaw AI Agent
 
-A self-modifying AI agent with persistent memory, dynamic skill creation, and intelligent reasoning capabilities.
+A self-modifying AI agent that runs entirely on your own machine: it browses the web, automates your browser, chats with you over Telegram, reads your Gmail and calendar, remembers everything, and writes itself new skills overnight.
+
+<!-- DEMO: add a GIF or a 2-minute demo video here — this is the highest-impact spot on the page -->
 
 ---
 
-> ## 🖥️ LOCAL USE ONLY
->
-> **TrinityClaw is designed for personal local servers — do not deploy it on a VPS or any public-facing server.**
->
-> The agent API has no rate limiting and no multi-user authentication layer. The `code_executor` and `terminal` skills run arbitrary code inside Docker, and the single `TRINITY_API_KEY` is not sufficient protection for an internet-exposed host. Running this on a public IP without additional firewall rules and a reverse proxy with proper auth could expose your system to unauthorized access.
->
-> **Recommended setup:** run on your home machine or a local network server, accessed via your LAN or a private VPN (e.g. Tailscale, WireGuard). Do **not** open ports 8001, 8080, or 8090 to the public internet.
+> ⚠️ **Local use only.** Runs on your home machine or LAN — never expose it to the public internet. Details in [Security](#security).
 
 ---
 
-## ⚠️ Security Notice
+## Install
 
-> **Use at your own risk.**
+The only prerequisite is **[Docker Desktop](https://www.docker.com/products/docker-desktop/)** (free). No Git required — the installers fetch everything.
 
-TrinityClaw is **secure by design** in its original form:
-- All skills run inside an isolated Docker container with no host access
-- Dynamic skill creation uses AST validation and a module ban-list to block dangerous code
-- The agent API is protected by a randomly-generated `TRINITY_API_KEY`
-- Telegram integration only responds to your specific Chat ID
-- Core skills are read-only inside the container; only `skills/dynamic/` is writable by the agent
+<!-- Keep these commands in sync with the Quick Start section below -->
 
-However, **any modification to the codebase can introduce risk.** This is an inherent property of self-modifying AI agent systems:
+**Windows** — press `Win + R`, paste, hit Enter:
 
-- Editing core skills, relaxing the module ban-list, or adding new file-system access can expand the attack surface
-- Prompt injection via untrusted web content or external data sources is a known risk class for all LLM agents
-- Credentials in `.env` (API keys, SMTP passwords, Telegram tokens) should be treated as sensitive — never commit `.env` to a public repository
-- The `code_executor` and `terminal` skills run code inside the container — review any AI-generated code before executing it on sensitive systems
-- Dynamic skills created by the agent should be inspected before being promoted to `skills/core/`
+```powershell
+powershell -Command "irm https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.ps1 | iex"
+```
 
-This project follows responsible AI agent design practices, but **no system is unconditionally safe once modified.** If you extend or customize TrinityClaw, you take on responsibility for auditing those changes.
+**macOS / Linux** — paste into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TrinityClaw/trinity-claw/main/install.sh | bash
+```
+
+The wizard asks one question — **cloud** model (API key) or **local** model (free, ~6.6 GB). When it finishes, the Web UI opens at **http://localhost:8080**.
+
+Full walkthrough (screenshots, options, troubleshooting): [Quick Start](#quick-start)
 
 ---
 
@@ -64,6 +61,22 @@ This project follows responsible AI agent design practices, but **no system is u
 - **Voice Messages**: Send audio to Telegram or web UI — transcribed locally via Whisper (no API key needed)
 - **Image Vision & OCR**: Send photos via Telegram or web UI — described by a vision-capable LLM; local OCR (Tesseract) extracts text from screenshots, documents, and receipts in English, Italian, Spanish, French, Greek, and Serbian (Cyrillic + Latin)
 - **Secure**: AST validation, skill whitelisting, Docker isolation
+
+---
+
+## Security
+
+**Use at your own risk.** TrinityClaw is secure in its original form:
+
+- Every skill runs inside an isolated Docker container with no host access
+- Dynamic skill creation is gated by AST validation and a module ban-list
+- Agent API protected by a randomly generated `TRINITY_API_KEY`
+- Telegram bot only responds to your Chat ID
+- Core skills are read-only in the container; the agent can only write to `skills/dynamic/`
+
+Because the agent modifies itself, **any change you make can widen the attack surface** — review AI-generated code, inspect dynamic skills before promoting them, and never commit `.env`.
+
+Full details: [SECURITY.md](SECURITY.md)
 
 ---
 
@@ -213,7 +226,7 @@ docker exec trinity-claw-ollama-1 ollama pull qwen3.5:9b
 | OpenAI | `openai/gpt-4o` | `https://api.openai.com/v1` |
 | Anthropic | `anthropic/claude-3-5-sonnet-20241022` | `https://api.anthropic.com/v1` |
 | Moonshot | `openai/moonshot-v1-8k` | `https://api.moonshot.cn/v1` |
-| Local (Ollama) | `ollama/qwen3.5:9b` | `http://localhost:11434` |
+| Local (Ollama-any model) | `ollama/qwen3.5:9b` | `http://localhost:11434` |
 
 ### Configuration Files
 
@@ -326,7 +339,7 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 
 ---
 
-## Core Skills (32)
+## Core Skills (33)
 
 | Skill | Description | Functions |
 |-------|-------------|-----------|
@@ -362,6 +375,7 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 | `weather_api` | Real-time weather, multi-day forecast (up to 16 days), and air quality. No API key required. | `get_weather`, `get_forecast`, `get_air_quality` |
 | `website_cloner` | Scrape a live website's design tokens (CSS variables, colors, fonts, section structure) and scaffold a `web_builder` project from them. | `extract_tokens`, `clone` |
 | `mcp_client` | Connect to MCP servers (Streamable HTTP, legacy HTTP+SSE, stdio), discover/test/filter tools — connected tools become first-class agent skills (see MCP Client section) | `connect_server`, `list_servers`, `ping_server`, `test_server`, `list_tools`, `list_all_mcp_tools`, `enable_tool`, `disable_tool`, `set_server_enabled`, `call_tool`, `remove_server`, `discover_workspace_servers`, `list_resources`, `read_resource`, `list_prompts`, `get_prompt` |
+| `composio` | Connect to 200+ external apps (Slack, Notion, Jira, Stripe, etc.) via Composio — OAuth handled automatically (see Composio section) | `status`, `list_apps`, `search_tools`, `list_tools`, `execute_tool`, `list_connected_accounts`, `get_auth_url`, `check_connection` |
 
 ---
 
@@ -517,6 +531,74 @@ Once connected, tools are exposed to the model as `mcp_<server>_<tool>` and are 
 - stdio servers receive a minimal environment — your `.env` secrets are withheld unless explicitly configured via `${VAR}` references
 - Workspace-discovered stdio servers are registered **disabled** by default
 - Registry file: `memory/mcp_servers.json` (inside the container: `/app/memory/mcp_servers.json`)
+
+---
+
+## Composio Integration (200+ Apps)
+
+TrinityClaw includes a built-in Composio skill (`agent/skills/core/composio.py`) that connects to 200+ external apps — Slack, Notion, Jira, Stripe, HubSpot, Linear, Airtable, and more — without writing a custom skill per service. Composio handles OAuth flows and token refreshes automatically.
+
+### Setup (one-time, ~2 minutes)
+
+**Easiest — just ask the agent** (Web UI at http://localhost:8080, or Telegram):
+
+> "Set up composio"
+
+The agent will open composio.dev in your browser, walk you through each step, and save your key automatically once you paste it.
+
+**Or manually:**
+
+1. **Create a free account** at [composio.dev](https://composio.dev)
+2. **Copy your API key** from the Composio dashboard
+3. **Add it to your `.env`:**
+   ```bash
+   COMPOSIO_API_KEY=your_api_key_here
+   ```
+4. **Install the SDK** (if not already installed):
+   ```bash
+   pip install composio
+   ```
+5. **Restart TrinityClaw** and verify:
+   ```
+   > "check composio status"
+   ```
+
+### Available Functions
+
+| Function | What it does |
+|----------|-------------|
+| `setup(api_key?)` | Guided setup wizard — opens browser, saves key, installs SDK |
+| `status()` | Check API key, SDK installed, connection state |
+| `list_apps()` | List all 200+ available apps |
+| `search_tools(query)` | Search tools by name or description |
+| `list_tools(app?)` | List tools for a specific app |
+| `execute_tool(name, params)` | Run a tool with JSON parameters |
+| `list_connected_accounts()` | Show all OAuth-connected apps |
+| `get_auth_url(app)` | Start an OAuth flow for an app |
+| `check_connection(app)` | Verify an app is connected |
+
+### Example — Send a Slack Message
+
+```bash
+# 1. Connect Slack (opens OAuth URL in browser)
+> "get auth url for slack"
+
+# 2. Verify connection
+> "check connection slack"
+
+# 3. Find the right tool
+> "search composio tools for slack send message"
+
+# 4. Execute it
+> "execute tool SLACK_SEND_MESSAGE with {"channel":"#general","text":"Hello from Trinity!"}"
+```
+
+### Security
+
+- `COMPOSIO_API_KEY` is read from `.env` — never printed or returned in results
+- Tool output is treated as untrusted external content and sanitized before reaching the model (same pipeline as MCP client output)
+- Only the minimum scopes configured at composio.dev are granted — this skill cannot escalate scopes
+- OAuth tokens are managed by Composio's SDK, not stored in TrinityClaw's memory
 
 ---
 
