@@ -1,4 +1,5 @@
 fastapi
+composio
 uvicorn
 requests
 chromadb
