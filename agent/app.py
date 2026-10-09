@@ -2045,6 +2045,36 @@ def _strip_fake_result_blocks(text: str) -> str:
     return '\n'.join(out)
 
 
+# Composio (and similar) functions that only LOOK UP tools/schemas — they never
+# fulfil a user request by themselves. If the loop's last successful calls are
+# all in this set, the model stopped at discovery and must be pushed to execute.
+_DISCOVERY_ONLY_FUNCS = {
+    ("composio", "search_tools"),
+    ("composio", "list_tools"),
+    ("composio", "get_tool_schema"),
+    ("composio", "list_apps"),
+    ("composio", "list_connected_accounts"),
+    ("composio", "status"),
+    ("composio", "check_connection"),
+    ("mcp_client", "list_tools"),
+    ("mcp_client", "list_servers"),
+    ("mcp_client", "search_tools"),
+}
+
+
+def _is_discovery_only(logs: list) -> bool:
+    """True when every successful, non-lesson log entry is a tool-discovery call."""
+    real = [
+        l for l in (logs or [])
+        if l.get("status") == "success" and l.get("status") != "lesson_warning"
+    ]
+    if not real:
+        return False
+    return all(
+        (l.get("skill"), l.get("function")) in _DISCOVERY_ONLY_FUNCS for l in real
+    )
+
+
 def _clean_tool_call_artifacts(text: str) -> str:
     """Strip stray tool calling tokens, XML tags, and think blocks from assistant replies."""
     if not text:
@@ -3090,6 +3120,16 @@ def _call_llm(
         resp.raise_for_status()
         _raw_msg = resp.json().get("message", {})
         raw = _raw_msg.get("content") or ""
+        # OLLAMA_THINK=true returns reasoning in a separate "thinking" field.
+        # Models (Qwen3.8) sometimes put the whole answer — or the skill tag —
+        # there and emit an empty "content", which previously produced a blank
+        # reply. Keep it so the agent loop can fall back to it.
+        _thinking = (_raw_msg.get("thinking") or "").strip()
+        if _thinking and not raw.strip():
+            print(f"💭 Ollama returned empty content but {len(_thinking)} chars of thinking — using it as reply")
+            raw = _thinking
+        elif _thinking:
+            print(f"💭 Ollama thinking block: {len(_thinking)} chars (content present, ignoring)")
         # Normalize Ollama tool_calls → OpenAI format expected by _execute_tool_calls
         # Ollama: arguments is already a dict; OpenAI: arguments is a JSON string + needs id
         _ollama_tool_calls = _raw_msg.get("tool_calls") or []
@@ -4164,6 +4204,18 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
 
         _continuation_pushes = 0        # cloud: how many "stop describing, act!" pushes sent so far
         _local_continuation_pushes = 0  # local: same, for Ollama/tag path
+        _empty_replies = 0              # how many completely empty model turns we've seen (local + cloud)
+        _discovery_pushes = 0           # how many "you only searched, now execute!" pushes we've sent
+        _discovery_pushed = False       # only one discovery push per request
+        # If the user explicitly asked WHICH tools exist, a tool list IS the answer —
+        # don't push the model to execute in that case.
+        _user_wants_tool_list = any(
+            s in req.message.lower()
+            for s in (
+                "what tools", "which tools", "list tools", "available tools",
+                "show tools", "search for tools", "tool for", "tools for",
+            )
+        )
         _consecutive_error_iters = 0    # how many consecutive iterations had only failed skill calls
         _skill_failure_counts: dict = {}  # (skill, func) -> cumulative failure count this request
 
@@ -4230,6 +4282,33 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 # If the LLM returned nothing or only unexecuted tool tokens, but we already have tool results
                 # from a previous iteration, surface them directly — no need to re-prompt.
                 if not ai_reply_clean and all_execution_logs:
+                    # ...but never surface raw DISCOVERY output (tool search results) as
+                    # the final answer — push the model to actually execute the tool.
+                    if (
+                        _is_discovery_only(all_execution_logs)
+                        and _discovery_pushes < 2
+                        and not _user_wants_tool_list
+                    ):
+                        _discovery_pushes += 1
+                        _discovery_pushed = True
+                        _found = "; ".join(
+                            str(l.get("result", "")).strip().splitlines()[0]
+                            for l in all_execution_logs
+                            if l.get("status") == "success" and str(l.get("result", "")).strip()
+                        )[:400]
+                        print(f"⚠️  Iteration {iteration}: empty reply over discovery-only results — execute push #{_discovery_pushes}")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You only SEARCHED for tools and returned nothing. "
+                                f"Found: {_found}\n"
+                                "Now execute: <skill:composio.get_tool_schema>SLUG</skill:composio.get_tool_schema> "
+                                "then <skill:composio.execute_tool>SLUG,{json params}</skill:composio.execute_tool>. "
+                                "Prefer *MESSAGES/*SEARCH* slugs over LABELS for unread counts. "
+                                "Output ONLY the skill tag."
+                            ),
+                        })
+                        continue
                     parts = []
                     for log in all_execution_logs:
                         if log.get("status") == "lesson_warning":
@@ -4334,8 +4413,67 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         })
                         continue
 
+                    # Recovery: model returned NOTHING (empty content, no skill tags,
+                    # no execution log) — e.g. Qwen answered only in its Ollama
+                    # "thinking" field or got truncated. Don't bail with a filler
+                    # sentence on iteration 1; force one direct answer instead.
+                    if not ai_reply.strip() and not all_execution_logs and _empty_replies < 2:
+                        _empty_replies += 1
+                        print(f"⚠️  Iteration {iteration}: empty local reply — direct-answer push #{_empty_replies}")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You returned an empty response. Answer the user's last message "
+                                "RIGHT NOW in plain text (no skill tags, no thinking, no preamble). "
+                                "If the task needs a tool, output ONLY the skill tag, e.g. "
+                                "<skill:composio.list_inbox></skill:composio.list_inbox>"
+                            ),
+                        })
+                        continue
+
+                    # Recovery: model stopped after tool DISCOVERY (e.g. composio
+                    # search_tools/list_tools) and answered with the raw tool list
+                    # instead of executing the tool. Push it to run the actual call.
+                    if (
+                        _is_discovery_only(all_execution_logs)
+                        and _discovery_pushes < 2
+                        and not _discovery_pushed
+                        and not _user_wants_tool_list
+                    ):
+                        _discovery_pushes += 1
+                        _discovery_pushed = True
+                        _found = "; ".join(
+                            str(l.get("result", "")).strip().splitlines()[0]
+                            for l in all_execution_logs
+                            if l.get("status") == "success" and str(l.get("result", "")).strip()
+                        )[:400]
+                        print(f"⚠️  Iteration {iteration}: discovery-only results — execute push #{_discovery_pushes}")
+                        messages.append({"role": "assistant", "content": ai_reply})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "That was only a tool SEARCH — it does not answer the user. "
+                                f"Found: {_found}\n"
+                                "Now execute the right tool: first call "
+                                "<skill:composio.get_tool_schema>SLUG</skill:composio.get_tool_schema> "
+                                "to get exact params, then "
+                                "<skill:composio.execute_tool>SLUG,{json params}</skill:composio.execute_tool>. "
+                                "For unread-email counts prefer a *MESSAGES/*SEARCH* slug over LABELS tools. "
+                                "Output ONLY the next skill tag. No prose."
+                            ),
+                        })
+                        continue
+
                     print(f"✅ Agent loop complete after {iteration} iteration(s)")
                     ai_reply = _clean_tool_call_artifacts(executed_reply)
+                    # Discovery-only result: the model searched for tools but never
+                    # executed one — don't pass off the tool list as an answer.
+                    if not ai_reply and _is_discovery_only(all_execution_logs):
+                        ai_reply = (
+                            "I looked up the available tools but didn't run one yet, so I "
+                            "don't have your actual data. Please ask again and I'll execute "
+                            "the tool this time."
+                        )
                     # Fallback: Qwen and other local models sometimes produce an empty
                     # final turn (only <think> reasoning, no user-facing text, or stray <tool_call>). Rather
                     # than returning a blank response, synthesise a summary from the
@@ -4372,7 +4510,14 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                                     parts.append(f"❌ {skill_label} — {log.get('error', 'failed')}")
                             ai_reply = "Actions completed:\n\n" + "\n".join(parts)
                     elif not ai_reply:
-                        ai_reply = "I completed the action, but no text response was produced. If you need me to summarize or take next steps, please let me know."
+                        # Honest fallback: NO tools ran and NO text was produced.
+                        # Never claim "I completed the action" when nothing happened.
+                        ai_reply = (
+                            f"I didn't run any tools and produced no answer for: "
+                            f"\"{req.message[:200]}\". Please ask again — "
+                            "if it keeps happening, the local model may be too small "
+                            "for this request (try a cloud model)."
+                        )
                     break
 
                 print(f"⚙️  Iteration {iteration}: {len(execution_log)} skill(s) executed, looping…")
@@ -4579,6 +4724,49 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                             ),
                         })
                         continue
+                    # Recovery: completely empty turn (no text, no tool calls) —
+                    # force one direct answer before giving up.
+                    if not ai_reply.strip() and not all_execution_logs and _empty_replies < 2:
+                        _empty_replies += 1
+                        print(f"⚠️  Iteration {iteration}: empty cloud reply — direct-answer push #{_empty_replies}")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You returned an empty response. Answer the user's last "
+                                "message RIGHT NOW in plain text, or call the tool needed "
+                                "to complete it. Do not output an empty message."
+                            ),
+                        })
+                        continue
+                    # Recovery: model stopped after tool DISCOVERY (search/list/schema)
+                    # without ever executing — push it to run the actual tool call.
+                    if (
+                        _is_discovery_only(all_execution_logs)
+                        and _discovery_pushes < 2
+                        and not _discovery_pushed
+                        and not _user_wants_tool_list
+                    ):
+                        _discovery_pushes += 1
+                        _discovery_pushed = True
+                        _found = "; ".join(
+                            str(l.get("result", "")).strip().splitlines()[0]
+                            for l in all_execution_logs
+                            if l.get("status") == "success" and str(l.get("result", "")).strip()
+                        )[:400]
+                        print(f"⚠️  Iteration {iteration}: discovery-only results (cloud) — execute push #{_discovery_pushes}")
+                        messages.append({"role": "assistant", "content": ai_reply})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "That was only a tool SEARCH — it does not answer the user. "
+                                f"Found: {_found}\n"
+                                "Now call the function-calling tool that actually fetches the data "
+                                "(schema first if needed, then execute with JSON params). "
+                                "For unread-email counts prefer a *MESSAGES/*SEARCH* tool over LABELS. "
+                                "Do not reply with prose until the tool has run."
+                            ),
+                        })
+                        continue
                     print(f"✅ Agent loop complete after {iteration} iteration(s)")
                     break
 
@@ -4672,7 +4860,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     parts.append(f"❌ {skill_label} — {log.get('error', 'failed')}")
             ai_reply = "Actions completed:\n\n" + "\n".join(parts)
         elif not ai_reply:
-            ai_reply = "I finished processing, but no visible response was produced. Please try rephrasing or asking again."
+            # No tools ran AND no text was produced — never claim an action happened.
+            ai_reply = (
+                f"I didn't run any tools and produced no answer for: "
+                f"\"{req.message[:200]}\". Please ask again — if it keeps "
+                "happening, the model may be too small for this request."
+            )
 
         # Replace "undefined" URL placeholders the model hallucinated with the
         # real preview URL extracted from the web_builder.serve execution log.
