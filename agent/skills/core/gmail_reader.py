@@ -1140,3 +1140,9 @@ def imap_status(*args) -> str:
         lines.append("  Connection : ⏸ Skipped — credentials not fully set")
 
     return "\n".join(lines)
+
+
+# Aliases for common LLM function name variations
+list_emails = list_inbox
+fetch_emails = list_inbox
+get_emails = list_inbox

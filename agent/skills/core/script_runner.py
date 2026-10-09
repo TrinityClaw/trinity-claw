@@ -111,6 +111,9 @@ def run_script(code: str, timeout: int = None) -> str:
     if md:
         code = md.group(1).strip()
 
+    # If the model wrote 'import tool' or 'from tool import tool', strip it (tool() is in prelude)
+    code = re.sub(r'^\s*(?:import\s+tool\b|from\s+tool\s+import\s+.*?)\s*$', '# tool is built-in', code, flags=re.MULTILINE)
+
     block_reason = _scan_script(code)
     if block_reason:
         return f"❌ REJECTED by security scanner:\n  {block_reason}"
