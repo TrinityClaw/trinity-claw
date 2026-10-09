@@ -759,6 +759,136 @@ def list_connected_accounts() -> str:
         return _err(f"Failed to list accounts: {e}")
 
 
+def _resolve_auth_config_id(client, app: str, api_key: str) -> Optional[str]:
+    """Find or create an auth_config_id for the given toolkit."""
+    # 1. Try SDK auth_configs.list
+    try:
+        if hasattr(client, "auth_configs") and hasattr(client.auth_configs, "list"):
+            resp = client.auth_configs.list(toolkit_slug=app)
+            items = _get(resp, "items", []) or []
+            for item in items:
+                tk = _get(item, "toolkit")
+                slug = (_get(tk, "slug", "") if isinstance(tk, (dict, object)) else str(tk or "")).lower()
+                if slug == app or not slug:
+                    cid = _get(item, "id")
+                    if cid:
+                        return str(cid)
+    except Exception:
+        pass
+
+    # 2. Try REST API GET /api/v3.1/auth_configs?toolkit_slug=...
+    try:
+        import requests
+        headers = {"x-api-key": api_key, "Content-Type": "application/json"}
+        res = requests.get(
+            f"https://backend.composio.dev/api/v3.1/auth_configs?toolkit_slug={app}",
+            headers=headers,
+            timeout=10,
+        )
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("items", []) if isinstance(data, dict) else []
+            for item in items:
+                cid = item.get("id")
+                if cid:
+                    return str(cid)
+    except Exception:
+        pass
+
+    # 3. Try creating a managed auth_config via SDK
+    try:
+        if hasattr(client, "auth_configs") and hasattr(client.auth_configs, "create"):
+            created = client.auth_configs.create(
+                toolkit=app,
+                options={"type": "use_composio_managed_auth"},
+            )
+            cid = _get(created, "id")
+            if cid:
+                return str(cid)
+    except Exception:
+        pass
+
+    # 4. Try creating managed auth_config via REST API POST /api/v3.1/auth_configs
+    try:
+        import requests
+        headers = {"x-api-key": api_key, "Content-Type": "application/json"}
+        res = requests.post(
+            "https://backend.composio.dev/api/v3.1/auth_configs",
+            headers=headers,
+            json={"toolkit": app, "options": {"type": "use_composio_managed_auth"}},
+            timeout=10,
+        )
+        if res.status_code in (200, 201):
+            data = res.json()
+            cid = data.get("id") or (data.get("item", {}) or {}).get("id")
+            if cid:
+                return str(cid)
+    except Exception:
+        pass
+
+    return None
+
+
+def _get_redirect_url(client, app: str, api_key: str) -> Optional[str]:
+    """Obtain redirect URL using modern session authorize, v3 link API, or legacy fallback."""
+    # Strategy 1: Session-based authorize (Composio v0.6+ / v1+)
+    try:
+        if hasattr(client, "create"):
+            session = client.create(user_id=USER_ID)
+            if hasattr(session, "authorize"):
+                req = session.authorize(app)
+                url = _get(req, "redirect_url")
+                if url:
+                    return str(url)
+    except Exception:
+        pass
+
+    # Strategy 2: connected_accounts.link with auth_config_id
+    auth_config_id = _resolve_auth_config_id(client, app, api_key)
+    if auth_config_id:
+        try:
+            if hasattr(client, "connected_accounts") and hasattr(client.connected_accounts, "link"):
+                link_req = client.connected_accounts.link(
+                    user_id=USER_ID,
+                    auth_config_id=auth_config_id,
+                )
+                url = _get(link_req, "redirect_url")
+                if url:
+                    return str(url)
+        except Exception:
+            pass
+
+        # Strategy 3: REST API POST /api/v3/connected_accounts/link
+        try:
+            import requests
+            headers = {"x-api-key": api_key, "Content-Type": "application/json"}
+            payload = {"user_id": USER_ID, "auth_config_id": auth_config_id}
+            for endpoint in [
+                "https://backend.composio.dev/api/v3/connected_accounts/link",
+                "https://backend.composio.dev/api/v3.1/connected_accounts/link",
+            ]:
+                r = requests.post(endpoint, headers=headers, json=payload, timeout=15)
+                if r.status_code in (200, 201):
+                    data = r.json()
+                    url = data.get("redirect_url")
+                    if url:
+                        return str(url)
+        except Exception:
+            pass
+
+    # Strategy 4: Legacy client.toolkits.authorize
+    try:
+        if hasattr(client, "toolkits") and hasattr(client.toolkits, "authorize"):
+            req = client.toolkits.authorize(user_id=USER_ID, toolkit=app)
+            url = _get(req, "redirect_url")
+            if url:
+                return str(url)
+    except Exception:
+        pass
+
+    return None
+
+
 def get_auth_url(app: str = "", force: bool = False) -> str:
     """Get an OAuth authorization URL for connecting an app.
 
@@ -774,6 +904,7 @@ def get_auth_url(app: str = "", force: bool = False) -> str:
         return _err("app name is required. Use list_apps() to see available apps.")
 
     app = app.strip().lower()
+    api_key = os.getenv("COMPOSIO_API_KEY", "").strip()
     try:
         if not force:
             active = [a for a in _accounts(client, app) if str(_get(a, "status", "")).upper() == "ACTIVE"]
@@ -782,18 +913,27 @@ def get_auth_url(app: str = "", force: bool = False) -> str:
                     f"ℹ️ {app} is already connected and active (account id: {_get(active[0], 'id', '?')}). "
                     f"No new link needed. Call get_auth_url('{app}', force=True) only to add another account."
                 )
-        req = client.toolkits.authorize(user_id=USER_ID, toolkit=app)
-        url = _get(req, "redirect_url")
-        if not url:
-            return _err(f"No auth URL available for '{app}'. It may use API key auth instead.")
+
+        url = _get_redirect_url(client, app, api_key)
+        if url:
+            return (
+                f"OAuth URL for {app}:\n"
+                f"  {url}\n\n"
+                f"Open the URL in a browser, approve access, then call "
+                f"check_connection('{app}') to verify."
+            )
+
         return (
-            f"OAuth URL for {app}:\n"
-            f"  {url}\n\n"
-            f"Open the URL in a browser, approve access, then call "
-            f"check_connection('{app}') to verify."
+            f"❌ Could not automatically generate an OAuth URL for '{app}'.\n"
+            f"You can connect it directly in your Composio dashboard:\n"
+            f"  https://app.composio.dev/apps/{app}\n\n"
+            f"After connecting, return here and call check_connection('{app}')."
         )
     except Exception as e:
-        return _err(f"Failed to get auth URL for '{app}': {e}")
+        return (
+            f"❌ Failed to get auth URL for '{app}': {e}\n"
+            f"Fallback: You can connect directly via the Composio dashboard: https://app.composio.dev/apps/{app}"
+        )
 
 
 def check_connection(app: str = "") -> str:
