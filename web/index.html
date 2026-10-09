@@ -1678,10 +1678,17 @@ docker compose up --build -d</div>
                 content.appendChild(docBadge);
             }
             const txt = document.createElement('div');
+            let renderedText = text || '';
             if (sender === 'agent') {
-                txt.innerHTML = marked.parse(text);
+                const stripped = renderedText.replace(/<\/?[a-z0-9_\-:]+[^>]*>/gi, '').trim();
+                if (!stripped && renderedText.trim()) {
+                    renderedText = '`' + renderedText.trim() + '`';
+                } else if (!stripped) {
+                    renderedText = '_No response text generated._';
+                }
+                txt.innerHTML = marked.parse(renderedText);
             } else {
-                txt.textContent = text;
+                txt.textContent = renderedText;
             }
             content.appendChild(txt);
             if (sender === 'agent' && executionLog && executionLog.length > 0) {
