@@ -2045,6 +2045,23 @@ def _strip_fake_result_blocks(text: str) -> str:
     return '\n'.join(out)
 
 
+def _clean_tool_call_artifacts(text: str) -> str:
+    """Strip stray tool calling tokens, XML tags, and think blocks from assistant replies."""
+    if not text:
+        return ""
+    cleaned = text
+    # Strip ```tool_call...``` and <tool_call>...</tool_call>
+    cleaned = re.sub(r'```tool_call.*?```', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'</?(?:tool_call|tool_response|function|parameter)[^>]*>', '', cleaned)
+    # Strip unexecuted or stray <skill:...> tags
+    cleaned = re.sub(r'<skill:[\w.]+>.*?</skill:[\w.]+>', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'</?skill:[^>]*>', '', cleaned)
+    # Strip <think>...</think>
+    cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL)
+    return cleaned.strip()
+
+
 def _normalize_gemma_skill_tags(text: str) -> str:
     """Convert Gemma 4's native <skill_call:name.func(kwarg='val')> to
     <skill:name.func>val</skill:name.func> so execute_skill_tags can parse it.
@@ -2119,7 +2136,8 @@ def _normalize_qwen_tool_call_tags(text: str) -> str:
             skill_fn = fn_simple.group(1).strip()
             return f"<skill:{skill_fn}></skill:{skill_fn}>"
 
-        return match.group(0)
+        # If it was an empty or unparseable tool call, strip it so it doesn't leak to the user as blank HTML
+        return ""
 
     # Convert fenced ```tool_call ... ``` blocks
     text = re.sub(r'```tool_call(.*?)```', _convert_tool_call, text, flags=re.DOTALL)
@@ -4207,12 +4225,11 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     continue
 
                 # ── Fallback: XML tag-based path (non-agentic Ollama models) ──
-                # Guard against None content (common when the model just processed
-                # tool results and returns an empty turn instead of a text summary).
                 ai_reply = llm_response.get("content") or ""
-                # If the LLM returned nothing but we already have tool results from a
-                # previous iteration, surface them directly — no need to re-prompt.
-                if not ai_reply.strip() and all_execution_logs:
+                ai_reply_clean = _clean_tool_call_artifacts(ai_reply)
+                # If the LLM returned nothing or only unexecuted tool tokens, but we already have tool results
+                # from a previous iteration, surface them directly — no need to re-prompt.
+                if not ai_reply_clean and all_execution_logs:
                     parts = []
                     for log in all_execution_logs:
                         if log.get("status") == "lesson_warning":
@@ -4318,12 +4335,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         continue
 
                     print(f"✅ Agent loop complete after {iteration} iteration(s)")
-                    ai_reply = executed_reply
+                    ai_reply = _clean_tool_call_artifacts(executed_reply)
                     # Fallback: Qwen and other local models sometimes produce an empty
-                    # final turn (only <think> reasoning, no user-facing text). Rather
+                    # final turn (only <think> reasoning, no user-facing text, or stray <tool_call>). Rather
                     # than returning a blank response, synthesise a summary from the
                     # execution log so the user always gets a meaningful reply.
-                    if not ai_reply.strip() and all_execution_logs:
+                    if not ai_reply and all_execution_logs:
                         # Check if we have successful web search results — if so, synthesize
                         # from the snippets rather than dumping raw execution log headers.
                         _search_results = [
@@ -4353,7 +4370,9 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                                     parts.append(f"✅ {skill_label} — {short}")
                                 else:
                                     parts.append(f"❌ {skill_label} — {log.get('error', 'failed')}")
-                            ai_reply = "All steps completed:\n\n" + "\n".join(parts)
+                            ai_reply = "Actions completed:\n\n" + "\n".join(parts)
+                    elif not ai_reply:
+                        ai_reply = "I completed the action, but no text response was produced. If you need me to summarize or take next steps, please let me know."
                     break
 
                 print(f"⚙️  Iteration {iteration}: {len(execution_log)} skill(s) executed, looping…")
@@ -4637,6 +4656,23 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         # In local mode, [✅ ...] blocks are the real injected results — leave them alone.
         if model_source != "local":
             ai_reply = _strip_fake_result_blocks(ai_reply)
+
+        ai_reply = _clean_tool_call_artifacts(ai_reply)
+        if not ai_reply and all_execution_logs:
+            parts = []
+            for log in all_execution_logs:
+                if log.get("status") == "lesson_warning":
+                    continue
+                skill_label = f"{log['skill']}.{log.get('function', '')}"
+                if log.get("status") == "success":
+                    res = str(log.get("result", "")).strip()
+                    short = (res[:300] + "…") if len(res) > 300 else res
+                    parts.append(f"✅ {skill_label} — {short}")
+                else:
+                    parts.append(f"❌ {skill_label} — {log.get('error', 'failed')}")
+            ai_reply = "Actions completed:\n\n" + "\n".join(parts)
+        elif not ai_reply:
+            ai_reply = "I finished processing, but no visible response was produced. Please try rephrasing or asking again."
 
         # Replace "undefined" URL placeholders the model hallucinated with the
         # real preview URL extracted from the web_builder.serve execution log.
