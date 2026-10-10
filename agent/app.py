@@ -2980,6 +2980,46 @@ def _is_claude_model(model_name: str = "trinity-default") -> bool:
     return False
 
 
+def _synthesize_final_answer(model_source: str, model_name: str, user_question: str, logs: list) -> str:
+    """Last resort when the agent loop ends without a usable final message.
+
+    One short LLM call (thinking stays on) turns the skill results into a clean
+    plain-text answer, instead of dumping raw skill output at the user."""
+    parts = []
+    for l in logs:
+        if l.get("status") == "lesson_warning":
+            continue
+        label = f"{l.get('skill')}.{l.get('function', '')}"
+        if l.get("status") == "success":
+            parts.append(f"{label} returned:\n{str(l.get('result', ''))[:1500]}")
+        else:
+            parts.append(f"{label} FAILED: {l.get('error', 'failed')}")
+    if not parts:
+        return ""
+    prompt = (
+        f'The user asked: "{user_question[:300]}"\n\n'
+        "Skill results so far:\n" + "\n\n".join(parts)[:6000] + "\n\n"
+        "Write the final reply in 1-4 plain sentences, using ONLY these results. "
+        "If they do not contain the answer, say briefly what was done, what is missing, "
+        "and the one next step. Do not output tags, tool calls or raw JSON."
+    )
+    try:
+        resp = _call_llm(
+            [
+                {"role": "system", "content": "You are TrinityClaw. Reply concisely in plain text."},
+                {"role": "user", "content": prompt},
+            ],
+            model_source,
+            model_name,
+        )
+        text = re.sub(r"<think>.*?</think>", "", resp.get("content") or "", flags=re.DOTALL)
+        text = re.sub(r"</?tool_call>", "", text).strip()
+        return text
+    except Exception as _e:
+        print(f"⚠️ Final-answer synthesis failed: {_e}")
+        return ""
+
+
 def _call_llm(
     messages: list,
     model_source: str,
@@ -3058,7 +3098,12 @@ def _call_llm(
             "stream": False,
             "think": _thinking_enabled,
             "options": {
-                "temperature": 1.0,
+                # Qwen3-family thinking-mode sampling (0.6 / 0.95 / 20). At temp 1.0 with
+                # default top_k a stray end-of-turn token can be sampled right after
+                # "<tool_call>", leaving a dangling tag. Override via env if needed.
+                "temperature": float(os.getenv("OLLAMA_TEMPERATURE", "0.6")),
+                "top_p": float(os.getenv("OLLAMA_TOP_P", "0.95")),
+                "top_k": int(os.getenv("OLLAMA_TOP_K", "20")),
                 "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "12288")),
                 "num_predict": _num_predict,
             }
@@ -3070,8 +3115,18 @@ def _call_llm(
         print(f"🔄 Calling Ollama at {ollama_base} (think={_thinking_enabled}, num_predict={_num_predict}, timeout={_ollama_timeout}s)...")
         resp = requests.post(f"{ollama_base}/api/chat", json=payload, timeout=_ollama_timeout)
         resp.raise_for_status()
-        _raw_msg = resp.json().get("message", {})
+        _ollama_json = resp.json()
+        _raw_msg = _ollama_json.get("message", {})
         raw = _raw_msg.get("content") or ""
+        _thinking_txt = (_raw_msg.get("thinking") or "").strip()
+        print(f"📊 Ollama done_reason={_ollama_json.get('done_reason')} "
+              f"prompt_tok={_ollama_json.get('prompt_eval_count')} "
+              f"gen_tok={_ollama_json.get('eval_count')} "
+              f"content_chars={len(raw.strip())} thinking_chars={len(_thinking_txt)}")
+        if len(raw.strip()) < 40:
+            print(f"🔎 Short Ollama content: done_reason={_ollama_json.get('done_reason')} "
+                  f"content={raw.strip()!r} tool_calls={_raw_msg.get('tool_calls')} "
+                  f"thinking_tail={_thinking_txt[-800:]!r}")
         # Normalize Ollama tool_calls → OpenAI format expected by _execute_tool_calls
         # Ollama: arguments is already a dict; OpenAI: arguments is a JSON string + needs id
         _ollama_tool_calls = _raw_msg.get("tool_calls") or []
@@ -3089,8 +3144,16 @@ def _call_llm(
                 "type": "function",
                 "function": {"name": _fn.get("name", ""), "arguments": json.dumps(_args)},
             })
+        raw = raw.strip()
+        # With think=True Ollama moves the reasoning into message.thinking, so any
+        # <skill:...> tag the model wrote *inside* its reasoning never reaches
+        # `content`. If the visible answer is empty, hand the reasoning back as an
+        # inline <think> block so the existing rescue + strip logic in the agent
+        # loop can recover the tags (or detect the empty turn and nudge the model).
+        if not raw and _thinking_txt and not _normalized_tool_calls:
+            raw = f"<think>{_thinking_txt}</think>"
         return {
-            "content": raw.strip(),
+            "content": raw,
             "tool_calls": _normalized_tool_calls or None,
         }
     else:
@@ -4146,6 +4209,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
 
         _continuation_pushes = 0        # cloud: how many "stop describing, act!" pushes sent so far
         _local_continuation_pushes = 0  # local: same, for Ollama/tag path
+        _empty_turn_pushes = 0          # local: model produced reasoning but no visible output
         _consecutive_error_iters = 0    # how many consecutive iterations had only failed skill calls
         _skill_failure_counts: dict = {}  # (skill, func) -> cumulative failure count this request
 
@@ -4224,7 +4288,9 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                             parts.append(short)
                         else:
                             parts.append(f"❌ {skill_label} — {log.get('error', 'failed')}")
-                    ai_reply = "\n\n".join(parts)
+                    ai_reply = "\n\n".join(p for p in parts if p.strip()).strip()
+                    if not ai_reply:
+                        ai_reply = f"Ran {len(all_execution_logs)} skill(s) but they returned no output."
                     break
 
                 # Strip <think>...</think> blocks BEFORE tag execution.
@@ -4250,6 +4316,37 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 # Last resort: if model output bare calls like weather_api.get_weather(London)
                 # with no XML tags at all, convert them now (only touches known skills).
                 ai_reply = _normalize_plain_skill_calls(ai_reply, set(skills.keys()))
+
+                # Qwen sometimes ends a turn with a dangling "<tool_call>" opener whose
+                # body was lost. Complete calls were already converted to <skill:...>
+                # tags above, so whatever is left is unusable, and a browser treats it
+                # as an HTML tag and renders nothing (the "empty bubble").
+                if re.search(r"</?tool_call>", ai_reply):
+                    print(f"⚠️  Iteration {iteration}: dangling tool_call fragment removed: {ai_reply[:120]!r}")
+                    ai_reply = re.sub(r"</?tool_call>", "", ai_reply).strip()
+
+                # Unusable turn (reasoning only, or an incomplete tool call): nothing
+                # visible and no skill tag. Keep thinking ON and ask for real output.
+                # Max 2 nudges, then the log-based fallbacks below apply.
+                if not ai_reply.strip() and _empty_turn_pushes < 3:
+                    _empty_turn_pushes += 1
+                    print(f"⚠️  Iteration {iteration}: unusable turn, recovery step #{_empty_turn_pushes}"
+                          f" ({'re-roll' if _empty_turn_pushes == 1 else 'nudge'})")
+                    # Step 1 is a plain re-roll of the same request (sampling luck);
+                    # steps 2-3 add a nudge message.
+                    if _empty_turn_pushes == 1:
+                        continue
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your last turn produced no usable output (only reasoning, or an "
+                            "incomplete <tool_call>). Reasoning is not shown to the user. Think briefly, "
+                            "then WRITE YOUR OUTPUT after the reasoning: either a complete skill tag in "
+                            "the form <skill:name.function>args</skill:name.function>, or your final "
+                            "plain-text answer based on the results above."
+                        ),
+                    })
+                    continue
 
                 executed_reply, execution_log, pending_summary = execute_skill_tags(
                     ai_reply
@@ -4323,6 +4420,11 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     # final turn (only <think> reasoning, no user-facing text). Rather
                     # than returning a blank response, synthesise a summary from the
                     # execution log so the user always gets a meaningful reply.
+                    if not ai_reply.strip() and all_execution_logs:
+                        print("🧾 No usable final message — synthesizing a clean answer from skill results")
+                        ai_reply = _synthesize_final_answer(
+                            model_source, effective_model, req.message, all_execution_logs
+                        )
                     if not ai_reply.strip() and all_execution_logs:
                         # Check if we have successful web search results — if so, synthesize
                         # from the snippets rather than dumping raw execution log headers.
@@ -4651,6 +4753,9 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     if _url_match:
                         ai_reply = ai_reply.replace("undefined", _url_match.group(1))
                     break
+
+        if not (ai_reply or "").strip():
+            ai_reply = "⚠️ The model returned an empty response. Check the server log (📊 Ollama done_reason line)."
 
         # 6. Update in-memory session history (synchronous — next request needs fresh history)
         updated_history = list(history)
