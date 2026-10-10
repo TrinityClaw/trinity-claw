@@ -2414,6 +2414,13 @@ def execute_skill_tags(response_text: str) -> tuple:
                     "status": "success",
                     "result": result_str
                 })
+                # Learn at the moment it works: clears stale lessons for this exact
+                # skill.function and remembers the call that succeeded.
+                if "self_improvement" in skills:
+                    try:
+                        skills["self_improvement"].record_success(skill_name, func_name, content[:200])
+                    except Exception:
+                        pass
 
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -2608,6 +2615,11 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
                 "status":   "success",
                 "result":   content,
             }
+            if "self_improvement" in skills:
+                try:
+                    skills["self_improvement"].record_success(skill_name, func_name, str(arguments)[:200])
+                except Exception:
+                    pass
         else:
             if not result["success"]:
                 err = result.get("error", "Unknown error")
@@ -4535,7 +4547,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
                     _failed_steps = ", ".join(
                         f"{l['skill']}.{l.get('function', '')}"
                         for l in execution_log
-                        if l.get("status") != "success"
+                        if l.get("status") not in ("success", "lesson_warning")
                     )
                     _done_note = (
                         f" Completed successfully: [{_success_steps}]. DO NOT repeat these exact steps."
@@ -4903,11 +4915,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
 
         threading.Thread(target=_suggest_post_task, daemon=True, name="post-task-suggest").start()
 
-        _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": len(all_execution_logs), "token_est": _token_est})
+        _n_skills_called = len([l for l in all_execution_logs if l.get("status") != "lesson_warning"])
+        _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": _n_skills_called, "token_est": _token_est})
         return {
             "reply": ai_reply,
             "execution_log": all_execution_logs,
-            "skills_called": len(all_execution_logs),
+            "skills_called": _n_skills_called,
             "token_est": _token_est,
         }
 
