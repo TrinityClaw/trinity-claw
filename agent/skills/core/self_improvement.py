@@ -670,6 +670,119 @@ def check_for_learned_fix(skill_name: str = "", error_type: str = "", skill_path
     return fallback
 
 
+# ── Lesson lifecycle: function-specific, resolvable, expiring ─────────────────
+# A lesson is a *warning about a specific skill.function*. It stops being shown
+# when (a) that same skill.function later succeeds (record_success), or (b) it is
+# older than LESSON_TTL_DAYS. A new failure records a fresh lesson, so a problem
+# that really comes back is flagged again immediately.
+
+_RESOLUTIONS_FILE = _MEM_DIR / "lesson_resolutions.json"
+_LESSON_TTL_DAYS = int(os.getenv("LESSON_TTL_DAYS", "14"))
+_resolutions_cache: Dict = {"data": None, "mtime": None}
+
+
+def _load_resolutions() -> Dict:
+    """{ "skill.func": {"resolved_at": iso, "working_call": str} } — mtime-cached."""
+    try:
+        mtime = _RESOLUTIONS_FILE.stat().st_mtime if _RESOLUTIONS_FILE.exists() else None
+    except OSError:
+        mtime = None
+    if _resolutions_cache["data"] is not None and _resolutions_cache["mtime"] == mtime:
+        return _resolutions_cache["data"]
+    data: Dict = {}
+    if mtime is not None:
+        try:
+            with open(_RESOLUTIONS_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (IOError, OSError, json.JSONDecodeError):
+            data = {}
+    _resolutions_cache["data"] = data
+    _resolutions_cache["mtime"] = mtime
+    return data
+
+
+def _parse_ts(ts: str):
+    try:
+        return datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+
+
+def _lesson_applies(lesson: Dict, skill_name: str, func_name: str) -> bool:
+    """True if this lesson is about skill_name.func_name (not just the same skill)."""
+    ls = lesson.get("skill", "") or ""
+    if ls == f"{skill_name}.{func_name}":
+        return True
+    if ls == skill_name:
+        # Skill-level lesson with no function recorded: only relevant to this
+        # function if the lesson text actually mentions it.
+        blob = f"{lesson.get('error_message', '')} {lesson.get('fix_applied', '')}".lower()
+        return func_name.lower() in blob
+    return False
+
+
+def _is_resolved(lesson: Dict) -> bool:
+    """True if the lesson's exact skill.func succeeded after the lesson was recorded."""
+    res = _load_resolutions().get(lesson.get("skill", "") or "")
+    if not res:
+        return False
+    lt, rt = _parse_ts(lesson.get("timestamp", "")), _parse_ts(res.get("resolved_at", ""))
+    return bool(lt and rt and lt <= rt)
+
+
+def _open_lessons(skill_name: str, func_name: str) -> List[Dict]:
+    """Lessons about skill_name.func_name that are still worth warning about."""
+    from datetime import timedelta
+    label = f"{skill_name}.{func_name}"
+    res = _load_resolutions().get(label)
+    resolved_at = _parse_ts(res.get("resolved_at", "")) if res else None
+    cutoff = datetime.now() - timedelta(days=_LESSON_TTL_DAYS)
+    out: List[Dict] = []
+    for lesson in _load_lessons():
+        if not _lesson_applies(lesson, skill_name, func_name):
+            continue
+        ts = _parse_ts(lesson.get("timestamp", ""))
+        if ts is not None:
+            if ts < cutoff:
+                continue                      # expired
+            if resolved_at is not None and ts <= resolved_at:
+                continue                      # fixed since
+        out.append(lesson)
+    return out
+
+
+def record_success(skill_name: str, func_name: str, call_preview: str = "") -> None:
+    """Learn at the moment something works.
+
+    Called by app.py after every successful skill call (not exposed to the LLM).
+    If skill_name.func_name has open lessons, mark them resolved and remember the
+    call that worked, so the next failure shows 'last working call'. The fast path
+    (no open lessons) is an in-memory check — zero I/O on the happy path."""
+    try:
+        if not skill_name or not func_name:
+            return
+        if not _open_lessons(skill_name, func_name):
+            return
+        label = f"{skill_name}.{func_name}"
+        _RESOLUTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _file_lock(_RESOLUTIONS_FILE):
+            data = dict(_load_resolutions())
+            data[label] = {
+                "resolved_at": datetime.now().isoformat(),
+                "working_call": (call_preview or "")[:200],
+            }
+            tmp = _RESOLUTIONS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_RESOLUTIONS_FILE)
+        _resolutions_cache["data"] = None
+        _patterns_cache["data"] = None
+        print(f"[lessons] resolved {label} — it works now; old warnings cleared")
+    except Exception as e:  # never break the agent loop
+        print(f"[lessons] record_success failed for {skill_name}.{func_name}: {e}")
+
+
 def check_lessons(skill_name: str = "", func_name: str = "", **kwargs) -> Optional[str]:
     """Pre-dispatch check: return a warning string if this skill has failed before,
     so the caller can surface the lesson before executing.
@@ -679,10 +792,8 @@ def check_lessons(skill_name: str = "", func_name: str = "", **kwargs) -> Option
     if not skill_name or not func_name:
         return None
     label = f"{skill_name}.{func_name}"
-    lessons = _load_lessons()
-    # Match lessons stored as 'skill.func' or just 'skill'
-    matches = [l for l in lessons
-               if l.get("skill") == skill_name or l.get("skill") == label or l.get("skill", "").startswith(f"{skill_name}.")]
+    # Only lessons about THIS function, not resolved since, not expired.
+    matches = _open_lessons(skill_name, func_name)
     if not matches:
         return None
     # Most recent failure wins
@@ -692,6 +803,9 @@ def check_lessons(skill_name: str = "", func_name: str = "", **kwargs) -> Option
     msg = f"⚠️ [lesson] {label} has failed before ({error_type})"
     if fix:
         msg += f" — known fix: {fix[:120]}"
+    _wc = (_load_resolutions().get(label) or {}).get("working_call", "")
+    if _wc:
+        msg += f" | last working call: {_wc[:120]}"
 
     # Check auto-fix status
     if _AUTO_FIX_LOG.exists():
@@ -1765,7 +1879,7 @@ def should_self_improve(threshold: int = 3, window_days: int = 7) -> dict:
         if not ts:
             continue
         try:
-            if datetime.fromisoformat(ts) >= cutoff:
+            if datetime.fromisoformat(ts) >= cutoff and not _is_resolved(lesson):
                 recent.append(lesson)
         except (ValueError, TypeError):
             continue
