@@ -107,16 +107,61 @@ skill_metadata: Dict[str, Dict] = {}
 # Full tools schema built once at startup; filtered per-request for token efficiency
 _TOOLS_SCHEMA_CACHE: List[Dict] = []
 
-# Skills only injected into the tools schema when the message matches these keywords.
-# Everything NOT listed here is treated as always-on (lightweight/utility skills).
-_SKILL_DOMAIN_MAP: Dict[str, frozenset] = {
-    "gmail_reader":    frozenset({"email", "gmail", "mail", "inbox", "send", "draft", "reply", "unread", "compose", "attachment", "emails"}),
-    "google_calendar": frozenset({"calendar", "meeting", "schedule", "event", "appointment", "slot", "availability", "book", "rsvp", "reminder"}),
-    "google_drive":    frozenset({"drive", "gdrive", "document", "doc", "spreadsheet", "sheet", "folder", "upload", "gdoc", "gsheet", "docs"}),
-    "browser_session": frozenset({"browse", "browser", "click", "screenshot", "scrape", "navigate", "url", "website", "page", "login", "fill", "form", "headless", "selenium", "playwright", "web page"}),
-    "web_builder":     frozenset({"html", "css", "scaffold", "landing", "frontend", "webpage", "website", "web app", "template", "serve", "deploy site"}),
-    "autoimprove":     frozenset({"autoimprove", "auto-improve", "audit code", "refactor", "pattern mining", "improvement loop"}),
+# Per-skill trigger tokens are DERIVED from each skill's own docs (name,
+# function names, SHORT_DOC) via skills/core/tool_finder.py — no hand-written
+# keyword dicts. Optional manual additions for common ask-words the docs
+# never mention (keep minimal — derived tokens cover everything else):
+_SKILL_TRIGGER_OVERRIDES: Dict[str, set] = {
+    "gmail_reader":    {"mail", "unread", "compose", "forward"},
+    "google_calendar": {"meeting", "meetings", "schedule", "appointment", "reminder",
+                        "availability", "book", "rsvp"},
+    "google_drive":    {"spreadsheet", "sheet", "sheets", "doc", "docs", "document",
+                        "gdrive", "gdoc", "gsheet"},
+    "web_builder":     {"web", "website", "webpage", "landing", "frontend",
+                        "page", "site", "template", "ui"},
+    "weather":         {"temperature", "rain", "wind", "humidity", "snow", "sunny",
+                        "cloudy", "celsius", "fahrenheit"},
+    "notes":           {"memo", "remember", "jot"},
+    "email_sender":    {"compose", "draft", "forward", "outbox", "bcc"},
 }
+_skill_trigger_cache: Dict[str, Dict[str, frozenset]] = {}
+
+
+def _get_skill_domain_map() -> Dict[str, frozenset]:
+    """Doc-derived trigger tokens per skill. Self-invalidating: rebuilds when
+    the set of loaded skills changes (startup, create_skill, reload)."""
+    sig = tuple(sorted(skills.keys()))
+    if _skill_trigger_cache.get("__sig__") != sig:
+        derived: Dict[str, set] = {}
+        _tf = skills.get("tool_finder")
+        if _tf is not None and hasattr(_tf, "trigger_tokens"):
+            try:
+                derived = _tf.trigger_tokens({
+                    n: {
+                        "short_doc": m.get("short_doc") or "",
+                        "functions": [f.get("name", "") for f in m.get("functions", [])],
+                    }
+                    for n, m in skill_metadata.items()
+                })
+            except Exception as e:
+                print(f"⚠️ trigger_tokens failed ({e}) — all skills stay visible")
+        for _name, _extra in _SKILL_TRIGGER_OVERRIDES.items():
+            derived.setdefault(_name, set()).update(_extra)
+        _skill_trigger_cache.clear()
+        _skill_trigger_cache["__sig__"] = sig
+        for _k, _v in derived.items():
+            _skill_trigger_cache[_k] = frozenset(_v)
+    return {k: v for k, v in _skill_trigger_cache.items() if k != "__sig__"}
+
+
+def _msg_tokens(text: str) -> set:
+    """Punctuation/plural-tolerant message tokens (fixes 'inbox,' misses)."""
+    toks = set()
+    for w in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        toks.add(w)
+        if len(w) > 3 and w.endswith("s"):
+            toks.add(w[:-1])
+    return toks
 
 # ── Session Memory (in-process, cleared on restart) ───────────────────────
 SESSION_MAX_MESSAGES = 16        # 8 turns (user + assistant pairs) for cloud models
@@ -493,8 +538,8 @@ def _build_tools_schema_for_request(message: str, used_skills: Optional[set] = N
     Return a per-request filtered tools schema from _TOOLS_SCHEMA_CACHE.
 
     Core strategy:
-    - Skills NOT listed in _SKILL_DOMAIN_MAP are always included (lightweight/utility).
-    - Skills IN _SKILL_DOMAIN_MAP are only included when the message contains matching
+    - Skills NOT listed in the derived trigger-token map are always included (lightweight/utility).
+    - Skills IN the map are only included when the message contains matching
       keywords OR the skill was already called earlier in this request.
     - Falls back to the full cache if the cache is empty (first request before startup
       cache is built, or after a failed reload).
@@ -502,13 +547,14 @@ def _build_tools_schema_for_request(message: str, used_skills: Optional[set] = N
     if not _TOOLS_SCHEMA_CACHE:
         return _build_tools_schema() + _build_mcp_tools_schema()
 
-    msg_words = set(message.lower().split())
-    heavy_skills = set(_SKILL_DOMAIN_MAP.keys())
+    msg_tokens = _msg_tokens(message)
+    domain_map = _get_skill_domain_map()
+    heavy_skills = set(domain_map.keys())
 
-    # Which heavy skills are relevant to this message?
+    # Which gated skills are relevant to this message?
     relevant_heavy: set = set()
-    for skill_name, keywords in _SKILL_DOMAIN_MAP.items():
-        if keywords & msg_words:
+    for skill_name, tokens in domain_map.items():
+        if tokens & msg_tokens:
             relevant_heavy.add(skill_name)
 
     # Also include every skill that was already used in this request's agentic loop
@@ -2022,6 +2068,39 @@ def parse_skill_args(content: str, max_positional: int = None) -> tuple:
 
     return args, kwargs
 
+def _preload_named_skills(text: str) -> set:
+    """Skills the message/plan names explicitly: 'gmail_reader', 'web.search',
+    'google_drive__upload_to_folder'. Word mentions like 'compose a draft'
+    do NOT unlock — requires an actual skill or skill.func token."""
+    found: set = set()
+    if not text:
+        return found
+    for name in list(skills.keys()):
+        if re.search(r"\b" + re.escape(name) + r"\b", text, flags=re.IGNORECASE):
+            found.add(name)
+    for m in re.finditer(r"\b([a-z_][a-z0-9_]*)[._]_?([a-z0-9_]+)\b", text.lower()):
+        if m.group(1) in skills:
+            found.add(m.group(1))
+    return found
+
+def _unlock_skills_from_results(execution_log: list, used: set) -> set:
+    """Expand `used` with skills listed in tool_finder.find_tools results
+    (their 'UNLOCKED:' line) so the next schema rebuild includes them."""
+    for l in execution_log or []:
+        if (
+            l.get("skill") == "tool_finder"
+            and l.get("function") == "find_tools"
+            and l.get("status") == "success"
+        ):
+            m = re.search(r"UNLOCKED:\s*(.+)", str(l.get("result", "")))
+            if m:
+                for name in m.group(1).split(","):
+                    name = name.strip()
+                    if name in skills and name not in used:
+                        used.add(name)
+                        print(f"🔓 Unlocked skill from find_tools: {name}")
+    return used
+
 def _strip_fake_result_blocks(text: str) -> str:
     """
     Remove any [✅ skill.func Result: ...] or [❌ skill.func Error: ...] blocks
@@ -2293,27 +2372,14 @@ def execute_skill_tags(response_text: str) -> tuple:
                     return error_msg
 
                 # Design gate: non-trivial new skills require an approved spec
-                _dyn_path = Path("/app/skills/dynamic") / filename
-                if not _dyn_path.exists() and len(code) > 1500:
-                    _designs_dir = Path("/app/memory/designs")
-                    _slug = re.sub(r"[^a-z0-9]", "", filename.replace(".py", "").lower())
-                    _spec_found = any(
-                        _slug in re.sub(r"[^a-z0-9]", "", f.stem.lower())
-                        for f in _designs_dir.glob("*.md")
-                    ) if _designs_dir.exists() else False
-                    if not _spec_found:
-                        error_msg = (
-                            f"[❌ Design gate: no approved spec found for '{filename}'. "
-                            f"Run autoimprove__design with the task description, pick an approach, "
-                            f"then autoimprove__write_spec to create the spec. "
-                            f"(Gate skipped for: updates to existing dynamic skills, or code <300 chars.)]"
-                        )
-                        execution_log.append({"skill": skill_name, "function": func_name, "status": "design_gate_blocked"})
-                        return error_msg
+                _gate_err = _design_gate_error(filename, code)
+                if _gate_err:
+                    execution_log.append({"skill": skill_name, "function": func_name, "status": "design_gate_blocked"})
+                    return _gate_err
 
                 args = [filename, code]
                 kwargs = {}
-            elif skill_name == 'script_runner' and func_name == 'run_script':
+            elif skill_name == 'terminal' and func_name == 'run_script':
                 # The tag content IS the script - pass it whole. Comma-splitting
                 # or key=value parsing would shred multi-line code into args/kwargs.
                 args = [content]
@@ -2491,6 +2557,378 @@ def execute_skill_tags(response_text: str) -> tuple:
     return processed_text, execution_log, ""
 
 
+# ============================================================================
+# AGENT CONTROL — plan / finish / ask_user for local (Ollama) native tool calling
+# ============================================================================
+# BEGIN AGENT CONTROL
+
+def _ollama_native_tools_enabled() -> bool:
+    """Native Ollama tool calling (structured tool_calls). Default ON.
+    Set OLLAMA_NATIVE_TOOLS=false to fall back to the legacy <skill:...> text tags."""
+    return os.getenv("OLLAMA_NATIVE_TOOLS", "true").strip().lower() == "true"
+
+
+# Virtual tools handled by the agent loop itself (never dispatched to a skill).
+_AGENT_TOOLS: List[Dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "agent__plan",
+            "description": (
+                "Record or update your step-by-step plan. Call it FIRST for any task that needs "
+                "2+ steps, then execute the steps one after another without stopping. "
+                "Mark finished steps with done=[step numbers]. steps=[] clears the plan."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ordered, concrete steps. Omit to only update progress.",
+                    },
+                    "done": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "1-based numbers of the steps completed so far.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent__ask_user",
+            "description": (
+                "Hand the turn back to the user with ONE question. Use ONLY when blocked: "
+                "information only the user has, or an irreversible/outward action that needs their "
+                "explicit approval (sending email, deleting data, spending money). "
+                "Never use it to ask permission to continue the steps they already requested."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "The question for the user."}},
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent__finish",
+            "description": (
+                "Call when the whole request is complete. 'summary' is the final answer shown to the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"summary": {"type": "string", "description": "Final answer for the user."}},
+                "required": ["summary"],
+            },
+        },
+    },
+]
+
+_NATIVE_AGENT_REMINDER = (
+    "\n## AGENT LOOP (tool calling)\n\n"
+    "You act ONLY by calling the provided tools (function calling). Skill-tag examples elsewhere in this "
+    "prompt, <skill:NAME.FUNC>args</skill:NAME.FUNC>, mean: call tool NAME__FUNC with those arguments. "
+    "Never write skill tags yourself.\n"
+    "Keep working until the WHOLE request is finished:\n"
+    "1. A task with 2+ steps: call agent__plan(steps=[...]) first (short, concrete steps).\n"
+    "2. Execute the steps one after another. After every tool result, immediately call the next tool. "
+    "Do NOT stop, summarise, or ask the user 'shall I continue / what next' between steps.\n"
+    "3. Mark progress with agent__plan(done=[n]); you may combine it with the next tool call.\n"
+    "4. Use agent__ask_user ONLY when blocked: missing information only the user has, or an "
+    "irreversible/outward action that needs their explicit approval (sending email, deleting data, "
+    "spending money). Never ask permission for steps the user already requested.\n"
+    "5. When everything is done, write the final answer (or call agent__finish with it).\n"
+    "Design-first and clarifying-question rules apply ONLY when creating a new skill, "
+    "not to ordinary tasks.\n"
+)
+
+_NATIVE_PLAN_PUSH = (
+    "You described what you will do but did not do it. Call the next tool NOW through "
+    "function calling — no explanation, no text."
+)
+
+_NATIVE_EMPTY_PUSH = (
+    "Your last turn produced no usable output (only reasoning). Think briefly, then either call "
+    "the next tool or write your final answer based on the results above."
+)
+
+# Per-session plan state (in-process, like session_store). Lets a plan survive an
+# agent__ask_user hand-back so the user's answer resumes the same plan.
+_SESSION_PLANS: Dict[str, dict] = {}
+_PLAN_TTL_SECONDS = 2 * 3600
+_PLAN_MAX_STEPS = 15
+_plan_lock = threading.Lock()
+
+
+def _get_plan(session_id: str) -> List[Dict]:
+    with _plan_lock:
+        entry = _SESSION_PLANS.get(session_id)
+        if not entry:
+            return []
+        if time.time() - entry["ts"] > _PLAN_TTL_SECONDS:
+            _SESSION_PLANS.pop(session_id, None)
+            return []
+        return [dict(s) for s in entry["steps"]]
+
+
+def _save_plan(session_id: str, steps: List[Dict]) -> None:
+    with _plan_lock:
+        if steps:
+            _SESSION_PLANS[session_id] = {"steps": [dict(s) for s in steps], "ts": time.time()}
+        else:
+            _SESSION_PLANS.pop(session_id, None)
+
+
+def _plan_pending(steps: List[Dict]) -> List[tuple]:
+    return [(i, s["text"]) for i, s in enumerate(steps, 1) if not s.get("done")]
+
+
+def _plan_render(steps: List[Dict]) -> str:
+    return "\n".join(
+        f"  [{'x' if s.get('done') else ' '}] {i}. {s['text']}" for i, s in enumerate(steps, 1)
+    )
+
+
+def _plan_note(steps: List[Dict]) -> str:
+    """Checklist re-injected at the END of the context on every LLM call so it can never
+    be truncated away (Ollama drops from the front when num_ctx is exceeded)."""
+    pend = _plan_pending(steps)
+    if not pend:
+        return ""
+    return (
+        "ACTIVE PLAN — continue it; do not stop or ask the user between steps:\n"
+        f"{_plan_render(steps)}\n"
+        f"Next: step {pend[0][0]}. Call the tool for it now "
+        "(mark steps done with agent__plan(done=[n])). Use agent__ask_user only if you are blocked "
+        "on information or approval only the user can give. If the user's latest message is a "
+        "different task, call agent__plan(steps=[]) first."
+    )
+
+
+def _coerce_str_list(v) -> Optional[List[str]]:
+    """Tolerant parse of a 'steps' argument: list, JSON string, or newline text."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        try:
+            parsed = json.loads(s)
+            v = parsed if isinstance(parsed, list) else [s]
+        except Exception:
+            v = [ln for ln in s.splitlines() if ln.strip()]
+    if isinstance(v, (list, tuple)):
+        out: List[str] = []
+        for item in v:
+            if isinstance(item, dict):
+                item = item.get("text") or item.get("step") or item.get("task") or item.get("title") or json.dumps(item)
+            t = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", str(item)).strip()
+            if t:
+                out.append(t[:300])
+        return out[:_PLAN_MAX_STEPS]
+    return [str(v)[:300]]
+
+
+def _coerce_int_list(v) -> List[int]:
+    if v is None:
+        return []
+    if isinstance(v, bool):
+        return []
+    if isinstance(v, int):
+        return [v]
+    if isinstance(v, str):
+        v = re.findall(r"\d+", v)
+    out: List[int] = []
+    if isinstance(v, (list, tuple)):
+        for x in v:
+            try:
+                out.append(int(x))
+            except (ValueError, TypeError):
+                continue
+    return out
+
+
+def _is_agent_control_call(tc: dict) -> bool:
+    return str((tc.get("function") or {}).get("name") or "").startswith("agent__")
+
+
+def _handle_agent_control_call(tc: dict, session_id: str, state: dict) -> tuple:
+    """Run one agent__plan / agent__ask_user / agent__finish call.
+
+    Returns (tool_result_text, action, text) where action is None, 'finish' or 'ask'
+    and text is the user-facing message for those two actions.
+    """
+    fn = tc.get("function") or {}
+    name = str(fn.get("name") or "").split("__", 1)[-1]
+    raw = fn.get("arguments", {})
+    if isinstance(raw, str):
+        try:
+            args = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            args = {}
+    else:
+        args = raw or {}
+    if not isinstance(args, dict):
+        args = {}
+    steps = _get_plan(session_id)
+
+    if name == "plan":
+        new_steps = _coerce_str_list(args.get("steps"))
+        done = _coerce_int_list(args.get("done"))
+        if new_steps is not None:
+            steps = [{"text": t, "done": False} for t in new_steps]
+        elif not steps:
+            return ("No active plan. Call agent__plan(steps=[...]) with your steps first.", None, "")
+        for n in done:
+            if 1 <= n <= len(steps):
+                steps[n - 1]["done"] = True
+        state["plan_touched"] = True
+        pend = _plan_pending(steps)
+        _save_plan(session_id, steps if pend else [])
+        _stream_emit({"type": "plan", "steps": [dict(s) for s in steps]})
+        print(f"🧭 Plan: {len(steps) - len(pend)}/{len(steps)} step(s) done")
+        if not steps:
+            return ("Plan cleared.", None, "")
+        if not pend:
+            return (
+                "All steps done:\n" + _plan_render(steps)
+                + "\nNow give the user the final answer (or call agent__finish).",
+                None, "",
+            )
+        return ("Plan saved:\n" + _plan_render(steps) + f"\nNow do step {pend[0][0]}.", None, "")
+
+    if name == "ask_user":
+        q = str(args.get("question") or "").strip()
+        if not q:
+            return ("agent__ask_user needs a non-empty question.", None, "")
+        return ("Question delivered to the user. Stop here and wait for their answer.", "ask", q)
+
+    if name == "finish":
+        summary = str(args.get("summary") or "").strip()
+        pend = _plan_pending(steps)
+        if pend and state.get("finish_rejections", 0) < 1:
+            state["finish_rejections"] = state.get("finish_rejections", 0) + 1
+            listing = "\n".join(f"  [ ] {i}. {t}" for i, t in pend)
+            return (
+                "Not finished: the plan still has pending steps:\n" + listing
+                + "\nDo them (mark with agent__plan(done=[n])), or if they are no longer needed call "
+                  "agent__plan(steps=[]) and then agent__finish again.",
+                None, "",
+            )
+        _save_plan(session_id, [])
+        return ("Done.", "finish", summary)
+
+    return (f"Unknown agent tool '{name}'. Available: agent__plan, agent__ask_user, agent__finish.", None, "")
+
+
+def _cap_tool_message(msg: dict) -> dict:
+    """Bound a tool-result message so one big result cannot flood a local context window.
+    Full results stay in all_execution_logs for the final-answer fallbacks."""
+    try:
+        limit = int(os.getenv("OLLAMA_TOOL_RESULT_MAX_CHARS", "6000"))
+    except ValueError:
+        limit = 6000
+    c = msg.get("content")
+    if limit > 0 and isinstance(c, str) and len(c) > limit:
+        head = int(limit * 0.7)
+        tail = limit - head
+        return {**msg, "content": c[:head] + f"\n…[truncated {len(c) - limit} chars]…\n" + c[-tail:]}
+    return msg
+
+
+# ── create_skill safety shared by the tag path and the native-tool path ─────
+
+def _design_gate_error(filename: str, code: str) -> Optional[str]:
+    """Design gate (Standing Order 24): a non-trivial NEW dynamic skill needs an approved
+    spec in /app/memory/designs. Returns an error string, or None when allowed."""
+    if (Path("/app/skills/dynamic") / filename).exists() or len(code) <= 1500:
+        return None
+    _designs_dir = Path("/app/memory/designs")
+    _slug = re.sub(r"[^a-z0-9]", "", filename.replace(".py", "").lower())
+    _spec_found = any(
+        _slug in re.sub(r"[^a-z0-9]", "", f.stem.lower())
+        for f in _designs_dir.glob("*.md")
+    ) if _designs_dir.exists() else False
+    if _spec_found:
+        return None
+    return (
+        f"[❌ Design gate: no approved spec found for '{filename}'. "
+        f"Run autoimprove__design with the task description, pick an approach, "
+        f"then autoimprove__write_spec to create the spec. "
+        f"(Gate skipped for: updates to existing dynamic skills, or code <300 chars.)]"
+    )
+
+
+def _create_skill_param_names() -> tuple:
+    """Names of create_new_skill's first two positional params (filename, code)."""
+    try:
+        import inspect as _i
+        fn = getattr(skills.get("create_skill"), "create_new_skill", None)
+        names = [
+            p.name for p in _i.signature(fn).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        if len(names) >= 2:
+            return names[0], names[1]
+    except Exception:
+        pass
+    return "filename", "code"
+
+
+def _native_create_skill_preflight(arguments: dict) -> tuple:
+    """The same checks the tag path runs before create_skill: strip markdown fences,
+    reject placeholder code, enforce the design gate. Cleans `arguments` in place.
+    Returns (error_message_or_None, status)."""
+    fkey, ckey = _create_skill_param_names()
+    filename = str(arguments.get(fkey, "") or "").strip().strip("\"'")
+    code = str(arguments.get(ckey, "") or "")
+    if not filename or not code.strip():
+        return ("[❌ create_skill.create_new_skill Error: provide both the filename and the code]", "parse_error")
+    md = re.search(r"```(?:python|py)?\s*(.*?)\s*```", code, re.DOTALL)
+    if md:
+        code = md.group(1).strip()
+    elif code.startswith("```"):
+        code = code.strip("`").strip()
+        if code.startswith("python"):
+            code = code[6:].strip()
+    if "{content}" in code and len(code) < 50:
+        return (
+            "[❌ Error: The model provided a placeholder instead of the actual skill code. "
+            "Try again with the complete code.]",
+            "placeholder_error",
+        )
+    gate = _design_gate_error(filename, code)
+    if gate:
+        return (gate, "design_gate_blocked")
+    arguments[fkey] = filename
+    arguments[ckey] = code
+    return (None, "")
+
+
+def _after_native_create_skill(arguments: dict, content: str) -> str:
+    """Reload skills after a successful create_new_skill (tag path does the same)."""
+    fkey, _ = _create_skill_param_names()
+    name = str(arguments.get(fkey, "")).split("\n")[0].replace(".py", "").strip()
+    try:
+        reload_skills()
+        content += (
+            f"\n[✅ Skill '{name}' created and loaded. Inspect it at: /app/skills/dynamic/{name}.py — "
+            f"move it to /app/skills/core/ when satisfied, then tell me to activate it.]"
+        )
+    except Exception as reload_err:
+        content += f"\n[⚠️ Auto-reload failed: {reload_err}. Call /skills/reload manually.]"
+    return content
+
+# END AGENT CONTROL
+
+
 def _execute_tool_calls(tool_calls: list) -> tuple:
     """
     Execute a list of tool_call objects from the LLM response (native function calling).
@@ -2596,6 +3034,15 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
             except Exception:
                 pass
 
+        # create_skill safety parity with the tag path (design gate, fence stripping,
+        # placeholder rejection) — native calls used to bypass all of it.
+        if skill_name == "create_skill" and func_name == "create_new_skill":
+            _pf_err, _pf_status = _native_create_skill_preflight(arguments)
+            if _pf_err:
+                execution_log.append({"skill": skill_name, "function": func_name, "status": _pf_status, "error": _pf_err})
+                tool_result_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": _pf_err})
+                continue
+
         result = call_skill_improved(skill_name, func_name, **arguments)
 
         # Treat skill-level ok:False as an error even if no exception was raised
@@ -2609,6 +3056,8 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
             if isinstance(inner, dict) and "base64" in inner:
                 inner = {k: v for k, v in inner.items() if k != "base64"}
             content = _cloud_lesson_prefix + str(inner)
+            if skill_name == "create_skill" and func_name == "create_new_skill":
+                content = _after_native_create_skill(arguments, content)
             log_entry = {
                 "skill":    skill_name,
                 "function": func_name,
@@ -2801,6 +3250,7 @@ def verify_endpoint(req: VerificationRequest):
 @app.delete("/session/clear", dependencies=[Depends(verify_api_key)])
 def clear_session(session_id: str):
     """Clear the in-memory conversation history for a session (start fresh)."""
+    _save_plan(session_id, [])
     if session_id in session_store:
         del session_store[session_id]
         return {"success": True, "message": f"Session cleared — next message starts fresh"}
@@ -3051,6 +3501,7 @@ def _call_llm(
     if model_source == "local":
         ollama_base = os.getenv("OLLAMA_API_BASE", "http://ollama:11434")
         ollama_messages = []
+        _tc_names: Dict[str, str] = {}   # tool_call id -> tool name (Ollama matches results by tool_name)
         for i, msg in enumerate(messages):
             m = dict(msg)
             # Ollama requires content to be a string, not None
@@ -3069,7 +3520,14 @@ def _call_llm(
                         except Exception:
                             _args = {}
                     _ollama_tcs.append({"function": {"name": _fn.get("name", ""), "arguments": _args}})
+                    if _tc.get("id"):
+                        _tc_names[_tc["id"]] = _fn.get("name", "")
                 m["tool_calls"] = _ollama_tcs
+            elif m.get("role") == "tool":
+                _tn = _tc_names.get(m.get("tool_call_id") or "")
+                m.pop("tool_call_id", None)
+                if _tn:
+                    m["tool_name"] = _tn
             if ollama_images and i == len(messages) - 1 and m.get("role") == "user":
                 m["images"] = ollama_images
             ollama_messages.append(m)
@@ -3120,11 +3578,12 @@ def _call_llm(
                 "num_predict": _num_predict,
             }
         }
-        _native_tools_enabled = os.getenv("OLLAMA_NATIVE_TOOLS", "false").lower() == "true"
+        _native_tools_enabled = _ollama_native_tools_enabled()
         if tools and _native_tools_enabled:
             payload["tools"] = tools
         _ollama_timeout = int(os.getenv("OLLAMA_TIMEOUT", "600"))
-        print(f"🔄 Calling Ollama at {ollama_base} (think={_thinking_enabled}, num_predict={_num_predict}, timeout={_ollama_timeout}s)...")
+        print(f"🔄 Calling Ollama at {ollama_base} (think={_thinking_enabled}, num_predict={_num_predict}, "
+              f"timeout={_ollama_timeout}s, native_tools={len(payload.get('tools', []))})...")
         resp = requests.post(f"{ollama_base}/api/chat", json=payload, timeout=_ollama_timeout)
         resp.raise_for_status()
         _ollama_json = resp.json()
@@ -3486,64 +3945,15 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
         or "deepseek" in _req_m or "phi" in _req_m or "gemma" in _req_m
     )
     _local_model = _is_local_model
+    # Local model + native Ollama tool calling → structured tool_calls instead of <skill:> tags.
+    _native_local = bool(_local_model and _ollama_native_tools_enabled())
 
     # Heavy skills: large docs with many functions. Only inject verbose XML format
     # when the current message is actually about that skill domain. Otherwise use
     # compact one-liner so they don't eat context budget on unrelated requests.
-    _HEAVY_SKILL_KEYWORDS = {
-        "web_builder":       {"website", "html", "css", "site", "build", "scaffold", "design",
-                              "web", "page", "ui", "frontend", "webpage", "landing", "preview"},
-        "gmail_reader":      {"email", "gmail", "mail", "inbox", "message", "send", "compose"},
-        "google_drive":      {"drive", "google", "upload", "download", "sheet", "docs", "spreadsheet"},
-        "competitive_intel": {"competitor", "competitive", "intel", "intelligence", "watchlist",
-                              "monitor", "monitoring", "rival", "rivals", "market", "surveillance",
-                              "track", "tracking", "pricing", "check_site", "run_check"},
-        "web":               {"search", "google", "find", "look", "browse", "fetch", "scrape",
-                              "lookup", "research", "internet", "online", "url", "link", "news"},
-        "self_improvement":  {"improve", "fix", "review", "debug", "refactor", "optimize",
-                              "self", "upgrade", "enhance", "audit", "analyze"},
-        "document_parser":   {"pdf", "document", "parse", "extract", "docx", "doc", "word",
-                              "file", "read", "contract", "report"},
-        "telegram_bot":      {"telegram", "bot", "notify", "notification", "alert",
-                              "broadcast"},
-        "data_science":      {"data", "csv", "chart", "plot", "statistics", "pandas",
-                              "graph", "dataset", "visualize", "correlation", "regression"},
-        "google_calendar":   {"calendar", "schedule", "event", "meeting", "appointment",
-                              "reminder", "invite", "availability", "book"},
-        "url_monitor":       {"monitor", "uptime", "ping", "status", "down",
-                              "watchlist", "tw_last"},
-        "youtube":           {"youtube", "video", "channel", "playlist", "subscribe",
-                              "yt"},
-        "scheduler":         {"cron", "recurring", "automate", "repeat", "interval",
-                              "daily", "weekly"},
-        "knowledge_base":    {"knowledge", "recall", "kb", "semantic", "embed"},
-        "notes":             {"note", "notes", "note:", "jot", "memo", "lesson", "remember"},
-        "google_maps":       {"map", "maps", "location", "directions", "place",
-                              "address", "navigate", "distance", "route", "nearby"},
-        "database":          {"database", "sql", "query", "db", "table", "postgres",
-                              "insert", "select", "delete", "record"},
-        "browser_session":   {"browser", "chrome", "cdp", "click", "screenshot",
-                              "navigate", "tab", "scrape", "login", "session", "webpage",
-                              "fill", "form", "stealth", "automate", "selenium"},
-        "autoimprove":       {"improve", "design", "spec", "autoimprove", "overnight",
-                              "research", "loop", "proposal", "approach", "plan"},
-        # Previously ungated — now compact when message is off-topic
-        "git_manager":       {"git", "commit", "push", "pull", "branch", "merge", "repo",
-                              "clone", "diff", "stash", "rebase", "checkout"},
-        "meeting_notes":     {"meeting", "transcript", "minutes", "attendees", "agenda",
-                              "summary", "action items"},
-        "email_sender":      {"send", "smtp", "outbox", "compose", "draft", "reply",
-                              "forward", "cc", "bcc"},
-        "terminal":          {"terminal", "bash", "shell", "command", "cmd", "exec",
-                              "ls", "pwd", "mkdir", "rm", "cp", "mv", "chmod",
-                              "execute", "python", "script", "calculate", "compute", "eval"},
-        "dashboard":         {"dashboard", "status", "health", "uptime", "metrics"},
-        "weather":           {"weather", "forecast", "temperature", "rain", "wind",
-                              "humidity", "snow", "sunny", "cloudy", "celsius", "fahrenheit"},
-        "email_collector":   {"collect", "harvest", "scrape", "emails", "email list",
-                              "find emails", "extract emails", "contacts from", "email collector",
-                              "directory", "listing"},
-    }
+    # Trigger tokens are DERIVED from each skill's own docs (tool_finder.trigger_tokens)
+    # — replaces the old hand-written keyword dict.
+    _domain_map = _get_skill_domain_map()
     _msg_words = set(req.message.lower().split())
 
     available_skills = []
@@ -3557,8 +3967,8 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
         # [✅ result] block when a skill actually runs). Relevant skills keep
         # short_doc + function names so any model forms a valid call on the
         # first try without guessing. Saves ~1k tokens per request.
-        _kw = _HEAVY_SKILL_KEYWORDS.get(name)
-        if _kw is not None and not (_msg_words & _kw):
+        _kw = _domain_map.get(name)
+        if _kw is not None and not (_msg_tokens(req.message) & _kw):
             available_skills.append(f"[SKILL: {name}]")
             continue
         _MAX_FUNCS_IN_DOC = 8
@@ -3586,12 +3996,12 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     # Detect whether the current message is web-dev related so we can gate the
     # website build workflow block (60+ lines). Injecting it on every request
     # wastes context budget when the user is just chatting or using other skills.
-    _is_web_task = bool(_msg_words & _HEAVY_SKILL_KEYWORDS.get("web_builder", set()))
+    _is_web_task = bool(_msg_tokens(req.message) & _domain_map.get("web_builder", set()))
 
     _local_model_reminder = ""
     if _local_model:
         # Always inject the core skill-usage reminder for local models.
-        _local_model_reminder = (
+        _local_model_reminder = _NATIVE_AGENT_REMINDER if _native_local else (
             "\n## SKILL USAGE REMINDER\n\n"
             "You CANNOT read files, save data, browse the web, or perform any external action without a skill tag.\n"
             "Every action needs a tag. Syntax: <skill:SKILLNAME.FUNCTIONNAME>arg1,arg2</skill:SKILLNAME.FUNCTIONNAME>\n"
@@ -3630,7 +4040,8 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
             )
 
     # ── Mode-conditional system prompt sections ───────────────────────────────
-    if _local_model:
+    # Local + native tools uses the native (function-calling) wording below, same as cloud.
+    if _local_model and not _native_local:
         _skill_usage_section = """\
 ## HOW TO USE SKILLS
 
@@ -3694,19 +4105,30 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
     # zero-context turn - the script calls skills via RPC with no LLM in the
     # loop, so there is no full system-prompt re-send per step. Applies to
     # both modes: local models use the tag form, cloud models call the
-    # script_runner__run_script tool directly.
+    # terminal__run_script tool directly.
     _script_usage = (
         "\n## MULTI-STEP TASKS \u2014 WRITE ONE SCRIPT\n\n"
         "For tasks needing 3+ tool calls, write ONE Python script and run it with\n"
-        "<skill:script_runner.run_script> \u2014 skills are called inside via the tool() helper:\n"
-        "<skill:script_runner.run_script>\n"
+        "<skill:terminal.run_script> \u2014 skills are called inside via the tool() helper:\n"
+        "<skill:terminal.run_script>\n"
         "print(tool('files', 'ls', '/app/memory'))\n"
         "print(tool('files', 'cat', '/app/memory/notes.json')[:500])\n"
         "print(tool('web', 'search', 'current gold price')[:500])\n"
-        "</skill:script_runner.run_script>\n"
+        "</skill:terminal.run_script>\n"
         "tool(skill, function, *args, **kwargs) returns the result; failures raise RuntimeError.\n"
         "Print only what matters (output capped at 3000 chars). Single quick command \u2192 plain skill tag.\n"
     )
+    if _native_local:
+        _script_usage = (
+            "\n## MULTI-STEP TASKS — SCRIPT OR PLAN\n\n"
+            "Mechanical work needing 3+ tool calls with no judgment between steps: write ONE Python "
+            "script and run it with the terminal__run_script tool (pass the script source as its "
+            "argument). Inside the script, skills are called with the tool() helper, e.g.\n"
+            "print(tool('files', 'ls', '/app/memory'))\n"
+            "tool(skill, function, *args, **kwargs) returns the result; failures raise RuntimeError. "
+            "Print only what matters (output capped at 3000 chars).\n"
+            "Work that needs judgment between steps: use agent__plan and call the tools one by one.\n"
+        )
     _skill_usage_section += _script_usage
 
     # Determine if this is a new session BEFORE any code that references _is_new_session
@@ -3807,7 +4229,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         _lessons_match, _lessons_rest = [], []
         for _lx in _sorted_all:
             _lx_skill = _lx.get("skill", "").split(".")[0]
-            _lx_kw = _HEAVY_SKILL_KEYWORDS.get(_lx_skill, set())
+            _lx_kw = _domain_map.get(_lx_skill, set())
             if _lx_kw and (_msg_words & _lx_kw):
                 _lessons_match.append(_lx)
             else:
@@ -4025,7 +4447,9 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
     _url_directive = ""
     if _url_in_message:
         _found_url = _url_in_message.group(0).rstrip('.,;)')
-        if _is_local_model:
+        if _native_local:
+            _fetch_instruction = f"Call the web__fetch tool with url='{_found_url}' as your first action."
+        elif _is_local_model:
             _fetch_instruction = f"Output this tag immediately as your first action: <skill:web.fetch>{_found_url}</skill:web.fetch>"
         else:
             _fetch_instruction = f"You MUST call web__fetch with url='{_found_url}' as your FIRST tool call."
@@ -4074,6 +4498,25 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 f"<skill:notes.save>SHORT_TITLE_HERE,{req.message}</skill:notes.save>\n"
                 "Replace SHORT_TITLE_HERE with a 2-5 word title derived from the note content.\n"
                 "Do NOT write a plan. Do NOT ask for clarification. Emit the tag now.\n\n"
+            )
+
+    if _native_local and _note_directive:
+        if _is_lesson_command:
+            _note_directive = (
+                "⚠️ IMMEDIATE ACTION — NO PLAN NEEDED:\n"
+                "The user is correcting your behavior. This is a lesson to save.\n"
+                f"Step 1 — call the notes__save tool: title = 'lesson-{_today_str}', content = {req.message[:300]!r}\n"
+                "Step 2 — after the save confirms, call notes__update_user_model with "
+                "'USER LESSON: [one-sentence summary of correction]'.\n"
+                "Do NOT write a plan. Do NOT ask for clarification. Call the tools now.\n\n"
+            )
+        else:
+            _note_directive = (
+                "⚠️ IMMEDIATE ACTION — NO PLAN NEEDED:\n"
+                "The user wants to save a note. Derive a 2-5 word title from the content.\n"
+                "Call the notes__save tool immediately as your FIRST and ONLY action: "
+                f"title = that short title, content = {req.message!r}\n"
+                "Do NOT write a plan. Do NOT ask for clarification. Call the tool now.\n\n"
             )
 
     # Build system prompt from template (loaded at startup from prompts/system.md)
@@ -4186,6 +4629,14 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     "<skill:web.search>TOPIC</skill:web.search>\n"
                     "After the search result comes back, verify the facts and give the correct answer.\n\n"
                 )
+                if _native_local:
+                    _correction_prefix = (
+                        "[CORRECTION REQUIRED] Your previous answer was flagged as WRONG. "
+                        "Do NOT repeat it.\n"
+                        "Your FIRST action must be a call to the web__search tool with a query about the "
+                        "actual subject from the conversation history.\n"
+                        "After the result comes back, verify the facts and give the correct answer.\n\n"
+                    )
                 # Overwrite the last user turn — Gemma4 WILL read this as part of its prompt
                 messages[-1] = {"role": "user", "content": _correction_prefix + user_message}
             else:
@@ -4217,11 +4668,14 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         # After each iteration, any newly-called skills are added so the LLM
         # can always call a skill it has already used (multi-step safety net).
         _used_skills_this_req: set = set()
+        _used_skills_this_req |= _preload_named_skills(req.message)
         tools = _build_tools_schema_for_request(req.message)
 
         _continuation_pushes = 0        # cloud: how many "stop describing, act!" pushes sent so far
         _local_continuation_pushes = 0  # local: same, for Ollama/tag path
         _empty_turn_pushes = 0          # local: model produced reasoning but no visible output
+        _plan_nudges = 0                # local+native: text-only stop while plan steps were pending
+        _agent_state: dict = {"finish_rejections": 0, "plan_touched": False}
         _consecutive_error_iters = 0    # how many consecutive iterations had only failed skill calls
         _skill_failure_counts: dict = {}  # (skill, func) -> cumulative failure count this request
 
@@ -4241,13 +4695,25 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             # The vision model only needs to see the image; tool calls happen on
             # later iterations using the regular model.
             is_vision_call = is_first and bool(req.image)
+
+            # Local + native tools: add the agent control tools and re-inject the active
+            # plan as the LAST message of every call (transient — never stored in history),
+            # so truncation can never drop it and the model always sees what is left to do.
+            _tools_for_call = tools
+            _call_messages = messages
+            if _native_local:
+                _tools_for_call = list(tools or []) + _AGENT_TOOLS
+                _pn = _plan_note(_get_plan(session_id))
+                if _pn and not (is_first and ollama_images):
+                    _call_messages = messages + [{"role": "user", "content": _pn}]
+
             llm_response = _call_llm(
-                messages,
+                _call_messages,
                 model_source,
                 effective_model,
                 cloud_image_content=message_content_cloud if is_vision_call else None,
                 ollama_images=ollama_images if is_first else None,
-                tools=tools if (tools and not is_vision_call) else None,
+                tools=_tools_for_call if (_tools_for_call and not is_vision_call) else None,
             )
 
             if model_source == "local":
@@ -4258,8 +4724,28 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     tool_calls = llm_response["tool_calls"]
                     ai_reply   = llm_response.get("content") or ""
                     print(f"⚙️  Iteration {iteration}: {len(tool_calls)} Ollama tool call(s), looping…")
-                    tool_result_messages, execution_log = _execute_tool_calls(tool_calls)
+                    # Run calls in order. agent__plan / agent__ask_user / agent__finish are handled
+                    # by the loop itself; everything else goes to the skill dispatcher.
+                    tool_result_messages = []
+                    execution_log = []
+                    _ctrl_action, _ctrl_text = None, ""
+                    for _tc in tool_calls:
+                        if _is_agent_control_call(_tc):
+                            _c_res, _c_act, _c_txt = _handle_agent_control_call(_tc, session_id, _agent_state)
+                            tool_result_messages.append({
+                                "role": "tool",
+                                "tool_call_id": _tc.get("id") or str(uuid.uuid4()),
+                                "content": _c_res,
+                            })
+                            if _c_act and not _ctrl_action:
+                                _ctrl_action, _ctrl_text = _c_act, _c_txt
+                            continue
+                        _one_msgs, _one_log = _execute_tool_calls([_tc])
+                        tool_result_messages.extend(_one_msgs)
+                        execution_log.extend(_one_log)
+                    tool_result_messages = [_cap_tool_message(_m) for _m in tool_result_messages]
                     all_execution_logs.extend(execution_log)
+                    _unlock_skills_from_results(execution_log, _used_skills_this_req)
                     for _l in execution_log:
                         _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
                     messages.append({
@@ -4268,6 +4754,11 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         "tool_calls": tool_calls,
                     })
                     messages.extend(tool_result_messages)
+                    if _ctrl_action in ("finish", "ask"):
+                        ai_reply = (_ctrl_text or ai_reply or "").strip() or "Done."
+                        print(f"✅ Agent loop complete after {iteration} iteration(s) "
+                              f"[exit=agent__{'finish' if _ctrl_action == 'finish' else 'ask_user'}]")
+                        break
                     ai_reply = "\n".join(
                         f"[✅ {l['skill']}.{l.get('function','')} Result: {l.get('result','')}]"
                         if l["status"] == "success"
@@ -4276,9 +4767,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     )
                     # Expand schema to include any newly-called skills
                     for _tc in tool_calls:
+                        if _is_agent_control_call(_tc):
+                            continue
                         _tc_skill = (_tc.get("function", {}).get("name") or "").split("__")[0]
                         if _tc_skill:
                             _used_skills_this_req.add(_tc_skill)
+                    _used_skills_this_req |= _preload_named_skills(ai_reply)
                     tools = _build_tools_schema_for_request(req.message, used_skills=_used_skills_this_req)
                     continue
 
@@ -4286,6 +4780,31 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 # Guard against None content (common when the model just processed
                 # tool results and returns an empty turn instead of a text summary).
                 ai_reply = llm_response.get("content") or ""
+
+                # Native mode: a text-only reply is a legitimate final answer UNLESS the plan
+                # still has pending steps — then the model is handing back mid-task. Nudge it
+                # to continue instead of returning to the user. A plan carried over from an
+                # earlier turn gets one nudge; a plan worked on in this request gets up to four.
+                if _native_local and not re.search(r"<skill:\w+\.\w+|</?tool_call>", ai_reply):
+                    _pend_steps = _plan_pending(_get_plan(session_id))
+                    _worked = bool(all_execution_logs) or _agent_state.get("plan_touched")
+                    if _pend_steps and _plan_nudges < (4 if _worked else 1):
+                        _plan_nudges += 1
+                        print(f"⚠️  Iteration {iteration}: text-only reply with {len(_pend_steps)} plan step(s) pending — nudge #{_plan_nudges}")
+                        _left = "\n".join(f"  [ ] {i}. {t}" for i, t in _pend_steps)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You stopped, but the plan still has pending steps:\n"
+                                f"{_left}\n"
+                                "Do not report back yet. Call the tool for the next step now. "
+                                "If you are truly blocked on something only the user can provide, call "
+                                "agent__ask_user. If these steps are no longer needed, call "
+                                "agent__plan(steps=[])."
+                            ),
+                        })
+                        continue
+
                 # If the LLM returned nothing but we already have tool results from a
                 # previous iteration, surface them directly — no need to re-prompt.
                 if not ai_reply.strip() and all_execution_logs:
@@ -4350,7 +4869,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         continue
                     messages.append({
                         "role": "user",
-                        "content": (
+                        "content": _NATIVE_EMPTY_PUSH if _native_local else (
                             "Your last turn produced no usable output (only reasoning, or an "
                             "incomplete <tool_call>). Reasoning is not shown to the user. Think briefly, "
                             "then WRITE YOUR OUTPUT after the reasoning: either a complete skill tag in "
@@ -4364,6 +4883,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     ai_reply
                 )
                 all_execution_logs.extend(execution_log)
+                _unlock_skills_from_results(execution_log, _used_skills_this_req)
                 for _l in execution_log:
                     _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
 
@@ -4406,7 +4926,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         "iskoristit", "koristit", "pozovem", "pozvaću",
                     )
                     _looks_like_local_plan = (
-                        _local_continuation_pushes < 3
+                        _local_continuation_pushes < (1 if _native_local else 3)
+                        and (not _native_local or not all_execution_logs)
                         and len(ai_reply.strip()) > 30
                         and any(sig in ai_reply.lower() for sig in _LOCAL_PLAN_SIGNALS)
                     )
@@ -4416,7 +4937,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         messages.append({"role": "assistant", "content": ai_reply})
                         messages.append({
                             "role": "user",
-                            "content": (
+                            "content": _NATIVE_PLAN_PUSH if _native_local else (
                                 "You described a plan but did not execute it. "
                                 "Output the skill tag NOW — no introduction, no explanation.\n"
                                 "Example: <skill:notes.list_notes></skill:notes.list_notes>\n"
@@ -4426,7 +4947,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         })
                         continue
 
-                    print(f"✅ Agent loop complete after {iteration} iteration(s)")
+                    print(f"✅ Agent loop complete after {iteration} iteration(s) [exit=text reply, no tool call]")
                     ai_reply = executed_reply
                     # Fallback: Qwen and other local models sometimes produce an empty
                     # final turn (only <think> reasoning, no user-facing text). Rather
@@ -4565,7 +5086,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     )
                     # Always embed the original request so the model can answer
                     # even if context overflow truncated it from the message history.
-                    _orig_q = f'"{req.message[:200].replace(chr(34), chr(39))}"'
+                    _orig_q = f'"{req.message[:600].replace(chr(34), chr(39))}"'
                     if _successful_web_searches >= 1:
                         pending_note = (
                             f"{_done_note}"
@@ -4578,9 +5099,9 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         pending_note = (
                             f"{_done_note}{_fail_note}"
                             f" User asked: {_orig_q}."
-                            " Is the user's full request now answered by the ✅ results above?"
-                            " YES → write your final text answer now, using the results."
-                            " NO → output the next skill tag immediately. No intro text."
+                            " Check the request again: if ANY part is still undone, output the next"
+                            " skill tag now (no intro text, and do not ask the user whether to continue)."
+                            " Only when every part is done, write the final answer from the results above."
                         )
                 # Build brief injection for the continuation message.
                 brief_injection = ""
@@ -4680,6 +5201,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 print(f"⚙️  Iteration {iteration}: {len(tool_calls)} tool call(s), looping…")
                 tool_result_messages, execution_log = _execute_tool_calls(tool_calls)
                 all_execution_logs.extend(execution_log)
+                _unlock_skills_from_results(execution_log, _used_skills_this_req)
                 for _l in execution_log:
                     _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
 
@@ -4698,6 +5220,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     _tc_skill = (_tc.get("function", {}).get("name") or "").split("__")[0]
                     if _tc_skill:
                         _used_skills_this_req.add(_tc_skill)
+                _used_skills_this_req |= _preload_named_skills(ai_reply)
                 tools = _build_tools_schema_for_request(req.message, used_skills=_used_skills_this_req)
 
                 # Dead-end detection: track consecutive all-error iterations
