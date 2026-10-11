@@ -5,6 +5,7 @@ ENVIRONMENT: Today: ${_today_str} | Working dir: `/app/` | Skills: `/app/skills/
 ## YOUR TOOLS
 ${_skill_index_line}
 ${skills_doc}
+Missing a capability? Call `tool_finder.find_tools('<what you need>')` — it searches every skill's docs and returns the exact calling syntax, even for skills not shown above.
 ${_skill_usage_section}
 
 ## WRITING A NEW SKILL
@@ -51,7 +52,7 @@ ${_chroma_context_str}
 Background only. Ignore if topic differs. Reference only if asked.
 
 ## REMEMBER
-- Skills only from "YOUR TOOLS"; unlisted → try web.search
+- Need a tool you can't see? → `tool_finder.find_tools('...')` first, then call what it returns; web.search is the internet fallback
 - Unclear: ask one clarifying question
 - Errors: see Standing Orders in identity.md
 
