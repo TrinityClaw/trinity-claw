@@ -30,16 +30,18 @@ import shlex
 from pathlib import Path
 from typing import Optional
 
-# Executor headroom (app.py reads this): the FIRST docker-sandbox call may
-# pull the sandbox image, which can take 30s+ on a cold cache.
-SKILL_TIMEOUT = int(os.getenv("TERMINAL_SKILL_TIMEOUT", "90"))
+# Executor headroom (app.py reads this as the outer per-call budget). 300s so
+# run_script pipelines (tool() RPC calls wait up to 120s each) finish; the
+# inner functions clamp themselves (snippets/bash 30s, scripts 600s).
+SKILL_TIMEOUT = int(os.getenv("TERMINAL_SKILL_TIMEOUT", "300"))
 
 # ── Skill metadata (required by skill loader) ────────────────────────────────
 NAME = "terminal"
 SHORT_DOC = "Run Python snippets, test skills, execute bash commands, and evaluate math expressions safely."
 DOC = (
-    "Safe Python sandbox: run code snippets, test existing skills, and calculate expressions in isolated subprocesses. "
+    "Safe Python sandbox: run code snippets, run multi-step skill scripts, test existing skills, and calculate expressions in isolated subprocesses. "
     "Returns: run_snippet(code)→stdout output of the code (up to 2KB) or error message; "
+    "run_script(code, timeout)→execute a Python script that calls skills via tool(skill, function, *args, **kwargs) RPC — multi-step pipelines collapse into one turn; "
     "test_skill(skill_name, fn_name, args_json)→function return value as text, useful for verifying a skill works; "
     "run_bash(command)→stdout of the bash command; "
     "calc(expression)→numeric result of a math expression as a string."
@@ -315,6 +317,119 @@ def test_skill(skill_name: str, fn_name: str, args_json: str = "[]", timeout: in
     # The harness itself is trusted code — skip scanner, run directly.
     # Keep the full environment: the skill under test reads its own API keys.
     return _run_in_subprocess(harness, timeout, scrub_env=False)
+
+
+# ── run_script: multi-step engine (formerly the script_runner skill) ────────
+
+# Scripts get only a safe baseline plus what they need to talk to the agent's
+# own /skill/call endpoint — same posture as mcp_client stdio. run_snippet and
+# run_bash keep the scrubbed _SAFE_ENV_BASELINE (no API keys).
+_RUN_SCRIPT_ENV_BASELINE = (
+    "PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "TEMP", "TMP",
+    "TRINITY_API_KEY", "TRINITY_SELF_BASE",
+)
+_SCRIPT_DEFAULT_TIMEOUT = int(os.getenv("SCRIPT_RUNNER_TIMEOUT", "300"))
+_SCRIPT_TIMEOUT_CEILING = 600
+_SCRIPT_OUTPUT_CAP = 3000
+
+_PRELUDE = '''import os as _os, requests as _requests
+_API = _os.environ.get("TRINITY_API_KEY", "")
+_BASE = _os.environ.get("TRINITY_SELF_BASE", "http://localhost:8001")
+
+def tool(skill, func, *args, **kwargs):
+    """Call an agent skill via RPC. Returns the result; failures raise RuntimeError."""
+    r = _requests.post(
+        _BASE + "/skill/call",
+        json={"skill": skill, "function": func, "args": list(args), "kwargs": kwargs},
+        headers={"X-API-Key": _API},
+        timeout=120,
+    )
+    if r.status_code != 200:
+        try:
+            d = r.json()
+            err = d.get("detail") or d.get("error") or r.text[:200]
+        except Exception:
+            err = r.text[:200]
+        if isinstance(err, list):
+            err = str(err)[:200]
+        raise RuntimeError(f"tool {skill}.{func} failed: {err}")
+    d = r.json()
+    if not d.get("success"):
+        raise RuntimeError(f"tool {skill}.{func} failed: {d.get('error')}")
+    return d.get("result")
+'''
+
+
+def run_script(code: str, timeout: int = None) -> str:
+    """Execute a Python script that calls skills via the tool() RPC helper.
+
+    Zero-context multi-step engine: instead of one skill tag per iteration
+    (each re-sends the full system prompt), write ONE script — the whole
+    pipeline collapses into one turn. tool(skill, function, *args, **kwargs)
+    returns the skill result; a failed call raises RuntimeError. Output is
+    capped at 3000 chars. Use for 3+ tool calls; single commands → plain tag.
+
+    Args:
+        code:    Python source (markdown fences stripped automatically).
+        timeout: Max seconds to wait (1-600, default 300).
+    """
+    code = (code or "").strip()
+    if not code:
+        return "No script provided."
+
+    md = re.search(r"```(?:python|py)?\s*(.*?)\s*```", code, re.DOTALL)
+    if md:
+        code = md.group(1).strip()
+
+    block_reason = _scan_snippet(code)
+    if block_reason:
+        return f"❌ REJECTED by security scanner:\n  {block_reason}"
+
+    try:
+        timeout = min(max(int(timeout), 1), _SCRIPT_TIMEOUT_CEILING) if timeout else _SCRIPT_DEFAULT_TIMEOUT
+    except (TypeError, ValueError):
+        timeout = _SCRIPT_DEFAULT_TIMEOUT
+
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".py", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(_PRELUDE + "\n" + code + "\n")
+        path = f.name
+
+    try:
+        env = {k: os.environ[k] for k in _RUN_SCRIPT_ENV_BASELINE if k in os.environ}
+        proc = subprocess.run(
+            [sys.executable, path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            cwd="/tmp" if os.path.isdir("/tmp") else None,
+        )
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        if proc.returncode != 0:
+            tail = err[-1500:] if err else f"exit code {proc.returncode}"
+            result = f"Script failed (exit {proc.returncode}):\n{tail}"
+            if out:
+                result += f"\n\nstdout:\n{out[:1000]}"
+            return result
+        if not out:
+            if err:
+                return f"Script completed.\nstderr: {err[:500]}"
+            return "Script completed with no output."
+        if len(out) > _SCRIPT_OUTPUT_CAP:
+            out = out[:_SCRIPT_OUTPUT_CAP] + f"\n...[truncated, {len(out)} chars total]"
+        return out
+    except subprocess.TimeoutExpired:
+        return f"Script timed out after {timeout}s — split it into smaller scripts."
+    except Exception as e:
+        return f"Script error: {e}"
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _get_docker_sandbox_client():
@@ -601,6 +716,7 @@ __all__ = [
     "NAME",
     "DOC",
     "run_snippet",
+    "run_script",
     "test_skill",
     "run_bash",
     "calc",
