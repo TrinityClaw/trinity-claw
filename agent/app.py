@@ -5532,10 +5532,87 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     _post_task_suggestion_path.parent.mkdir(parents=True, exist_ok=True)
                     _post_task_suggestion_path.write_text(suggestion[:500], encoding="utf-8")
                     print(f"💡 Post-task suggestion cached for session {_session_id_snap[:12]}...")
+                    # Repeat tracking: 2nd sighting of the SAME suggestion → push
+                    # to Telegram once ("want me to automate this?"). First sighting
+                    # stays file-only (injected at next session start, as before).
+                    try:
+                        import hashlib as _hl
+                        _tracker_p = Path("/app/memory/suggestion_outcomes.json")
+                        try:
+                            _tr = json.loads(_tracker_p.read_text(encoding="utf-8") or "{}")
+                        except Exception:
+                            _tr = {}
+                        _h = _hl.sha1(suggestion[:200].encode("utf-8", "ignore")).hexdigest()[:12]
+                        _e = _tr.get(_h) or {"count": 0, "status": "new"}
+                        _e["count"] = int(_e.get("count", 0)) + 1
+                        _e["text"] = suggestion[:80]
+                        _tr[_h] = _e
+                        if len(_tr) > 200:
+                            _tr = dict(sorted(_tr.items(), key=lambda kv: kv[1].get("count", 0))[-100:])
+                        _tracker_p.write_text(json.dumps(_tr, ensure_ascii=False), encoding="utf-8")
+                        if _e["count"] >= 2 and _e.get("status", "new") == "new" and os.getenv("TELEGRAM_BOT_TOKEN"):
+                            _tg = skills.get("telegram_bot")
+                            if _tg is not None and hasattr(_tg, "send"):
+                                try:
+                                    _tg.send(
+                                        "💡 Repeating pattern — want me to automate this?\n"
+                                        + suggestion[:350]
+                                        + "\n\nReply 'yes, make it a skill' and I'll build it in skills/dynamic (you can review or delete it there)."
+                                    )
+                                    _e["status"] = "pushed"
+                                    _tr[_h] = _e
+                                    _tracker_p.write_text(json.dumps(_tr, ensure_ascii=False), encoding="utf-8")
+                                    print(f"💡 Suggestion pushed to Telegram (repeat #{_e['count']})")
+                                except Exception as _tg_err:
+                                    print(f"⚠️ Telegram suggestion push failed: {_tg_err}")
+                    except Exception as _tr_err:
+                        print(f"⚠️ Suggestion tracker error: {_tr_err}")
             except Exception as _sug_err:
                 print(f"⚠️ Post-task suggestion error: {_sug_err}")
 
         threading.Thread(target=_suggest_post_task, daemon=True, name="post-task-suggest").start()
+
+        # Post-task self-reflection — successes teach too, not just errors.
+        # Background + rate-limited; records one compact line per qualifying run.
+        _reflect_logs = list(all_execution_logs)
+        _reflect_task = _user_msg_snap
+        _reflect_duration = int(time.time() - _task_start_time)
+
+        def _reflect_success():
+            try:
+                _sj = skills.get("success_journal")
+                if _sj is None or not hasattr(_sj, "record"):
+                    return
+                _succ = [l for l in _reflect_logs if l.get("status") == "success"]
+                # Multi-step tasks often collapse into ONE terminal.run_script call,
+                # so also count meaningful duration as a qualification signal.
+                _min_dur = int(os.getenv("REFLECTION_MIN_DURATION_S", "90"))
+                if not (len(_succ) >= int(os.getenv("REFLECTION_MIN_TOOLS", "3"))
+                        or (_succ and _reflect_duration >= _min_dur)):
+                    return
+                _state_p = Path("/app/memory/reflection_state.json")
+                try:
+                    _st = json.loads(_state_p.read_text(encoding="utf-8") or "{}")
+                except Exception:
+                    _st = {}
+                _now = time.time()
+                if _now - float(_st.get("last", 0)) < int(os.getenv("REFLECTION_MIN_INTERVAL_S", "1800")):
+                    return
+                _st["last"] = _now
+                _state_p.parent.mkdir(parents=True, exist_ok=True)
+                _state_p.write_text(json.dumps(_st), encoding="utf-8")
+                _chain = ", ".join(f"{l['skill']}.{l.get('function', '')}" for l in _succ[:8])
+                _res = _sj.record(
+                    task=str(_reflect_task)[:200],
+                    tools_used=len(_succ),
+                    duration_s=_reflect_duration,
+                    skills_chain=_chain,
+                )
+                print(f"🧠 Success reflection: {str(_res)[:90]}")
+            except Exception as _ref_err:
+                print(f"⚠️ Reflection error: {_ref_err}")
+
+        threading.Thread(target=_reflect_success, daemon=True, name="success-reflect").start()
 
         _n_skills_called = len([l for l in all_execution_logs if l.get("status") != "lesson_warning"])
         _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": _n_skills_called, "token_est": _token_est})
