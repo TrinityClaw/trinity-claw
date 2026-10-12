@@ -1372,6 +1372,87 @@ def _prune_tool_results(messages: List[Dict]) -> List[Dict]:
     return pruned
 
 
+# ── In-run context compaction ─────────────────────────────────────────────────
+# With a 24k ctx and a ~5k system prompt, a 10+ step task overflows and Ollama
+# silently truncates the OLDEST messages — including the original user request.
+# RUN_COMPACTION_THRESHOLD watches Ollama's reported prompt_eval_count and
+# stubs OLD tool results (keeping the most recent ones verbatim) BEFORE that.
+RUN_COMPACTION_THRESHOLD = float(os.getenv("RUN_COMPACTION_THRESHOLD", "0.70"))
+RUN_COMPACTION_KEEP_RECENT = int(os.getenv("RUN_COMPACTION_KEEP_RECENT", "2"))
+
+_RUN_BLOCK_START = re.compile(r"\[(?:✅|❌)\s+\w+\.\w+\s+(?:Result|Error):")
+
+
+def _stub_result_block(lines: list, s: int, e: int) -> str:
+    """One-line-ish stub for a [✅/❌ skill.func Result: ...] block: keeps the
+    skill label, the first ~150 chars of the result, and a balanced ']'.
+    Returns the replacement text (ends with ']' so blocks stay well-formed)."""
+    header = lines[s].strip()
+    body_chars = sum(len(lines[k]) + 1 for k in range(s + 1, e + 1))
+    first = lines[s + 1].strip()[:150] if e > s else ""
+    return f"{header}\n{first}...[older result compacted, ~{body_chars} chars pruned]]"
+
+
+def _compact_run_messages(messages: List[Dict], keep_recent: int = None) -> int:
+    """Stub OLD tool results inside the CURRENT run's message list.
+
+    Handles both result shapes:
+    - role:"tool" messages (native tool-calling paths)
+    - [✅/❌ skill.func Result/Error: ...] blocks inside assistant content
+      (local XML-tag path — the usual Ollama mode)
+
+    Keeps the last `keep_recent` results verbatim (the model needs the freshest
+    results to reason about the next step). Never touches messages[0] (system
+    prompt) or the first user message (the original request). Mutates messages
+    in place. Returns the approximate number of characters saved.
+    """
+    if keep_recent is None:
+        keep_recent = RUN_COMPACTION_KEEP_RECENT
+    saved = 0
+
+    # 1. role:"tool" messages (native paths)
+    tool_idx = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    old_tools = tool_idx[:-keep_recent] if keep_recent > 0 else tool_idx
+    for i in old_tools:
+        m = messages[i]
+        c = m.get("content")
+        if isinstance(c, str) and len(c) > TOOL_RESULT_PRUNE_CHARS:
+            saved += len(c) - 60
+            m["content"] = f"[tool result compacted — {len(c)} chars; see steps above]"
+
+    # 2. Result blocks inside assistant content (local tag path).
+    #    Collect (msg_idx, start_line, end_line) across the whole run, then
+    #    stub all but the most recent `keep_recent` — processing each message's
+    #    blocks in REVERSE line order so earlier indices stay valid.
+    all_blocks = []
+    for mi, m in enumerate(messages):
+        if mi == 0 or m.get("role") != "assistant" or not isinstance(m.get("content"), str):
+            continue
+        lines = m["content"].split("\n")
+        start = None
+        for li, line in enumerate(lines):
+            stripped = line.strip()
+            if start is None:
+                if _RUN_BLOCK_START.match(stripped):
+                    start = li
+            elif stripped == "]" or (stripped.endswith("]") and not stripped.startswith("[")):
+                all_blocks.append((mi, start, li))
+                start = None
+        if start is not None:  # unclosed block (truncated output)
+            all_blocks.append((mi, start, len(lines) - 1))
+
+    for mi, s, e in reversed(all_blocks[:-keep_recent] if keep_recent > 0 else all_blocks):
+        m = messages[mi]
+        lines = m["content"].split("\n")
+        old_len = sum(len(lines[k]) + 1 for k in range(s, e + 1))
+        stub = _stub_result_block(lines, s, e)
+        if len(stub) < old_len:
+            saved += old_len - len(stub)
+            lines[s:e + 1] = stub.split("\n")
+            m["content"] = "\n".join(lines)
+    return saved
+
+
 def _sanitize_orphaned_tool_pairs(messages: List[Dict]) -> List[Dict]:
     """Remove tool-result messages that have no matching assistant tool_call.
 
@@ -3626,6 +3707,10 @@ def _call_llm(
         return {
             "content": raw,
             "tool_calls": _normalized_tool_calls or None,
+            # Real prompt size of THIS call (tokens) — the agent loop uses it to
+            # decide when in-run compaction must fire before Ollama silently
+            # truncates the oldest messages (the original request).
+            "prompt_eval_count": int(_ollama_json.get("prompt_eval_count") or 0),
         }
     else:
         headers = {"Authorization": f"Bearer {API_KEY}"}
@@ -4654,6 +4739,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
 
         all_execution_logs = []
         _task_start_time = time.time()
+        last_prompt_tokens = 0   # Ollama's prompt_eval_count from the previous call
         ai_reply = ""
         # Holds the design brief JSON after analyze_design_folder runs so it can
         # be injected into the very next continuation message (keeping it fresh
@@ -4707,6 +4793,18 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 if _pn and not (is_first and ollama_images):
                     _call_messages = messages + [{"role": "user", "content": _pn}]
 
+            # In-run compaction: if the PREVIOUS call's prompt was close to
+            # Ollama's num_ctx, stub old tool results now — otherwise Ollama
+            # silently truncates the oldest messages (the original request).
+            if RUN_COMPACTION_THRESHOLD > 0 and last_prompt_tokens and not is_vision_call:
+                _ctx_sz = int(os.getenv("OLLAMA_NUM_CTX", "12288"))
+                if last_prompt_tokens > int(RUN_COMPACTION_THRESHOLD * _ctx_sz):
+                    _saved_chars = _compact_run_messages(messages)
+                    if _saved_chars:
+                        print(f"🧹 Run compaction: pruned ~{_saved_chars} chars "
+                              f"(prompt was {last_prompt_tokens}/{_ctx_sz} tok)")
+                        _stream_emit({"type": "compaction", "chars": _saved_chars, "prompt_tok": last_prompt_tokens})
+
             llm_response = _call_llm(
                 _call_messages,
                 model_source,
@@ -4715,6 +4813,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 ollama_images=ollama_images if is_first else None,
                 tools=_tools_for_call if (_tools_for_call and not is_vision_call) else None,
             )
+            last_prompt_tokens = llm_response.get("prompt_eval_count") or last_prompt_tokens
 
             if model_source == "local":
                 # ── Local/Ollama path ─────────────────────────────────────────
