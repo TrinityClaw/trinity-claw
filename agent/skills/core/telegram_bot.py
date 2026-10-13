@@ -221,13 +221,24 @@ def _poll_updates():
                     if photo_list and str(chat_id) == _chat_id:
                         caption = message.get("caption", "")
                         logger.info(f"Received photo (caption: {caption[:30] if caption else 'none'})")
-                        _handle_incoming_photo(photo_list, caption, str(chat_id))
+                        # Background thread — processing takes minutes (LLM); a
+                        # synchronous call here would block the polling loop and
+                        # stall every subsequent Telegram message.
+                        threading.Thread(
+                            target=_handle_incoming_photo,
+                            args=(photo_list, caption, str(chat_id)),
+                            daemon=True, name="tg-photo",
+                        ).start()
 
                     # Handle voice messages from the authorised chat only
                     voice_obj = message.get("voice")
                     if voice_obj and str(chat_id) == _chat_id:
                         logger.info(f"Received voice ({voice_obj.get('duration', 0)}s)")
-                        _handle_incoming_voice(voice_obj, str(chat_id))
+                        threading.Thread(
+                            target=_handle_incoming_voice,
+                            args=(voice_obj, str(chat_id)),
+                            daemon=True, name="tg-voice",
+                        ).start()
 
             # Small delay to prevent CPU spinning if no updates
             if not updates:
@@ -569,9 +580,10 @@ def _handle_incoming_photo(photo_list: list, caption: str, from_chat_id: str):
         headers = {"X-API-Key": _api_key, "Content-Type": "application/json"}
 
         # Vision calls are slow; retry once on transient 502/503 from NVIDIA NIM
+        # 300s: local models with thinking + skill loops regularly exceed 120s.
         resp = None
         for attempt in range(2):
-            resp = _session.post(_trinity_url, json=payload, headers=headers, timeout=(10, 120))
+            resp = _session.post(_trinity_url, json=payload, headers=headers, timeout=(10, 300))
             if resp.status_code not in (502, 503):
                 break
             if attempt == 0:
@@ -630,11 +642,14 @@ def _handle_incoming_voice(voice_obj: dict, from_chat_id: str):
 
         # Forward transcribed text to Trinity
         session_id = f"telegram_{from_chat_id}"
+        # Local models with thinking take 60s-3min (skill loops longer still);
+        # 90s guaranteed read-timeouts on real requests. 300s matches the
+        # photo handler and OLLAMA_TIMEOUT semantics.
         chat_resp = _session.post(
             _trinity_url,
             json={"message": text, "session_id": session_id},
             headers={"X-API-Key": _api_key, "Content-Type": "application/json"},
-            timeout=(5, 90),
+            timeout=(5, 300),
         )
         if chat_resp.status_code == 200:
             queue_message(chat_resp.json().get("reply", "No response"))
@@ -642,7 +657,7 @@ def _handle_incoming_voice(voice_obj: dict, from_chat_id: str):
             queue_message(f"⚠️ Trinity returned HTTP {chat_resp.status_code}")
     except Exception as e:
         logger.error(f"Voice handling error: {e}")
-        queue_message(f"❌ Could not process voice message: {str(e)[:80]}")
+        queue_message(f"❌ Could not process voice message: {str(e)[:200]}")
 
 
 def send_to_trinity(message: str) -> str:
