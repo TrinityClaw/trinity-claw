@@ -4062,21 +4062,32 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
             func_sigs = ", ".join(func_names[:_MAX_FUNCS_IN_DOC]) + f" +{len(func_names) - _MAX_FUNCS_IN_DOC} more"
         else:
             func_sigs = ", ".join(func_names)
-        available_skills.append(
-            f"[SKILL: {name}] {meta.get('short_doc', meta.get('doc', 'No doc'))} (functions: {func_sigs})"
-        )
+        # short_doc capped at 90 chars — full docs/syntax come from find_tools
+        # on demand; long SHORT_DOCs here were costing ~20-30 tokens per skill.
+        _sd = (meta.get("short_doc") or meta.get("doc") or "No doc")[:90].strip()
+        available_skills.append(f"[SKILL: {name}] {_sd} (functions: {func_sigs})")
 
     skills_doc = "\n".join(available_skills)
     _skill_index_line = "Skills you have: " + ", ".join(skill_names_list)
 
-    # MCP tools from connected servers are first-class: listed with their
-    # registered name so the model calls them directly (single tag).
+    # MCP tools: one compact summary line per connected server instead of full
+    # per-tool docs (those cost 100-300+ tokens per server on EVERY request).
+    # The tools themselves stay first-class in the native tools schema (cloud /
+    # ollama-native), and full XML syntax is available on demand via find_tools.
     try:
         _mcp_registry = _get_mcp_tool_registry()
     except Exception:
         _mcp_registry = {}
     if _mcp_registry:
-        skills_doc += "\n" + render_mcp_docs(_mcp_registry)
+        _mcp_servers = sorted({s for s, t, d, sc in _mcp_registry.values()})
+        _mcp_summary = "; ".join(
+            f"{srv} ({sum(1 for s, t, d, sc in _mcp_registry.values() if s == srv)} tools)"
+            for srv in _mcp_servers
+        )
+        skills_doc += (
+            f"\n[MCP servers connected: {_mcp_summary}]\n"
+            "  Per-tool syntax: tool_finder.find_tools('<server or task>') — MCP tools are callable directly."
+        )
 
     # Detect whether the current message is web-dev related so we can gate the
     # website build workflow block (60+ lines). Injecting it on every request
