@@ -174,6 +174,19 @@ TOOL_RESULT_PROTECT_RECENT = 2   # always keep the last N tool results verbatim 
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
 session_store: Dict[str, Dict] = {}
 
+# ── Same-session run supersession (Hermes-style interrupt) ────────────────────
+# A newer /chat for a session cancels that session's active run at the next
+# iteration boundary. Prevents zombie runs from abandoned HTTP clients
+# (Telegram timeouts, closed tabs) from hogging Ollama for 20+ minutes.
+_active_runs: Dict[str, threading.Event] = {}
+
+
+def _supersede_active_run(session_id: str) -> None:
+    _old = _active_runs.get(session_id)
+    if _old is not None and not _old.is_set():
+        _old.set()
+        print(f"🛑 Superseding active run for session {session_id[:12]}... (newer message arrived)")
+
 # ── ChromaDB query deduplication cache ────────────────────────────────────────
 # Keyed by (session_id:query_hash). Skips embed+network call when the same query
 # was answered recently. Caches misses too — avoids re-querying known dead-ends.
@@ -3855,6 +3868,12 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     history = get_session_history(session_id)
     print(f"📖 Session {session_id[:12]}... — {len(history) // 2} prior turn(s) in memory")
 
+    # Same-session supersession: kill any active run for this session, then
+    # register ours so an even newer message can cancel US in turn.
+    _supersede_active_run(session_id)
+    _cancel_event = threading.Event()
+    _active_runs[session_id] = _cancel_event
+
     # 1. Retrieve long-term memory from ChromaDB.
     # Skip entirely when:
     #   a) Message is too short/conversational (embedding noise)
@@ -4780,6 +4799,13 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             print(f"🔁 Agent iteration {iteration}/{MAX_ITERATIONS}")
             _stream_emit({"type": "iteration", "n": iteration, "max": MAX_ITERATIONS})
 
+            # Same-session supersede: a newer /chat for this session asked us to stop.
+            if _cancel_event.is_set():
+                print(f"🛑 Run superseded by newer request (session {session_id[:12]}...)")
+                ai_reply = (ai_reply or "") + "\n\n[Stopped — superseded by a newer message.]"
+                _stream_emit({"type": "superseded"})
+                break
+
             is_first = (iteration == 1)
             # Always use the requested model — no separate vision model needed.
             # Configure trinity-default in litellm_config.yaml to be vision-capable;
@@ -5378,6 +5404,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             # Hit the iteration ceiling
             print(f"⚠️  Agent loop reached max iterations ({MAX_ITERATIONS})")
             ai_reply += f"\n\n[⚠️ Agent reached max reasoning steps ({MAX_ITERATIONS}). Task may be incomplete.]"
+
+        _active_runs.pop(session_id, None)  # this run is no longer the active one
 
         # In cloud mode the LLM's final text should never contain [✅ ...] blocks
         # (real results come through tool messages). Strip any the LLM hallucinated.
