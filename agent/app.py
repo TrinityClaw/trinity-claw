@@ -3212,20 +3212,39 @@ def health():
         "chroma_connected": collection is not None
     }
 
-@app.get("/version")
-def version():
-    """Return the current deployed git commit SHA for update checking."""
-    import subprocess
+# ── Deployed git SHA resolution ──────────────────────────────────────────────
+# Docker images are built with COPY (no .git inside), so the SHA is provided
+# by the install scripts / one-click updater via the TRINITY_GIT_SHA env var
+# (written into .env), with a .git-sha file and plain git as fallbacks.
+_GIT_SHA_FILE = "/app/.git-sha"
+
+
+def _resolve_deployed_sha() -> str:
+    env_sha = (os.getenv("TRINITY_GIT_SHA") or "").strip()
+    if env_sha and env_sha.lower() != "unknown":
+        return env_sha
     try:
-        sha = subprocess.check_output(
+        with open(_GIT_SHA_FILE, encoding="utf-8") as f:
+            file_sha = f.readline().strip()
+        if file_sha and file_sha.lower() != "unknown":
+            return file_sha
+    except Exception:
+        pass
+    try:
+        return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            cwd="/app",
+            cwd=str(Path(__file__).parent),
             stderr=subprocess.DEVNULL,
             timeout=5
         ).decode().strip()
     except Exception:
-        sha = "unknown"
-    return {"version": VERSION, "sha": sha}
+        return "unknown"
+
+
+@app.get("/version")
+def version():
+    """Return the current deployed git commit SHA for update checking."""
+    return {"version": VERSION, "sha": _resolve_deployed_sha()}
 
 @app.get("/memory/inspect", dependencies=[Depends(verify_api_key)])
 def memory_inspect(limit: int = 20):
