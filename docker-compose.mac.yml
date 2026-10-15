@@ -79,6 +79,19 @@ services:
       - litellm
       - chroma
 
+  # ── One-click updater (localhost only!) — see docker-compose.yml ─────────
+  updater:
+    build: ./updater
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8002:8002"
+    env_file: .env
+    volumes:
+      - ./:/repo:rw
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    depends_on:
+      - trinity-agent
+
 volumes:
   chroma_data:
   pg_data:

@@ -78,6 +78,7 @@ services:
       - LITELLM_MASTER_KEY=sk-1234567890
       - PYTHONUNBUFFERED=1
     volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
       - "./memory:/app/memory:rw"
       - "./agent/skills/dynamic:/app/skills/dynamic:rw"
       - "./.env:/app/.env"
@@ -89,6 +90,23 @@ services:
     depends_on:
       - litellm
       - chroma
+
+  # ── One-click updater (localhost only!) ──────────────────────────────────
+  # Powers the "Update now" button in the web UI: git pull on the host repo
+  # + recreate agent/web containers. Has the Docker socket and a rw mount of
+  # the install folder — 127.0.0.1 binding and the X-API-Key check are the
+  # only things keeping it off the network. Do NOT publish it publicly.
+  updater:
+    build: ./updater
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8002:8002"
+    env_file: .env
+    volumes:
+      - ./:/repo:rw
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    depends_on:
+      - trinity-agent
 
 volumes:
   chroma_data:
