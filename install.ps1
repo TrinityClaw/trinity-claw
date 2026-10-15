@@ -161,6 +161,16 @@ if ($modelSource -eq '') { $modelSource = 'cloud' }
 # Generate a secure random agent API key
 $trinityKey = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 
+# Record the installed version so the UI's update checker knows what's running.
+# git clone -> exact SHA; ZIP download -> latest commit on GitHub (approximate).
+$gitSha = git rev-parse HEAD 2>$null
+if (-not $gitSha) {
+    try {
+        $gitSha = (Invoke-RestMethod -Uri "https://api.github.com/repos/TrinityClaw/trinity-claw/commits/main" -TimeoutSec 10).sha
+    } catch { $gitSha = $null }
+}
+if (-not $gitSha) { $gitSha = "unknown" }
+
 if ($modelSource -eq "local") {
 
     # -- LOCAL (Ollama) path --
@@ -181,6 +191,7 @@ LITELLM_MASTER_KEY=sk-trinity-local-key
 MODEL_SOURCE=local
 OLLAMA_MODEL=$ollamaModel
 TRINITY_API_KEY=$trinityKey
+TRINITY_GIT_SHA=$gitSha
 "@
 
     if (-not (Test-Path "config")) { New-Item -ItemType Directory -Path "config" | Out-Null }
@@ -321,6 +332,7 @@ LITELLM_MASTER_KEY=sk-trinity-local-key
 MODEL_SOURCE=cloud
 $apiKeyName=$apiKeyPlain
 TRINITY_API_KEY=$trinityKey
+TRINITY_GIT_SHA=$gitSha
 "@
 
     if (-not (Test-Path "config")) { New-Item -ItemType Directory -Path "config" | Out-Null }

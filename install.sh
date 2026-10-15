@@ -290,6 +290,16 @@ done
 echo ""
 echo -e "\033[33m[3/5] Configuring environment...\033[0m"
 
+# Record the installed version so the UI's update checker knows what's running.
+# git clone → exact SHA; ZIP download → latest commit on GitHub (approximate).
+GIT_SHA=$(git rev-parse HEAD 2>/dev/null)
+if [ -z "$GIT_SHA" ]; then
+    GIT_SHA=$(curl -s --max-time 10 \
+        https://api.github.com/repos/TrinityClaw/trinity-claw/commits/main \
+        | grep -m1 '"sha"' | cut -d'"' -f4)
+fi
+[ -z "$GIT_SHA" ] && GIT_SHA="unknown"
+
 # Re-run safety: back up any existing config before overwriting
 backup_file ".env"
 backup_file "trinity-key.txt"
@@ -351,6 +361,7 @@ LITELLM_MASTER_KEY=sk-trinity-local-key
 MODEL_SOURCE=local
 OLLAMA_MODEL=qwen3.5:9b
 TRINITY_API_KEY=${two_key}
+TRINITY_GIT_SHA=${GIT_SHA}
 EOF
 
     mkdir -p config
@@ -483,6 +494,7 @@ LITELLM_MASTER_KEY=sk-trinity-local-key
 MODEL_SOURCE=cloud
 ${api_key_name}=${api_key_value}
 TRINITY_API_KEY=${two_key}
+TRINITY_GIT_SHA=${GIT_SHA}
 EOF
 
     mkdir -p config
