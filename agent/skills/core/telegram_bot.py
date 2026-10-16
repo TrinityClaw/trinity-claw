@@ -1,8 +1,11 @@
 import os
+import json
 import requests
 import threading
 import time
 import queue
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import logging
@@ -270,12 +273,127 @@ def _poll_updates():
             time.sleep(max_backoff)
             consecutive_errors = 0
 
+def _load_pending_proposal() -> dict:
+    """The active automation proposal (or {}). Expired after 48h."""
+    try:
+        p = Path("/app/memory/pending_proposals.json")
+        if not p.exists():
+            return {}
+        d = json.loads(p.read_text(encoding="utf-8") or "{}")
+        now = datetime.now()
+        for pid, prop in list(d.items()):
+            try:
+                created = datetime.fromisoformat(prop.get("created", ""))
+                if (now - created).total_seconds() > 48 * 3600:
+                    d.pop(pid, None)
+            except Exception:
+                d.pop(pid, None)
+        if not d:
+            p.write_text("{}", encoding="utf-8")
+            return {}
+        return d  # all active proposals (usually 0 or 1)
+    except Exception:
+        return {}
+
+
+def _clear_pending_proposal(pid: str = None) -> None:
+    try:
+        p = Path("/app/memory/pending_proposals.json")
+        if not p.exists():
+            return
+        d = json.loads(p.read_text(encoding="utf-8") or "{}")
+        if pid:
+            d.pop(pid, None)
+        else:
+            d.clear()
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _accept_pending_proposal(prop: dict, from_chat_id: str) -> None:
+    """Build the proposed skill ASYNCHRONOUSLY on an isolated fresh session —
+    acks instantly and reports back when done. Model speed is irrelevant:
+    15-min budget, no chat history, so even a 27B on mid-range hardware
+    finishes well inside it."""
+    import re as _re
+    chain = prop.get("chain", "")
+    task = prop.get("task", "")
+    _clear_pending_proposal(prop.get("id"))  # immediately — no double-accept
+    queue_message(
+        "🛠️ On it — building a skill for:\n"
+        f"  <i>{chain}</i>\n"
+        "I'll message you here when it's ready (this can take a few minutes)."
+    )
+
+    def _build():
+        try:
+            prompt = (
+                "Create a new dynamic skill with ONE create_skill call. "
+                f"Skill purpose: automate this repeated workflow: {chain}. "
+                f"Example task it should handle: {task}. "
+                "Contract: NAME, DOC, __all__=['NAME','DOC','run'] and one function "
+                "run(task='') that performs the workflow steps. To call other skills "
+                "from inside the skill, use this exact helper (copy it verbatim):\n"
+                "import os, requests\n"
+                "def _call(skill, func, *args, **kwargs):\n"
+                "    r = requests.post(os.getenv('TRINITY_SELF_BASE', 'http://localhost:8001') + '/skill/call', "
+                "json={'skill': skill, 'function': func, 'args': list(args), 'kwargs': kwargs}, "
+                "headers={'X-API-Key': os.getenv('TRINITY_API_KEY', '')}, timeout=120)\n"
+                "    d = r.json()\n"
+                "    if not d.get('success'):\n"
+                "        raise RuntimeError(str(d.get('error'))[:200])\n"
+                "    return d.get('result')\n"
+                "Map the chain steps to sensible run() behavior with clear prints. "
+                "Reply with ONLY the skill name and its one-line usage."
+            )
+            resp = _session.post(
+                _trinity_url,
+                json={"message": prompt, "session_id": f"skillbuild_{prop.get('id', 'x')}"},
+                headers={"X-API-Key": _api_key, "Content-Type": "application/json"},
+                timeout=(5, 900),
+            )
+            if resp.status_code == 200:
+                out = str(resp.json().get("reply", "")).strip()
+                queue_message(f"✅ Skill build attempt finished:\n{out[:1500]}")
+            else:
+                queue_message(f"⚠️ Skill build failed: HTTP {resp.status_code} — ask me manually anytime.")
+        except Exception as e:
+            logger.error(f"Skill build error: {e}")
+            queue_message(f"⚠️ Skill build error: {str(e)[:200]}. The skill may still have been created — check skills/dynamic.")
+
+    threading.Thread(target=_build, daemon=True, name="tg-skillbuild").start()
+
+
+def _try_pending_command(text: str, from_chat_id: str) -> bool:
+    """If text is a build/decline reply to a pending proposal, handle it WITHOUT
+    the LLM and return True (consumed). Plain chat returns False."""
+    import re as _re
+    pending = _load_pending_proposal()
+    if not pending:
+        return False
+    prop = list(pending.values())[0]
+    low = text.strip().lower()
+    if low in ("no", "nope", "decline", "skip", "not now", "don't", "dont"):
+        _clear_pending_proposal(prop.get("id"))
+        queue_message("👍 OK, skipped — I won't build it.")
+        return True
+    if _re.fullmatch(r"(yes|y|build|build it|build \d*|go ahead|do it)[.!]?", low):
+        _accept_pending_proposal(prop, from_chat_id)
+        return True
+    return False
+
+
 def _handle_incoming_message(text: str, from_chat_id: str = ""):
     """Handle incoming message - forward to Trinity with auth, queue response"""
     try:
         if not _api_key:
             logger.error("TRINITY_API_KEY not set — cannot forward message to Trinity")
             queue_message("⚠️ Bot not fully configured: Trinity API key missing.")
+            return
+
+        # Pending automation proposal? 'build'/'no' are handled without the LLM.
+        if _try_pending_command(text, from_chat_id):
             return
 
         # Use the Telegram chat_id as a stable session so Trinity keeps context
@@ -637,7 +755,11 @@ def _handle_incoming_voice(voice_obj: dict, from_chat_id: str):
 
         # Echo transcript so user can see what was understood
         queue_message(f"🎤 <i>{text}</i>")
-        
+
+        # Pending automation proposal? 'build'/'no' handled without the LLM.
+        if _try_pending_command(text, from_chat_id):
+            return
+
         queue_message("🤔 <i>Thinking about your voice message...</i>")
 
         # Forward transcribed text to Trinity
