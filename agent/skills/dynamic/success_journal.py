@@ -59,20 +59,24 @@ def record(task: str = "", tools_used: int = 0, duration_s: int = 0,
 
 def recent(n: int = 3, memory_dir=None) -> list:
     """Last n entries as formatted strings (oldest first). Empty list if none."""
+    return [
+        f"[{e.get('ts', '?')}] {e.get('task', '?')} "
+        f"({e.get('tools_used', 0)} tools, {e.get('duration_s', 0)}s) "
+        f"via {e.get('skills_chain', '?')}"
+        for e in records(n, memory_dir)
+    ]
+
+
+def records(n: int = 100, memory_dir=None) -> list:
+    """Last n entries as parsed dicts (oldest first). Empty list if none."""
     p = _path(memory_dir)
     if not p.exists():
         return []
     out = []
     try:
-        lines = p.read_text(encoding="utf-8").splitlines()[-max(1, int(n)):]
-        for line in lines:
+        for line in p.read_text(encoding="utf-8").splitlines()[-max(1, int(n)):]:
             try:
-                e = json.loads(line)
-                out.append(
-                    f"[{e.get('ts', '?')}] {e.get('task', '?')} "
-                    f"({e.get('tools_used', 0)} tools, {e.get('duration_s', 0)}s) "
-                    f"via {e.get('skills_chain', '?')}"
-                )
+                out.append(json.loads(line))
             except Exception:
                 continue
     except Exception:
