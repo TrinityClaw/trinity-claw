@@ -3878,6 +3878,73 @@ def transcribe(req: TranscribeRequest):
 
 # ============================================================================
 
+def _maybe_push_automation(successful_skills: list, task_snippet: str) -> None:
+    """Push a CONCRETE skill-automation proposal to Telegram when the same skill
+    chain (first 3 steps) has run on 3+ DISTINCT days (success_journal records).
+    One push per chain, ever. Writes a pending proposal that telegram_bot's
+    'build' handler executes asynchronously (isolated session, 15-min budget),
+    so model speed never matters."""
+    _tg = skills.get("telegram_bot")
+    if _tg is None or not hasattr(_tg, "send"):
+        return
+    chain = [s for s in successful_skills if s][:3]
+    if len(chain) < 2:
+        return
+    chain_key = ", ".join(chain)
+
+    _sj = skills.get("success_journal")
+    if _sj is None or not hasattr(_sj, "records"):
+        return
+    days = set()
+    last_task = task_snippet
+    for rec in _sj.records(200):
+        if str(rec.get("skills_chain", "")).startswith(chain_key.split(",")[0]):
+            if all(step in str(rec.get("skills_chain", "")) for step in chain):
+                days.add(str(rec.get("ts", ""))[:10])
+                last_task = str(rec.get("task", "")) or last_task
+    if len(days) < int(os.getenv("AUTOMATION_PUSH_MIN_DAYS", "3")):
+        return
+
+    import hashlib as _hl
+    _base = Path(os.getenv("TRINITY_MEMORY_DIR", "/app/memory"))
+    _tracker_p = _base / "suggestion_outcomes.json"
+    try:
+        _tr = json.loads(_tracker_p.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        _tr = {}
+    _h = _hl.sha1(chain_key.encode("utf-8", "ignore")).hexdigest()[:12]
+    _e = _tr.get(_h) or {"count": len(days), "status": "new"}
+    if _e.get("status", "new") != "new":
+        return  # already pushed / accepted / declined
+    _e.update({"count": len(days), "text": chain_key[:80], "status": "pushed"})
+    _tr[_h] = _e
+    if len(_tr) > 200:
+        _tr = dict(sorted(_tr.items(), key=lambda kv: kv[1].get("count", 0))[-100:])
+    _tracker_p.write_text(json.dumps(_tr, ensure_ascii=False), encoding="utf-8")
+
+    _pending_p = _base / "pending_proposals.json"
+    proposal_id = _h[:6]
+    _pending = {
+        proposal_id: {
+            "id": proposal_id,
+            "chain": chain_key,
+            "task": last_task[:200],
+            "created": datetime.now().isoformat(timespec="seconds"),
+        }
+    }
+    _pending_p.write_text(json.dumps(_pending, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _tg.send(
+        f"🛠️ I noticed you run the same workflow on {len(days)} different days:\n"
+        f"  {chain_key}\n"
+        f"Most recently: \"{last_task[:120]}\"\n\n"
+        "Want me to turn it into a one-command skill? Reply 'build' and I'll "
+        "create it in skills/dynamic (you can review or delete it there). "
+        "Reply 'no' to skip."
+    )
+    print(f"💡 Automation proposal pushed to Telegram ({chain_key}, {len(days)} days)")
+
+
 @app.post("/chat")
 def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     _check_rate_limit(api_key)
@@ -5590,41 +5657,18 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     _post_task_suggestion_path.parent.mkdir(parents=True, exist_ok=True)
                     _post_task_suggestion_path.write_text(suggestion[:500], encoding="utf-8")
                     print(f"💡 Post-task suggestion cached for session {_session_id_snap[:12]}...")
-                    # Repeat tracking: 2nd sighting of the SAME suggestion → push
-                    # to Telegram once ("want me to automate this?"). First sighting
-                    # stays file-only (injected at next session start, as before).
+
+                # Telegram automation push — ONLY for genuinely repeated workflows:
+                # same skill chain (first 3 steps) run on 3+ distinct days per
+                # success_journal. Generic boilerplate suggestions ("note saved,
+                # want a reminder?") are never pushed — those repeated daily and
+                # were noise. Max ONE push per chain, ever. The user accepts with
+                # 'build' (handled asynchronously by telegram_bot — no LLM inline).
+                if successful_skills and os.getenv("TELEGRAM_BOT_TOKEN"):
                     try:
-                        import hashlib as _hl
-                        _tracker_p = Path("/app/memory/suggestion_outcomes.json")
-                        try:
-                            _tr = json.loads(_tracker_p.read_text(encoding="utf-8") or "{}")
-                        except Exception:
-                            _tr = {}
-                        _h = _hl.sha1(suggestion[:200].encode("utf-8", "ignore")).hexdigest()[:12]
-                        _e = _tr.get(_h) or {"count": 0, "status": "new"}
-                        _e["count"] = int(_e.get("count", 0)) + 1
-                        _e["text"] = suggestion[:80]
-                        _tr[_h] = _e
-                        if len(_tr) > 200:
-                            _tr = dict(sorted(_tr.items(), key=lambda kv: kv[1].get("count", 0))[-100:])
-                        _tracker_p.write_text(json.dumps(_tr, ensure_ascii=False), encoding="utf-8")
-                        if _e["count"] >= 2 and _e.get("status", "new") == "new" and os.getenv("TELEGRAM_BOT_TOKEN"):
-                            _tg = skills.get("telegram_bot")
-                            if _tg is not None and hasattr(_tg, "send"):
-                                try:
-                                    _tg.send(
-                                        "💡 Repeating pattern — want me to automate this?\n"
-                                        + suggestion[:350]
-                                        + "\n\nReply 'yes, make it a skill' and I'll build it in skills/dynamic (you can review or delete it there)."
-                                    )
-                                    _e["status"] = "pushed"
-                                    _tr[_h] = _e
-                                    _tracker_p.write_text(json.dumps(_tr, ensure_ascii=False), encoding="utf-8")
-                                    print(f"💡 Suggestion pushed to Telegram (repeat #{_e['count']})")
-                                except Exception as _tg_err:
-                                    print(f"⚠️ Telegram suggestion push failed: {_tg_err}")
-                    except Exception as _tr_err:
-                        print(f"⚠️ Suggestion tracker error: {_tr_err}")
+                        _maybe_push_automation(successful_skills, str(_user_msg_snap))
+                    except Exception as _pa_err:
+                        print(f"⚠️ Automation push error: {_pa_err}")
             except Exception as _sug_err:
                 print(f"⚠️ Post-task suggestion error: {_sug_err}")
 
