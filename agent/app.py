@@ -66,7 +66,7 @@ print("🚀 TrinityClaw Agent is starting up...")
 SKILLS_DIR = Path(__file__).parent / "skills"
 sys.path.insert(0, str(SKILLS_DIR))
 sys.path.insert(0, str(Path(__file__).parent))
-from mcp_universal import render_mcp_docs, normalize_mcp_tags, parse_mcp_args
+from mcp_universal import normalize_mcp_tags, parse_mcp_args
 
 app = FastAPI()
 
@@ -187,18 +187,12 @@ def _supersede_active_run(session_id: str) -> None:
         _old.set()
         print(f"🛑 Superseding active run for session {session_id[:12]}... (newer message arrived)")
 
-# ── ChromaDB query deduplication cache ────────────────────────────────────────
-# Keyed by (session_id:query_hash). Skips embed+network call when the same query
-# was answered recently. Caches misses too — avoids re-querying known dead-ends.
-_chroma_query_cache: Dict[str, tuple] = {}   # key -> (chroma_context_str, timestamp)
-CHROMA_CACHE_TTL  = 300   # seconds before a cache entry expires
-CHROMA_CACHE_MAX  = 100   # evict oldest entry when cache exceeds this size
 
-# ── Per-session daily-memory cache ────────────────────────────────────────────
-# Daily journal + user facts don't change within a session — build once, reuse.
-# Keyed by session_id; invalidated when session expires (see get_session_history).
-_session_daily_memory: Dict[str, str] = {}  # session_id -> _daily_memory_block
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Per-session frozen memory snapshot (Hermes-style) ────────────────────────
+# Tier-1 blocks (USER.md, MEMORY.md, top lessons, tasks, gated checkpoint,
+# skill-health) are built ONCE per session and never re-shipped per turn.
+# Mid-session memory writes persist to disk but appear only next session.
+_session_memory_snapshot: Dict[str, str] = {}
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
 RATE_LIMIT_RPM = int(os.getenv("CHAT_RATE_LIMIT_RPM", "20"))  # requests per minute per API key
@@ -1255,32 +1249,6 @@ def save_to_jsonl(user_message: str, ai_reply: str, metadata: Optional[Dict] = N
     except Exception as e:
         print(f"⚠️  Error saving to JSONL: {e}")
 
-def load_past_context(n_messages: int = 5) -> str:
-    """Load recent conversations from JSONL file."""
-    try:
-        if not os.path.exists(MEMORY_FILE):
-            return "No prior conversations yet."
-
-        with open(MEMORY_FILE, "r") as f:
-            lines = f.readlines()
-
-        if not lines:
-            return "No prior conversations yet."
-
-        recent = lines[-n_messages:] if len(lines) >= n_messages else lines
-        context_parts = []
-        for line in recent:
-            try:
-                entry = json.loads(line)
-                context_parts.append(f"User: {entry['user']}\nAssistant: {entry['assistant']}")
-            except json.JSONDecodeError:
-                continue
-
-        return "\n\n".join(context_parts) if context_parts else "No prior conversations yet."
-    except Exception as e:
-        print(f"⚠️  Error loading JSONL: {e}")
-        return "No prior conversations yet."
-
 def _sanitize_external_content(text: str, source: str = "unknown") -> str:
     """Scan externally-sourced text for prompt injection patterns before injecting
     it into the system prompt.
@@ -1782,28 +1750,6 @@ def _detect_task_type(user_msg: str, skills_used: list) -> str:
         return "files"
     return "chat"
 
-def _compute_memory_score(dist: float, hit_count: int, timestamp_str: str,
-                          alpha: float = 0.6, beta: float = 0.2, gamma: float = 0.2,
-                          decay_rate: float = 0.05) -> float:
-    """Combined memory relevance score: cosine similarity + usage frequency + recency.
-
-    alpha:      weight for relevance  (cosine similarity, 1 - distance)
-    beta:       weight for frequency  (log-scaled hit count)
-    gamma:      weight for recency    (exponential decay over days)
-    decay_rate: daily decay constant  (0.05 → ~70% retained after 7 days)
-    Returns a value in [0, 1] — higher means more worth injecting.
-    """
-    relevance = max(0.0, 1.0 - dist)
-    frequency = math.log1p(min(hit_count, 100)) / math.log1p(100)
-    try:
-        stored_dt = datetime.fromisoformat(timestamp_str)
-        days_old = (datetime.now() - stored_dt).total_seconds() / 86400
-    except Exception:
-        days_old = 30
-    recency = math.exp(-decay_rate * max(0.0, days_old))
-    return alpha * relevance + beta * frequency + gamma * recency
-
-
 def store_memory_separate(user_msg: str, ai_reply: str, task_type: str = "general", session_id: Optional[str] = None):
     """Store user query and AI response separately in ChromaDB for better retrieval."""
     if not collection:
@@ -1919,7 +1865,7 @@ def _remove_last_turn_from_disk(session_id: str) -> bool:
 # Written when a session expires (2h inactivity) or via /session/compress.
 # Re-injected once at the start of the next session so conversation context
 # survives across days — the piece in-session auto-compaction can't provide.
-CHECKPOINT_MAX_AGE_HOURS = 48
+CHECKPOINT_MAX_AGE_DAYS = int(os.getenv("CHECKPOINT_MAX_AGE_DAYS", "7"))
 CHECKPOINT_MAX_CHARS = 800
 _CHECKPOINTS_KEEP = 10
 
@@ -1954,20 +1900,29 @@ def _save_session_checkpoint(session_id: str, summary: str, turns: int) -> None:
     except Exception as e:
         print(f"⚠️  Checkpoint save failed: {e}")
 
-def _load_session_checkpoint(session_id: str) -> str:
-    """Return the most relevant recent checkpoint: this session's if present,
-    else the most recent one (single-user setup). Empty if none are recent."""
+def _checkpoint_tokens(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower())}
+
+
+def _load_session_checkpoint(session_id: str, msg_words: set = None) -> str:
+    """Return a checkpoint only if relevant: this session's if present,
+    else another session's ONLY when recent and topic-matching (≥2 keyword
+    overlap, tokens normalized on both sides). Guards against injecting an
+    unrelated stale summary. NOTE: callers (Task 8 snapshot builder) must
+    pass msg_words; msg_words=None disables the gate."""
     data = _load_session_checkpoints()
     if not data:
         return ""
     from datetime import timedelta as _td
-    cutoff = datetime.now() - _td(hours=CHECKPOINT_MAX_AGE_HOURS)
+    cutoff = datetime.now() - _td(days=CHECKPOINT_MAX_AGE_DAYS)
     candidates = []
     for sid, ck in data.items():
         if not isinstance(ck, dict):
             continue
         try:
             ts = datetime.fromisoformat(ck.get("timestamp", ""))
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
         except Exception:
             continue
         if ts < cutoff:
@@ -1975,8 +1930,174 @@ def _load_session_checkpoint(session_id: str) -> str:
         candidates.append((ts, sid == session_id, ck.get("summary", "")))
     if not candidates:
         return ""
+    # Own-session checkpoint wins if present (recency tie-break); the gate
+    # is evaluated once per session on the FIRST message — a greeting's
+    # sparse vocabulary can legitimately defer foreign context until next session.
     candidates.sort(key=lambda c: (c[1], c[0]), reverse=True)
-    return candidates[0][2][:CHECKPOINT_MAX_CHARS]
+    best_sid_match = candidates[0][1]
+    summary = candidates[0][2][:CHECKPOINT_MAX_CHARS]
+    if best_sid_match:
+        return summary
+    # Foreign-session checkpoint: require topic overlap.
+    if msg_words:
+        msg_tokens = _checkpoint_tokens(" ".join(msg_words))
+        overlap = _checkpoint_tokens(summary) & msg_tokens
+        if len(overlap) < 2:
+            return ""
+    return summary
+
+
+def _memory_lessons_top(msg_words: set, domain_map: dict, cap: int = 3) -> str:
+    """Top-N deduplicated lessons, keyword-matched ones first."""
+    import hashlib as _hl
+    try:
+        from pathlib import Path as _P
+        _lf = _P(os.getenv("MEMORY_HOME", "/app/memory")) / "lessons.jsonl"
+        raw = _lf.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return ""
+    seen, uniq = {}, []
+    for _rl in reversed([r for r in (l.strip() for l in raw) if r]):
+        try:
+            _l = json.loads(_rl)
+        except Exception:
+            continue
+        if not isinstance(_l, dict) or not _l.get("fix_applied"):
+            continue
+        if _l.get("type") == "correction":
+            _key = "correction:" + _hl.md5(str(_l.get("bad_reply_preview", ""))[:100].encode()).hexdigest()[:12]
+        else:
+            _key = f"{_l.get('skill','?')}:{_l.get('error_type','?')}"
+        if _key not in seen:
+            seen[_key] = _l
+            uniq.append(_l)
+    if not uniq:
+        return ""
+    match_first, rest = [], []
+    msg_tokens = _msg_tokens(" ".join(msg_words)) if msg_words else set()
+    for _l in uniq:
+        kw = domain_map.get(_l.get("skill", "").split(".")[0], set()) if domain_map else set()
+        (match_first if (kw and (msg_tokens & kw)) else rest).append(_l)
+    lines = []
+    for _l in (match_first + rest)[:cap]:
+        fx = _sanitize_external_content(str(_l["fix_applied"])[:150], source="lessons.jsonl")
+        if _l.get("type") == "correction" and _l.get("bad_reply_preview"):
+            _safe_bad = _sanitize_external_content(str(_l["bad_reply_preview"])[:100], source="lessons.jsonl")
+            lines.append(f'- [user_correction] I said: "{_safe_bad}" → {fx}')
+        else:
+            lines.append(f"- [{_l.get('skill','?')}] {_l.get('error_type','?')}: fix → {fx}")
+    return "\n".join(lines)
+
+
+def _memory_tasks_block() -> str:
+    try:
+        from pathlib import Path as _P
+        _p = _P(os.getenv("MEMORY_HOME", "/app/memory")) / "scheduled_tasks.json"
+        _data = json.loads(_p.read_text(encoding="utf-8"))
+        if not _data:
+            return ""
+        _lines = [f"Active scheduled tasks ({len(_data)}):"]
+        for _sn, _st in _data.items():
+            _kind = "recurring" if _st.get("type") == "recurring" else "once"
+            _ivl = f" every {_st['interval_seconds']}s" if _st.get("interval_seconds") else ""
+            _lines.append(f'  - "{_sn}" [{_kind}{_ivl}] next: {str(_st.get("next_run","?"))[:16]}'
+                          f' | prompt: "{str(_st.get("prompt",""))[:80]}"')
+        return "\n".join(_lines)
+    except Exception:
+        return ""
+
+
+def _memory_skill_health() -> str:
+    try:
+        from pathlib import Path as _P
+        _p = _P(os.getenv("MEMORY_HOME", "/app/memory")) / "self_improve_check.json"
+        if not _p.exists():
+            return ""
+        _cache = json.loads(_p.read_text(encoding="utf-8"))
+        _age_h = (datetime.now() - datetime.fromisoformat(_cache.get("checked_at", "2000-01-01"))).total_seconds() / 3600
+        if _cache.get("improve") and _age_h < 48:
+            return (f"\n⚠️ RECURRING FAILURES: {_cache.get('reason', '')}\n"
+                    f"Recommended action: autoimprove.run_loop('{_cache.get('suggested_loop', 'error_reduce')}')\n")
+    except Exception:
+        pass
+    return ""
+
+
+def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool, domain_map: dict) -> str:
+    """Tier-1 frozen memory snapshot. Built once per session, budget-enforced.
+    Priority order: USER.md → MEMORY.md → top-3 lessons → scheduled tasks →
+    gated checkpoint → skill-health. Over-budget optional blocks are dropped
+    (lowest priority first)."""
+    cached = _session_memory_snapshot.get(session_id)
+    if cached is not None:
+        return cached
+    temp_blocks: list = []
+    used_budget = [0]
+
+    def _fits(block_text: str) -> bool:
+        prefix = "LOCAL" if is_local_model else "CLOUD"
+        budget = int(os.getenv(f"MEMORY_BUDGET_TOKENS_{prefix}", "2500" if is_local_model else "4000"))
+        return used_budget[0] + _est_tokens(block_text) <= budget
+
+    try:
+        from skills.core import _memory_store as memory_core
+    except Exception:
+        memory_core = None
+
+    # 1) USER.md (unconditional; may exceed tiny custom budgets by design)
+    if memory_core:
+        try:
+            u = memory_core.render("user")
+            if u:
+                u_block = "## USER (profile — yours to curate via memory skill)\n" + u
+                temp_blocks.append(u_block)
+                used_budget[0] += _est_tokens(u_block)
+        except Exception:
+            pass
+        # 2) MEMORY.md (unconditional; may exceed tiny custom budgets by design)
+        try:
+            m = memory_core.render("memory")
+            if m:
+                m_block = "## AGENT MEMORY (facts, conventions, lessons)\n" + m
+                temp_blocks.append(m_block)
+                used_budget[0] += _est_tokens(m_block)
+        except Exception:
+            pass
+
+    # 3) Top-3 lessons
+    les = _memory_lessons_top(msg_words, domain_map)
+    if les:
+        les_block = "<LEARNED_LESSONS>\nPast mistakes (apply before related skills):\n" + les + "</LEARNED_LESSONS>"
+        if _fits(les_block):
+            temp_blocks.append(les_block)
+            used_budget[0] += _est_tokens(les_block)
+
+    # 4) Scheduled tasks
+    tasks = _memory_tasks_block()
+    if tasks and _fits(tasks):
+        temp_blocks.append(tasks)
+        used_budget[0] += _est_tokens(tasks)
+
+    # 5) Relevance-gated checkpoint
+    ck = _load_session_checkpoint(session_id, msg_words)
+    if ck:
+        ck_block = "Last conversation checkpoint:\n" + ck
+        if _fits(ck_block):
+            temp_blocks.append(ck_block)
+            used_budget[0] += _est_tokens(ck_block)
+
+    # 6) Skill-health warning (small; still budget-checked)
+    sh = _memory_skill_health()
+    if sh:
+        sh_block = sh.strip()
+        if _fits(sh_block):
+            temp_blocks.append(sh_block)
+            used_budget[0] += _est_tokens(sh_block)
+
+    snap = "\n\n".join(temp_blocks) if temp_blocks else "Memory empty."
+    if temp_blocks:
+        _session_memory_snapshot[session_id] = snap
+    return snap
 
 
 def get_session_history(session_id: str) -> List[Dict]:
@@ -2012,7 +2133,7 @@ def get_session_history(session_id: str) -> List[Dict]:
                 # Cross-session checkpoint: survives even if ChromaDB failed
                 _save_session_checkpoint(session_id, summary, len(msgs) // 2)
         del session_store[session_id]
-        _session_daily_memory.pop(session_id, None)
+        _session_memory_snapshot.pop(session_id, None)
         print(f"🕐 Session {session_id[:12]}... expired after {elapsed_minutes:.0f}min")
         return []
     return entry["messages"]
@@ -3366,6 +3487,7 @@ def clear_session(session_id: str):
     _save_plan(session_id, [])
     if session_id in session_store:
         del session_store[session_id]
+        _session_memory_snapshot.pop(session_id, None)
         return {"success": True, "message": f"Session cleared — next message starts fresh"}
     return {"success": True, "message": "Session not found (already empty)"}
 
@@ -3397,7 +3519,7 @@ def compress_session_endpoint(session_id: str):
         _save_session_checkpoint(sid, summary, len(msgs) // 2)
     if sid in session_store:
         del session_store[sid]
-    _session_daily_memory.pop(sid, None)
+    _session_memory_snapshot.pop(sid, None)
     return {
         "success": True,
         "message": "Session compressed — checkpoint saved, next message starts fresh",
@@ -3960,111 +4082,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     _cancel_event = threading.Event()
     _active_runs[session_id] = _cancel_event
 
-    # 1. Retrieve long-term memory from ChromaDB.
-    # Skip entirely when:
-    #   a) Message is too short/conversational (embedding noise)
-    #   b) We already have an active session — the session IS the context. Injecting
-    #      semantically-similar-but-unrelated old answers causes the model to answer
-    #      the PREVIOUS question instead of the current one.
-    # Combined score floor — memories below this are not injected.
-    # Score = 0.6*relevance + 0.2*frequency + 0.2*recency (see _compute_memory_score).
-    # CHROMA_MIN_RELEVANCE is a hard gate on cosine similarity alone (1 - dist).
-    # This prevents frequency/recency from rescuing an irrelevant memory — a memory
-    # that was accessed 50 times but is about a completely different topic should never
-    # be injected. Frequency/recency only affect ranking among memories that already
-    # clear the relevance gate.
-    _req_m_early = (req.model or "").lower()
-    _is_local_chroma = (
-        os.getenv("MODEL_SOURCE", "cloud") == "local"
-        or any(k in _req_m_early for k in ("ollama", "qwen", "llama", "deepseek", "phi", "gemma"))
-    )
-    # Local models: strict thresholds to prevent topic drift on small context windows.
-    # Cloud models: relaxed thresholds for broader recall.
-    if _is_local_chroma:
-        CHROMA_MIN_RELEVANCE = 0.75     # very high cosine similarity required
-        CHROMA_MIN_SCORE = 0.72         # combined score must also be high
-        CHROMA_SKIP_IF_TURNS = 1        # only inject on the very first user turn
-        CHROMA_MAX_CHARS = 150          # hard cap on injected text length
-    else:
-        CHROMA_MIN_RELEVANCE = 0.60     # hard floor: dist must be <= 0.40
-        CHROMA_MIN_SCORE = 0.65         # combined score floor
-        CHROMA_SKIP_IF_TURNS = 1        # only inject on the very first user turn
-        CHROMA_MAX_CHARS = 600          # cap injected text to keep prompt lean
-    chroma_context = ""
-    active_turns = len([m for m in history if m.get("role") == "user"])
-    if collection and len(req.message.strip()) > 40 and active_turns < CHROMA_SKIP_IF_TURNS:
-        # Query dedup: skip embed+network call if same query was answered recently
-        _qhash = hashlib.md5(req.message.strip().lower().encode()).hexdigest()[:16]
-        _cache_key = f"{session_id}:{_qhash}"
-        _cached_entry = _chroma_query_cache.get(_cache_key)
-        if _cached_entry and time.time() - _cached_entry[1] < CHROMA_CACHE_TTL:
-            chroma_context = _cached_entry[0]
-            print(f"🧠 ChromaDB: cache hit (hash={_qhash})")
-        else:
-            try:
-                # Fetch 5 candidates so scoring has enough to choose from
-                memories = collection.query(query_texts=[req.message], n_results=5,
-                                            include=["documents", "metadatas", "distances"])
-                if memories['documents'] and memories['documents'][0]:
-                    scored = []
-                    ids = memories.get('ids', [[]])[0]
-                    distances = memories.get('distances', [[]])[0]
-
-                    for i, doc in enumerate(memories['documents'][0]):
-                        meta = memories['metadatas'][0][i] if memories['metadatas'] else {}
-                        dist = distances[i] if i < len(distances) else 1.0
-                        doc_id = ids[i] if i < len(ids) else None
-                        # Never inject raw user queries — only AI responses and summaries.
-                        # Raw past queries look like commands and cause the model to answer
-                        # the OLD question instead of the current one.
-                        if meta.get('type') == 'user_query':
-                            continue
-                        # Hard relevance gate first — frequency cannot rescue a poor match
-                        relevance = max(0.0, 1.0 - dist)
-                        if relevance < CHROMA_MIN_RELEVANCE:
-                            continue
-                        hit_count = int(meta.get('hit_count', 0))
-                        timestamp = meta.get('timestamp', datetime.now().isoformat())
-                        score = _compute_memory_score(dist, hit_count, timestamp)
-                        if score >= CHROMA_MIN_SCORE:
-                            scored.append((score, doc, doc_id))
-
-                    # Best matches first; inject top 1 only — less noise in the prompt
-                    scored.sort(key=lambda x: x[0], reverse=True)
-                    ai_responses = [doc for _, doc, _ in scored[:1]]
-                    used_ids = [doc_id for _, _, doc_id in scored[:1] if doc_id]
-
-                    # Increment hit_count + refresh last_accessed for retrieved memories
-                    if used_ids:
-                        now_iso = datetime.now().isoformat()
-                        for doc_id in used_ids:
-                            try:
-                                existing = collection.get(ids=[doc_id], include=["metadatas"])
-                                if existing and existing['metadatas']:
-                                    cur_meta = existing['metadatas'][0].copy()
-                                    cur_meta['hit_count'] = int(cur_meta.get('hit_count', 0)) + 1
-                                    cur_meta['last_accessed'] = now_iso
-                                    collection.update(ids=[doc_id], metadatas=[cur_meta])
-                            except Exception as upd_err:
-                                print(f"⚠️  Memory hit_count update failed: {upd_err}")
-
-                    if ai_responses:
-                        _safe_responses = [_sanitize_external_content(r, source="chromadb") for r in ai_responses]
-                        _joined = " | ".join(_safe_responses)
-                        if CHROMA_MAX_CHARS is not None:
-                            _joined = _joined[:CHROMA_MAX_CHARS]
-                        chroma_context = "Archived context (use only if directly relevant): " + _joined
-                        top_score = scored[0][0] if scored else 0
-                        print(f"🧠 ChromaDB injecting {len(ai_responses)} memory fragment(s) (top score: {top_score:.2f})")
-                    else:
-                        print(f"🧠 ChromaDB: no sufficiently relevant past answers (min score {CHROMA_MIN_SCORE})")
-            except Exception as e:
-                print(f"⚠️  ChromaDB query error: {e}")
-            # Cache fresh result — including empty string (known miss avoids re-querying)
-            _chroma_query_cache[_cache_key] = (chroma_context, time.time())
-            if len(_chroma_query_cache) > CHROMA_CACHE_MAX:
-                _evict = min(_chroma_query_cache, key=lambda k: _chroma_query_cache[k][1])
-                del _chroma_query_cache[_evict]
+    # Long-term semantic recall moved to the memory_search skill (on-demand).
 
     # 2. Build message content (vision support)
     # Resize first — NVIDIA NIM rejects large base64 payloads silently, causing hallucinations
@@ -4250,8 +4268,6 @@ Format: <skill:name.function>args</skill:name.function>
 Args: comma-separated. No args: <skill:dashboard.status></skill:dashboard.status>
 """
 
-        _search_example = "<skill:web.search>current weather New York NY</skill:web.search>"
-
         _rules_section = """\
 ## RULES
 
@@ -4265,12 +4281,6 @@ Args: comma-separated. No args: <skill:dashboard.status></skill:dashboard.status
 8. VERBATIM OUTPUT: When a result contains a URL, token, or exact string to copy — reproduce word-for-word.
 9. SCREENSHOTS: Call web.browser_screenshot AT MOST 2× per task (full_page=True captures everything). Report saved_to path."""
 
-        _read_skill_example = "  <skill:files.cat>/app/skills/core/skillname.py</skill:files.cat>"
-
-        _pref_save_instruction = (
-            "immediately call <skill:notes.set_preference>key,value,user</skill:notes.set_preference> for each specific preference detected. "
-            "Also keep the human-readable summary current: <skill:notes.save>user_preferences,[updated full preferences list]</skill:notes.save>"
-        )
     else:
         # Cloud mode: native function calling — no XML tags needed or wanted
         _skill_usage_section = """\
@@ -4282,8 +4292,6 @@ Example: web__search, google_drive__upload_to_folder.
 NEVER write fake [✅] or [❌] blocks — only real tool runs produce these.
 CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop — that produces no action."""
 
-        _search_example = "Call the web__search tool with query='current weather New York NY'"
-
         _rules_section = """\
 ## RULES
 
@@ -4294,13 +4302,6 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
 5. Multi-step tasks: brief plan, then call first tool.
 6. VERBATIM OUTPUT: When a result contains URL, token, or exact string to copy — reproduce word-for-word.
 7. SCREENSHOTS: Call web__browser_screenshot AT MOST 2× (full_page=True captures everything). Report saved_to."""
-
-        _read_skill_example = "  Call files__cat with path='/app/skills/core/skillname.py'"
-
-        _pref_save_instruction = (
-            "immediately call notes__set_preference for each specific preference detected (key=preference_name, value=preference_value, source='user'). "
-            "Also keep the human-readable summary current by calling notes__save with title='user_preferences' and the updated full preferences list."
-        )
 
     # Script-calling: multi-step tasks (3+ tool calls) collapse into ONE
     # zero-context turn - the script calls skills via RPC with no LLM in the
@@ -4335,40 +4336,37 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
     # Determine if this is a new session BEFORE any code that references _is_new_session
     _is_new_session = len(history) == 0
 
-    # Load user facts card only at session start — cached in _session_daily_memory
-    # so subsequent turns pay zero cost. get_context_for_prompt() already includes
-    # goals, preferences, patterns, and rejections in one compact block.
-    _user_facts_card = ""
-    if _is_new_session or session_id not in _session_daily_memory:
+    # ── Tier-1 frozen memory snapshot (built once per session) ────────────────
+    # (_today_str kept verbatim from the old journal loader — safe_substitute + the
+    # note/lesson directives below still need it; plan assumed it was computed elsewhere.)
+    from datetime import date as _date
+    _today_str = _date.today().isoformat()
+    _memory_snapshot = _build_memory_snapshot(session_id, _msg_words, _is_local_model, _domain_map)
+
+    # Parked idea: only when the message is improvement-related (dynamic)
+    _IDEA_KEYWORDS = {"improve", "idea", "suggestion", "better", "enhance",
+                      "optimize", "proposal", "upgrade", "autoimprove"}
+    if _msg_words & _IDEA_KEYWORDS:
         try:
-            _facts_raw = _fcache.read_text("/app/memory/user_facts.json")
-            if _facts_raw:
-                _facts = json.loads(_facts_raw)
-                _fact_lines = [
-                    f"  {k}: {v['value'] if isinstance(v, dict) else v}"
-                    for k, v in _facts.items() if not k.startswith("_")
-                ]
-                if _fact_lines:
-                    _updated = _facts.get("_updated", "")[:10]
-                    _user_facts_card = f"User Facts (last updated {_updated}):\n" + "\n".join(_fact_lines)
+            _ai_skill = skills.get("autoimprove")
+            if _ai_skill and hasattr(_ai_skill, "get_latest_idea"):
+                _latest_idea = _ai_skill.get_latest_idea()
+                if _latest_idea:
+                    _memory_snapshot += f"\n\n💡 Most recent parked idea: {_latest_idea}"
         except Exception:
             pass
 
-    # Auto-load user preferences from notes.json and build notes index (cached)
-    _pref_content = ""
-    _notes_index = ""
-    try:
-        _notes_raw = _fcache.read_text("/app/memory/notes.json")
-        _notes_data = json.loads(_notes_raw) if _notes_raw else {}
-        if "user_preferences" in _notes_data:
-            _pref_content = _notes_data["user_preferences"].get("content", "")
-        if _notes_data:
-            _note_titles = list(_notes_data.keys())
-            _notes_index = f"Saved notes ({len(_note_titles)} total): " + ", ".join(f'"{t}"' for t in _note_titles[:30])
-            if len(_note_titles) > 30:
-                _notes_index += f" ... and {len(_note_titles) - 30} more"
-    except Exception:
-        pass
+    # Post-task proactive suggestion from the PREVIOUS request's completion.
+    # One-shot: file deleted after reading. Capped at 500 chars.
+    _post_task_suggestion_path = Path(f"/app/memory/post_task_suggestion_{session_id}.txt")
+    if _post_task_suggestion_path.exists():
+        try:
+            _pts = _post_task_suggestion_path.read_text(encoding="utf-8").strip()[:500]
+            if _pts:
+                _memory_snapshot += f"\n\n💭 Follow-up suggestion:\n{_pts}"
+            _post_task_suggestion_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # Load identity file (cached)
     _identity_raw = (
@@ -4402,188 +4400,10 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         )
     _identity_content = _build_identity(_identity_raw, _msg_words)
 
-    # Load lessons: deduplicated by skill+error_type (most recent fix wins), sorted newest first (cached)
-    _lessons_lines = []
-    try:
-        _raw_lessons_text = _fcache.read_text("/app/memory/lessons.jsonl")
-        _raw_lessons = [l.strip() for l in _raw_lessons_text.splitlines() if l.strip()]
-        _seen_keys: dict = {}
-        for _raw in reversed(_raw_lessons):  # reverse so first-seen = most recent
-            try:
-                _l = json.loads(_raw)
-                if _l.get("fix_applied"):
-                    # For user corrections, use a content hash so different mistakes get separate slots
-                    if _l.get("type") == "correction":
-                        import hashlib as _hl
-                        _key = "correction:" + _hl.md5(_l.get("bad_reply_preview", "")[:100].encode()).hexdigest()[:12]
-                    else:
-                        _key = f"{_l.get('skill','?')}:{_l.get('error_type','?')}"
-                    if _key not in _seen_keys:
-                        _seen_keys[_key] = _l
-            except Exception:
-                pass
-        # Sort by timestamp descending, cap at 10 for local (tight ctx), 20 for cloud
-        _lessons_cap = 5 if _is_local_model else 20
-        _sorted_all = sorted(_seen_keys.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
-        # Reorder: lessons for skills matching the current message's keywords come first.
-        # Same cap, better signal — skills the user is about to use get their warnings up front.
-        _lessons_match, _lessons_rest = [], []
-        for _lx in _sorted_all:
-            _lx_skill = _lx.get("skill", "").split(".")[0]
-            _lx_kw = _domain_map.get(_lx_skill, set())
-            if _lx_kw and (_msg_words & _lx_kw):
-                _lessons_match.append(_lx)
-            else:
-                _lessons_rest.append(_lx)
-        _deduped = (_lessons_match + _lessons_rest)[:_lessons_cap]
-        for _l in _deduped:
-            _safe_fix = _sanitize_external_content(_l["fix_applied"][:150], source="lessons.jsonl")
-            if _l.get("type") == "correction" and _l.get("bad_reply_preview"):
-                _safe_bad = _sanitize_external_content(_l["bad_reply_preview"][:100], source="lessons.jsonl")
-                _lessons_lines.append(
-                    f"- [user_correction] I said: \"{_safe_bad}\" → {_safe_fix}"
-                )
-            else:
-                _lessons_lines.append(
-                    f"- [{_l.get('skill', '?')}] {_l.get('error_type', '?')}: fix → {_safe_fix}"
-                )
-    except Exception:
-        pass
-    _lessons_block = "\n".join(_lessons_lines) if _lessons_lines else "None yet."
-
-    # Load daily journal and user model for system prompt injection.
-    # The journal and user facts are static within a session — build once on
-    # the first turn and return the cached string on every subsequent turn.
-    # The "parked idea" block is dynamic per-message and appended separately.
-    from datetime import date as _date, timedelta as _timedelta
-    _today_str = _date.today().isoformat()
-    if _is_new_session or session_id not in _session_daily_memory:
-        _daily_memory_block = ""
-        try:
-            _journal_days = 1 if _is_local_model else 7
-            _cutoff_str = (_date.today() - _timedelta(days=_journal_days)).isoformat()
-            _journal_entries = {}
-            _journal_raw = _fcache.read_text("/app/memory/daily_journal.jsonl")
-            for _jline in _journal_raw.splitlines():
-                _jline = _jline.strip()
-                if _jline:
-                    try:
-                        _je = json.loads(_jline)
-                        if _je.get("date", "") >= _cutoff_str:
-                            _journal_entries[_je["date"]] = _je
-                    except Exception:
-                        pass
-            _journal_lines = []
-            for _je in sorted(_journal_entries.values(), key=lambda x: x["date"], reverse=True):
-                _label = "TODAY" if _je["date"] == _today_str else _je["date"]
-                _journal_lines.append(f"[{_label}] {_je.get('summary', '')[:200]}")
-                if _je.get("learned"):
-                    _learned_lines = [l for l in _je["learned"].splitlines() if l.strip()]
-                    _learned_cap   = 2
-                    _learned_shown = _learned_lines[:_learned_cap]
-                    _learned_rest  = len(_learned_lines) - _learned_cap
-                    _learned_str   = " | ".join(_learned_shown)
-                    if _learned_rest > 0:
-                        _learned_str += f" (+{_learned_rest} more)"
-                    _journal_lines.append(f"  Learned: {_learned_str}")
-                if _je.get("user_insights"):
-                    _journal_lines.append(f"  User: {_je['user_insights'][:200]}")
-                if _je.get("next_steps"):
-                    _ns = _je["next_steps"]
-                    # Skip next_steps that are purely about scheduled/recurring tasks —
-                    # they run automatically and don't need to occupy the model's attention.
-                    _sched_kw = ("schedul", "recurring", "cron", "every day", "every hour",
-                                 "nightly", "daily review", "autoimprove", "run loop")
-                    if not any(k in _ns.lower() for k in _sched_kw):
-                        _journal_lines.append(f"  Next steps promised: {_ns}")
-            _user_model_block = ""
-            _proactive_block = ""
-            try:
-                _notes_skill = skills.get("notes")
-                if _notes_skill and hasattr(_notes_skill, "get_context_for_prompt"):
-                    # Inject user model only at session start — preferences don't change
-                    # mid-session and reloading them every turn wastes context budget.
-                    if _is_new_session:
-                        _user_model_block = _notes_skill.get_context_for_prompt()
-                        # Proactive memory engine: pattern mining, goal alerts, journal insights
-                        if hasattr(_notes_skill, "suggest_actions"):
-                            _proactive_block = _notes_skill.suggest_actions(req.message)
-            except Exception:
-                pass
-            _dm_parts = []
-            if _user_facts_card:
-                _dm_parts.append(_user_facts_card)
-            if _journal_lines:
-                _dm_parts.append(f"Recent Journal (last {_journal_days} days):\n" + "\n".join(_journal_lines))
-            if _user_model_block:
-                _dm_parts.append("User Profile:\n" + _user_model_block)
-            if _proactive_block:
-                _dm_parts.append("Proactive Suggestions:\n" + _proactive_block)
-            # Cross-session checkpoint: continuity from the previous session.
-            # Injected once per session start (cached with the daily block).
-            try:
-                _ckpt = _load_session_checkpoint(session_id)
-                if _ckpt:
-                    _dm_parts.append("Last conversation checkpoint:\n" + _ckpt)
-            except Exception:
-                pass
-            _daily_memory_block = "\n\n".join(_dm_parts) if _dm_parts else "No journal entries yet."
-            # Cache for subsequent turns in this session
-            _session_daily_memory[session_id] = _daily_memory_block
-        except Exception:
-            _daily_memory_block = "No journal entries yet."
-            _session_daily_memory[session_id] = _daily_memory_block
-    else:
-        _daily_memory_block = _session_daily_memory[session_id]
-
-    # Surface the single most-recent open improvement idea when the message is
-    # improvement-related. One line only — always dynamic, never cached.
-    _IDEA_KEYWORDS = {"improve", "idea", "suggestion", "better", "enhance",
-                      "optimize", "proposal", "upgrade", "autoimprove"}
-    if _msg_words & _IDEA_KEYWORDS:
-        try:
-            _ai_skill = skills.get("autoimprove")
-            if _ai_skill and hasattr(_ai_skill, "get_latest_idea"):
-                _latest_idea = _ai_skill.get_latest_idea()
-                if _latest_idea:
-                    _daily_memory_block += f"\n\n💡 Most recent parked idea: {_latest_idea}"
-        except Exception:
-            pass
-
-    # Inject post-task proactive suggestion from the PREVIOUS request's completion.
-    # This is how "you just built a website, want me to schedule a daily review?"
-    # reaches the model — cached by the bg thread after the prior task finished.
-    _post_task_suggestion_path = Path(f"/app/memory/post_task_suggestion_{session_id}.txt")
-    if _post_task_suggestion_path.exists():
-        try:
-            _pts = _post_task_suggestion_path.read_text(encoding="utf-8").strip()
-            if _pts:
-                _daily_memory_block += f"\n\n💭 Follow-up suggestion:\n{_pts}"
-            # Clean up after reading — one-shot injection
-            _post_task_suggestion_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
     # On new sessions (first message): run daily_review in background — never blocks the response
     # Read the cached should_self_improve result written by the previous session's bg thread.
     # The bg thread always finishes after the current request's template is built, so we
     # use the prior check here and write a fresh one in _bg_should_improve below.
-    _skill_health_section = ""
-    _si_cache_path = Path("/app/memory/self_improve_check.json")
-    try:
-        if _si_cache_path.exists():
-            _si_cache = json.loads(_si_cache_path.read_text(encoding="utf-8"))
-            _si_age_h = (datetime.now() - datetime.fromisoformat(
-                _si_cache.get("checked_at", "2000-01-01")
-            )).total_seconds() / 3600
-            if _si_cache.get("improve") and _si_age_h < 48:
-                _si_loop = _si_cache.get("suggested_loop", "error_reduce")
-                _skill_health_section = (
-                    f"\n⚠️ RECURRING FAILURES: {_si_cache.get('reason', '')}\n"
-                    f"Recommended action: autoimprove.run_loop('{_si_loop}')\n"
-                )
-    except Exception:
-        pass
     if len(history) == 0:
         def _bg_daily_review():
             try:
@@ -4616,8 +4436,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 from skills.core import self_improvement as _si
                 result = _si.should_self_improve(threshold=3, window_days=7)
                 # Persist result so the NEXT session can read it synchronously into
-                # _skill_health_section (this thread always finishes after the template
-                # is already built for the current request).
+                # the snapshot's skill-health block via _memory_skill_health()
+                # (this thread always finishes after the template is already built).
                 try:
                     _cache = dict(result)
                     _cache["checked_at"] = datetime.now().isoformat()
@@ -4722,28 +4542,6 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
 
     # Build system prompt from template (loaded at startup from prompts/system.md)
     _identity_prefix    = (_identity_content + "\n\n") if _identity_content else ""
-    _notes_index_str    = _notes_index if _notes_index else "no notes saved yet"
-    _pref_content_str   = _pref_content if _pref_content else "None saved yet."
-    _chroma_context_str = chroma_context if chroma_context else "None yet."
-
-    # Load scheduled tasks for system prompt injection
-    _scheduled_tasks_block = ""
-    try:
-        _sched_raw = _fcache.read_text("/app/memory/scheduled_tasks.json")
-        if _sched_raw:
-            _sched_data = json.loads(_sched_raw)
-            if _sched_data:
-                _sched_lines = [f"Active scheduled tasks ({len(_sched_data)}):"]
-                for _sn, _st in _sched_data.items():
-                    _kind = "recurring" if _st.get("type") == "recurring" else "once"
-                    _ivl = f" every {_st['interval_seconds']}s" if _st.get("interval_seconds") else ""
-                    _sched_lines.append(
-                        f'  - "{_sn}" [{_kind}{_ivl}] next: {_st.get("next_run","?")[:16]}'
-                        f' | prompt: "{str(_st.get("prompt",""))[:80]}"'
-                    )
-                _scheduled_tasks_block = "\n".join(_sched_lines)
-    except Exception:
-        pass
 
     # Prepend note/lesson directive to url_directive so both share the top-of-prompt slot
     _url_directive = _note_directive + _url_directive
@@ -4751,21 +4549,12 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
         _url_directive       = _url_directive,
         _identity_prefix     = _identity_prefix,
         _today_str           = _today_str,
-        _notes_index_str     = _notes_index_str,
         _skill_index_line    = _skill_index_line,
         skills_doc           = skills_doc,
         _skill_usage_section = _skill_usage_section,
-        _search_example      = _search_example,
         _rules_section       = _rules_section,
-        _read_skill_example  = _read_skill_example,
-        _pref_content_str    = _pref_content_str,
-        _pref_save_instruction = _pref_save_instruction,
-        _lessons_block       = _lessons_block,
-        _skill_health_section = _skill_health_section,
-        _daily_memory_block  = _daily_memory_block,
-        _chroma_context_str  = _chroma_context_str,
+        _memory_snapshot     = _memory_snapshot,
         _local_model_reminder = _local_model_reminder,
-        _scheduled_tasks_block = _scheduled_tasks_block,
     )
 
     # ── Token budget accounting (char/4 ≈ tokens, no tiktoken needed) ────────
@@ -4773,9 +4562,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
     _tk_skills    = _est_tokens(skills_doc)
     _tk_usage     = _est_tokens(_skill_usage_section)
     _tk_rules     = _est_tokens(_rules_section)
-    _tk_lessons   = _est_tokens(_lessons_block)
-    _tk_daily     = _est_tokens(_daily_memory_block)
-    _tk_chroma    = _est_tokens(_chroma_context_str)
+    _tk_daily     = _est_tokens(_memory_snapshot)
     _tk_hint      = _est_tokens(_local_model_reminder)
     _tk_sys       = _est_tokens(system_prompt)
     _tk_hist      = sum(_est_tokens(m.get("content") or "") for m in history)
@@ -4783,8 +4570,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
     print(
         f"📊 Token est | sys={_tk_sys} "
         f"(identity={_tk_identity} skills={_tk_skills} usage={_tk_usage} "
-        f"rules={_tk_rules} lessons={_tk_lessons} daily={_tk_daily} "
-        f"chroma={_tk_chroma} hint={_tk_hint}) "
+        f"rules={_tk_rules} daily={_tk_daily} hint={_tk_hint}) "
         f"| hist={_tk_hist} user={_tk_user} "
         f"| TOTAL={_tk_sys + _tk_hist + _tk_user}"
     )
@@ -4798,9 +4584,9 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             "skills": _tk_skills,
             "usage": _tk_usage,
             "rules": _tk_rules,
-            "lessons": _tk_lessons,
+            "lessons": 0,
             "daily": _tk_daily,
-            "chroma": _tk_chroma,
+            "chroma": 0,
             "hint": _tk_hint,
         },
     }
@@ -4847,7 +4633,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                         "⚠️ CORRECTION: Your previous response was flagged as wrong by the user. "
                         "DO NOT repeat it. You MUST: "
                         "1) Call web__search with a query about the topic, or autoimprove__research. "
-                        "2) Check <LEARNED_LESSONS> for what you got wrong. "
+                        "2) Check the Past mistakes section (or self_improvement.check_lessons) for what you got wrong. "
                         "3) Only respond after you have verified the new answer with a live source. "
                         "Acknowledge the mistake in one sentence, then immediately search."
                     ),
@@ -5850,6 +5636,30 @@ def download_file(filename: str):
         filename=safe_name,
         media_type=media_type,
     )
+
+@app.post("/memory/migrate")
+def memory_migrate_endpoint(api_key: str = Depends(verify_api_key)):
+    """One-time legacy → MEMORY.md/USER.md migration. Idempotent; safe to re-run."""
+    try:
+        from skills.core import _memory_store as memory_core
+        return {"success": True, "result": memory_core.migrate_legacy()}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _migrate_memory_on_boot() -> None:
+    """Safe on-boot legacy-memory migration — never blocks or crashes startup."""
+    try:
+        from skills.core import _memory_store as memory_core
+        if memory_core.migration_needed():
+            print("🧠 Migrating legacy memory files → MEMORY.md/USER.md ...")
+            print(memory_core.migrate_legacy())
+        else:
+            print("🧠 Memory migration flag present — skipping.")
+    except Exception as e:
+        print(f"⚠️  Memory migration skipped: {e}")
+
+_migrate_memory_on_boot()
 
 
 if __name__ == "__main__":
