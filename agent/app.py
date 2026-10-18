@@ -180,6 +180,223 @@ session_store: Dict[str, Dict] = {}
 # (Telegram timeouts, closed tabs) from hogging Ollama for 20+ minutes.
 _active_runs: Dict[str, threading.Event] = {}
 
+# ── Heartbeat state ──────────────────────────────────────────────────────────
+_TICK_MODE = False                      # True only while a heartbeat tick runs
+_last_user_msg_ts = 0.0                 # wall-clock of last user activity
+
+_HEARTBEAT_DENYLIST = {
+    "terminal": "*",
+    "x_engagement": "*",
+    "web_builder": "*",
+    "heartbeat": "*",
+    "knowledge_base": ("ingest_folder",),
+    "git_manager": ("push", "pull", "commit"),
+    "autoimprove": ("apply_suggestion", "run_experiment", "run_all", "run_loop"),
+}
+
+def _heartbeat_denied(skill_name: str, function_name: str) -> bool:
+    if not _TICK_MODE:
+        return False
+    rule = _HEARTBEAT_DENYLIST.get(skill_name)
+    if rule == "*" or rule is None:
+        return rule is not None        # "*" denies whole skill
+    return function_name in rule
+
+def _deny_msg(skill_name: str, function_name: str) -> str:
+    return f"Error: skill denied during heartbeat tick: {skill_name}.{function_name}"
+
+
+# Rolling-hour cloud-escalation budget (max_cloud calls per 3600s window)
+_ESC_WINDOW_START = 0.0
+_ESC_COUNT = 0
+
+def _cloud_budget(cfg) -> bool:
+    """True if an escalation is still allowed in the current rolling hour."""
+    global _ESC_WINDOW_START, _ESC_COUNT
+    if not cfg.get("max_cloud"):
+        return False
+    import time as _esc_time
+    if _esc_time.time() - _ESC_WINDOW_START >= 3600:
+        _ESC_WINDOW_START = _esc_time.time()
+        _ESC_COUNT = 0
+    return _ESC_COUNT < cfg["max_cloud"]
+
+def _touch_user_activity() -> None:
+    global _last_user_msg_ts
+    import time as _hb_time
+    _last_user_msg_ts = _hb_time.time()
+
+def execute_tick_deny_probe(skill_name: str, function_name: str):
+    """Test seam: returns the denial error string if the gate refuses None otherwise.
+    Production path: the same check runs at the top of call_skill_improved."""
+    if _heartbeat_denied(skill_name, function_name):
+        return _deny_msg(skill_name, function_name)
+    return None
+
+
+def _heartbeat_tick() -> str:
+    """One heartbeat attempt. Returns a short verdict for tests/logs.
+    Preconditions (order matters): enabled → not overlapping → quiet enough
+    → no active turn. Every outcome writes exactly one audit row."""
+    global _last_user_msg_ts, _TICK_MODE, _ESC_WINDOW_START, _ESC_COUNT
+    try:
+        import time as _hb_time
+        cfg = {}
+        try:
+            from skills.core import heartbeat as hb
+            cfg = hb._cfg()
+            if not cfg["enabled"]:
+                return "skipped-disabled"
+            if hb._running:
+                return "skipped-overlap"
+            quiet_s = _hb_time.time() - _last_user_msg_ts
+            if quiet_s < 120:
+                return "skipped-quiet"
+            if _active_runs:
+                return "skipped-turn"
+        except ImportError:
+            return "skipped-lib"
+
+        hb._running = True
+        try:
+            _TICK_MODE = True
+            try:
+                try:
+                    context = hb._tick_context(quiet_minutes=int(quiet_s // 60))
+                except Exception:
+                    context = f"quiet {int(quiet_s // 60)} min"
+                try:
+                    # Two local attempts before reaching for the cloud budget.
+                    reply, last_exc = None, None
+                    for _attempt in (1, 2):
+                        try:
+                            reply = hb._llm_tick_call(hb._TICK_RULES, context, cfg["num_predict"])
+                            if reply and reply.strip():
+                                break
+                            reply = None
+                        except Exception as e:
+                            last_exc = e
+                            reply = None
+                    if reply is None:
+                        if not _cloud_budget(cfg):
+                            _detail = (f"two local attempts failed ({last_exc or 'empty replies'}); no cloud budget")
+                            hb._audit({"ts": hb._now_iso(), "action": "error",
+                                       "summary": _detail, "tokens": {}})
+                            return "error"
+                        cloud_reply = hb._llm_escalate(hb._TICK_RULES, context, cfg["num_predict"])
+                        if not cloud_reply:
+                            raise RuntimeError("cloud unavailable")
+                        _ESC_COUNT += 1
+                        hb._audit({"ts": hb._now_iso(), "action": "escalate", "summary": "cloud escalation used",
+                                   "tokens": dict(getattr(hb, "_LAST_CALL_TOKENS", {}) or {})})
+                        reply = cloud_reply
+                except Exception as _esc_exc:
+                    hb._audit({"ts": hb._now_iso(), "action": "error",
+                               "summary": f"two local attempts failed ({last_exc or 'empty replies'}); "
+                                          f"escalation failed: {_esc_exc}", "tokens": {}})
+                    return "error"
+
+                stripped = (reply or "").strip()
+                if stripped == hb.HEARTBEAT_MARKER:
+                    hb._audit({"ts": hb._now_iso(), "action": "observed", "summary": "",
+                               "tokens": dict(getattr(hb, "_LAST_CALL_TOKENS", {}) or {})})
+                    return "silent"
+
+                acted = False
+                rounds = 0
+                _actions_done = 0
+                _capped = False
+                while rounds < 3:
+                    rounds += 1
+                    _found = (stripped.count("tool:") + stripped.count("<tool")
+                              + stripped.count("<skill"))
+                    if _found == 0 or _actions_done >= 5:
+                        _capped = bool(_found) and _actions_done >= 5
+                        break
+                    try:
+                        _results, _log = execute_skill_tags(stripped)
+                    except Exception:
+                        _results, _log = [], []
+                    if not _log:
+                        break
+                    acted = True
+                    _actions_done += len(_log)
+                    if _actions_done >= 5:
+                        _capped = True
+                    try:
+                        _tool_report = json.dumps(_results, ensure_ascii=False)[:2000]
+                    except Exception:
+                        _tool_report = str(_results)[:2000]
+                    follow = ("Your tool results: " + _tool_report +
+                              "\nFinal verdict now, one line: PING: <text> or ACT DONE: <summary> or NO_REPLY")
+                    try:
+                        stripped = (hb._llm_tick_call(hb._TICK_RULES, follow, cfg["num_predict"]) or "").strip()
+                    except Exception:
+                        stripped = ""
+                    if stripped == hb.HEARTBEAT_MARKER:
+                        hb._audit({"ts": hb._now_iso(), "action": "observed", "summary": "post-tools",
+                                   "tokens": dict(getattr(hb, "_LAST_CALL_TOKENS", {}) or {})})
+                        return "silent"
+                    if stripped.startswith("PING:") or stripped.startswith("ACT DONE:"):
+                        break
+                    if ("tool:" not in stripped and "<tool" not in stripped
+                            and "<skill" not in stripped):
+                        break
+
+                if stripped.startswith("PING:"):
+                    ping = stripped[5:].strip()[:500]
+                    try:
+                        call_skill_improved("telegram_bot", "send", message=ping)
+                    except Exception as _tg:
+                        ping = f"(telegram failed: {_tg}) {ping}"
+                    hb._audit({"ts": hb._now_iso(), "action": "ping", "summary": ping,
+                               "tokens": dict(getattr(hb, "_LAST_CALL_TOKENS", {}) or {})})
+                    return "pinged"
+
+                summary = stripped.replace("ACT DONE:", "").strip()[:300] if acted else stripped[:120]
+                if _capped:
+                    summary = (summary + " (action cap 5 reached; remaining intention noted)")[:360]
+                action = "act" if acted else "observed"
+                hb._audit({"ts": hb._now_iso(), "action": action, "summary": summary,
+                           "tokens": dict(getattr(hb, "_LAST_CALL_TOKENS", {}) or {})})
+                return "acted" if acted else "silent-unparsed"
+            finally:
+                _TICK_MODE = False
+        finally:
+            hb._running = False
+    except Exception as _exc:
+        try:
+            from skills.core import heartbeat as _hb2
+            _hb2._audit({"ts": _hb2._now_iso(), "action": "error", "summary": str(_exc)[:200], "tokens": {}})
+        except Exception:
+            pass
+        return "error"
+
+
+def _heartbeat_loop() -> None:
+    """Daemon: every interval, try one tick. Never crashes the process."""
+    import time as _hb_time
+    print("💗 Heartbeat thread started.")
+    cfg = {}
+    try:
+        from skills.core import heartbeat as hb
+        cfg = hb._cfg()
+    except ImportError:
+        return
+    while True:
+        try:
+            _hb_time.sleep(max(60, cfg["interval"]))
+            try:
+                cfg = hb._cfg()
+                if not cfg["enabled"]:
+                    continue
+            except Exception:
+                pass
+            _verdict = _heartbeat_tick()
+            if _verdict != "silent":
+                print(f"💗 heartbeat: {_verdict}")
+        except Exception as _e:
+            print(f"💗 heartbeat error (contained): {_e}")
 
 def _supersede_active_run(session_id: str) -> None:
     _old = _active_runs.get(session_id)
@@ -596,6 +813,9 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     """
     Improved skill calling with better error handling and logging.
     """
+    _deny = _heartbeat_denied(skill_name, function_name)
+    if _deny:
+        return _deny_msg(skill_name, function_name)
     if skill_name not in skills:
         raise ValueError(f"Skill '{skill_name}' not found. Available: {list(skills.keys())}")
 
@@ -4093,6 +4313,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     # register ours so an even newer message can cancel US in turn.
     _supersede_active_run(session_id)
     _cancel_event = threading.Event()
+    _touch_user_activity()
     _active_runs[session_id] = _cancel_event
 
     # Long-term semantic recall moved to the memory_search skill (on-demand).
@@ -5554,6 +5775,7 @@ async def chat_stream(req: PromptRequest, api_key: str = Depends(verify_api_key)
       done       {"type":"done"}        (always the last event)
     """
     _check_rate_limit(api_key)
+    _touch_user_activity()
     stream_q: _queue_module.Queue = _queue_module.Queue()
 
     def _run() -> None:
@@ -5673,6 +5895,11 @@ def _migrate_memory_on_boot() -> None:
         print(f"⚠️  Memory migration skipped: {e}")
 
 _migrate_memory_on_boot()
+
+try:
+    threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
+except Exception as _e:
+    print(f"💗 heartbeat not started: {_e}")
 
 
 if __name__ == "__main__":
