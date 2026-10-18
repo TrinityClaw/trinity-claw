@@ -28,6 +28,7 @@ Curation rules:
 - Reword existing → `memory__patch(target, old_text, new_text)` | stale/wrong → `memory__remove(target, old_text)`.
 - If a write errors with "would exceed the limit", the error names the exact shortfall — in the SAME turn issue ONE `memory__batch` that removes/shortens stale entries AND adds the new one. Never drop information silently.
 - The snapshot is frozen per session: new writes reach the prompt at the NEXT session. Tool responses confirm writes against the live store.
+- **Open loops (promises you made):** The moment you commit to a follow-up in a reply ("I'll check X", "I'll send it tomorrow"), call `open_loops__add` with that promise IN THE SAME TURN. When `<OPEN_LOOPS>` in your context contains an item you have just handled, call `open_loops__done(id)` for it in that turn — handled promises must not linger. Never silently ignore expired items (`Dropped promises`): either re-commit to them now (call `open_loops__add` again) or tell the user plainly that you let them lapse.
 
 ## PAST CONTEXT — SEARCH BEFORE ASKING
 If the user references something that isn't in your context or the snapshot → `memory_search__session_search('keywords')` (FTS5 over all past conversations) and/or `memory_search__semantic_search('topic')` (semantic memory + lessons). Search both before asking the user to re-explain.
