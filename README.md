@@ -21,15 +21,11 @@ A self-modifying AI agent with persistent memory, dynamic skill creation, and in
 >
 > **Recommended setup:** run on your home machine or a local network server, accessed via your LAN or a private VPN (e.g. Tailscale, WireGuard). Do **not** open ports 8001, 8080, or 8090 to the public internet.
 
-
-
-https://github.com/user-attachments/assets/8ef1ddcf-b816-4566-87af-ce6511ed52fd
-
-
-
 ---
 
 ## ⚠️ Security Notice
+
+> **Use at your own risk.**
 
 TrinityClaw is **secure by design** in its original form:
 - All skills run inside an isolated Docker container with no host access
@@ -54,6 +50,10 @@ This project follows responsible AI agent design practices, but **no system is u
 
 - **Self-Modifying**: Creates new skills dynamically
 - **Persistent Memory**: ChromaDB vector storage + JSONL logs, daily journaling, goal tracking, and weekly meta-review synthesis across all memory files
+- **Self-Curated Memory Stores**: Agent-remembered facts in two capped file stores — `MEMORY.md` (projects, tools, lessons) and `USER.md` (your preferences and profile) — with size limits, dedup-friendly batch edits, and a context snapshot injected into every new session
+- **Session Memory**: Every new chat starts with a frozen memory snapshot (stores, recent journal, lessons, top notes) plus a checkpoint of your last session's state — the agent picks up where you left off without re-reading files
+- **Open Promises Tracking**: A lightweight open-loops list keeps the agent accountable for unfinished promises, follow-ups, and suggestions — surfaced in every session, auto-expired after 14 days, checkable off with a 4-character ID
+- **Ambient Heartbeat**: A background loop that ticks every 15 minutes when your agent is idle — reviews its own memory, follows up on open loops, reads its improvement idea backlog, and pings you on Telegram only when something is worth saying; everything else is silent and logged to an audit file
 - **Multi-Step Reasoning**: Agent loop for complex tasks
 - **Dynamic Skills**: Core system skills + user-created skills
 - **Web Browsing**: Fetch and analyze web content, including JS-rendered pages
@@ -331,10 +331,80 @@ It is printed at the end of the installer — copy it and enter it **once** in t
 
 ---
 
-## Core Skills (33)
+## Memory & Autonomy
+
+TrinityClaw's memory went through a rework to feel less like a chatbot and more like a colleague who actually remembers things. The stack has three layers:
+
+### 1. Self-Curated Memory Stores
+
+Instead of only scrolling logs, the agent maintains two hand-edited, size-capped markdown stores:
+
+| Store | Purpose | Cap (chars) |
+|-------|---------|-------------|
+| `memory/MEMORY.md` | Environment facts, project conventions, tool quirks, hard-won lessons | 2200 (`MEMORY_CORE_LIMIT`) |
+| `memory/USER.md` | Your preferences, communication style, recurring patterns | 1375 (`MEMORY_USER_LIMIT`) |
+
+Writes fail **with an overflow error and the exact shortfall** when a store is full — the agent is instructed to consolidate (merge/dedup stale entries) in the same batch rather than dropping information. The `memory.batch()` function applies add/patch/remove ops atomically, checking the cap only on the final result, so free-then-add works in one call.
+
+### 2. Session Snapshot & Checkpoints
+
+Every new chat session gets a `<MEMORY_SNAPSHOT>` block injected once at startup (frozen for the session — mid-session writes surface next time):
+
+- Both capped stores, recent daily-journal bites, learned lessons, top notes, and active scheduler tasks
+- The **open loops list** (see below)
+- A **session checkpoint** (`memory/session_checkpoints.json`, last 10 kept) so the agent resumes where your previous conversation left off
+- Cross-session **lessons archive** (`memory/lessons.jsonl`) plus FTSS/ChromaDB search via `memory_search` for anything older
+
+### 3. Open Loops (unfinished promises)
+
+The agent keeps a lightweight TODO-of-integrity at `memory/open_loops.json`: anything it promised to do, suggested, or said it would follow up on. Every session it sees the list and is expected to close what's closable (`open_loops__done` with a 4-character ID) before opening fresh loops. Entries auto-expire after 14 days, and the list is capped at 20.
+
+```text
+<OPEN_LOOPS>
+- a1b2c3: research Ollama vision models for you (opened 2026-10-15)
+- d4e5f6: promised to check CI logs after the next push (opened 2026-10-18)
+</OPEN_LOOPS>
+```
+
+### Ambient Heartbeat
+
+When you're not around, the agent doesn't just idle. A daemon thread ticks every **15 minutes** and, if you've been quiet for at least 2 minutes and no conversation turn is running, a **local-model LLM call** asks one question over a compact context (open loops, due scheduler tasks, latest journal line, the improvement-idea backlog, quiet duration):
+
+> *Is there anything worth doing or saying right now?*
+
+It answers with one of four verdicts:
+
+| Verdict | Behavior |
+|---------|----------|
+| `NO_REPLY` | **Everything stays silent** — no message, no chat history entry; just one audit row |
+| Statement / observation | Also silent — logged to the audit file for later reading |
+| `PING: <text>` | Sends a single Telegram message (≤500 chars) and pings you |
+| Tool calls + `ACT DONE:` | Acts (≤3 rounds, ≤5 tool actions), then logs what it did |
+
+**Safety rails:**
+
+- A mechanical **deny-list** hard-blocks dangerous skills during ticks: `terminal`, browser/X engagement actions, `web_builder`, `knowledge_base` ingestion, git push/commit, and all `autoimprove` mutation loops
+- Escalation to the cloud LLM happens **only after two failed local attempts** and is capped at **1 escalation per hour** — a silent-hours cloud-bill guard when running against a paid provider
+- Every tick leaves exactly one JSON line in `memory/heartbeat.jsonl` (verdict, summary, token usage) — the audit file is the only observability surface
+
+**Environment variables** (all optional, sensible defaults):
+
+```env
+HEARTBEAT_ENABLED=true            # master switch (set false to disable)
+HEARTBEAT_INTERVAL_SECONDS=900    # tick cadence (floored at 60)
+HEARTBEAT_MAX_CLOUD=1             # max cloud escalations per rolling hour (0 = local-only)
+```
+
+---
+
+## Core Skills (37)
 
 | Skill | Description | Functions |
 |-------|-------------|-----------|
+| `memory` | Agent-curated persistent memory — two capped stores: `MEMORY.md` (agent/project facts) and `USER.md` (user profile); writes persist immediately and surface in the next session's snapshot | `add`, `patch`, `remove`, `batch`, `consolidate` |
+| `memory_search` | Recall past context on demand — keyword search over conversation history (FTS5) and semantic search over lessons/memory (ChromaDB) | `session_search`, `semantic_search`, `prune_memory_db` |
+| `open_loops` | Track unfinished promises, follow-ups, and suggestions; rendered into every session snapshot; loops auto-expire after 14 days | `add`, `done`, `list` |
+| `heartbeat` | Ambient autonomy daemon (no callable functions) — a background thread ticks every 15 minutes when the agent is idle: reviews memory, tracks down open loops, works through its improvement-idea backlog, and messages you on Telegram only when something is worth saying (see Ambient Heartbeat section) | *(background thread — silent unless it has something to report)* |
 | `notes` | Persistent notes, daily journal, user model, and goal tracking | `save`, `load`, `list_notes`, `delete`, `search`, `export_all`, `get_last_logs`, `search_logs`, `end_day`, `daily_review`, `get_activity_log`, `set_preference`, `get_preference`, `record_pattern`, `set_context`, `update_user_model`, `get_user_model`, `prune_user_model`, `set_user_fact`, `get_user_facts_card`, `add_goal`, `complete_goal`, `list_goals` |
 | `meta_review` | Weekly synthesis of all memory files into actionable insights | `weekly_digest`, `loop_roi_report`, `error_trend_report` |
 | `files` | File operations (read anywhere, write to memory/dynamic) | `ls`, `cat`, `pwd`, `exists`, `size`, `sha256`, `write`, `append`, `patch`, `patch_all`, `mkdir`, `delete`, `tree`, `find_duplicates` |
@@ -541,7 +611,7 @@ The agent will open composio.dev in your browser, walk you through each step, an
 **Or manually:**
 
 1. **Create a free account** at [composio.dev](https://composio.dev)
-2. **Copy your API key** from the Composio dashboard (Copy your Project API key -starts with "ak_" from Settings → API Keys")
+2. **Copy your API key** from the Composio dashboard
 3. **Add it to your `.env`:**
 
 ```
@@ -1088,16 +1158,21 @@ curl -X POST http://localhost:8001/skill/call \
 
 ## Persistent Memory System
 
-TrinityClaw builds a growing model of you and your work across every session. Memory is layered:
+TrinityClaw builds a growing model of you and your work across every session. Memory is layered (see also **Memory & Autonomy** above for the capped stores and session snapshot):
 
 | Layer | What's stored | Where |
 |-------|--------------|-------|
 | **Notes** | Free-form notes and saved research | `memory/notes.json` |
 | **User model** | Preferences, patterns, context, rejected ideas | `memory/user_model.json` |
+| **Agent memory store** | Curated agent/project facts (capped) | `memory/MEMORY.md` |
+| **User profile store** | Curated user-profile facts (capped) | `memory/USER.md` |
 | **Goals** | Open and completed goals with optional due dates | `memory/user_model.json` (goals array) |
 | **Daily journal** | End-of-day summaries, learnings, next steps | `memory/daily_journal.jsonl` |
 | **Lessons** | Per-skill failure/fix records used by autoimprove | `memory/lessons.jsonl` |
 | **Activity log** | Rolling action log (24h window) | `memory/activity_log.jsonl` |
+| **Heartbeat audit** | One JSON row per ambient tick (verdict + summary + tokens) | `memory/heartbeat.jsonl` |
+| **Open loops** | Unfinished promises and follow-ups (14-day expiry) | `memory/open_loops.json` |
+| **Session checkpoints** | Last-session context for continuity (last 10) | `memory/session_checkpoints.json` |
 | **Improvement log** | Every autoimprove experiment with outcome + scores | `memory/improvement_log.jsonl` |
 | **ChromaDB** | Semantic vector index of all past context | `memory/databases/` |
 
@@ -1330,6 +1405,10 @@ trinity-claw/
 │       │   ├── youtube.py
 │       │   ├── autoimprove.py  # Autoresearch loops + web research (see AutoImprove section)
 │       │   ├── meta_review.py  # Weekly synthesis: errors, loop ROI, journal themes
+│       │   ├── memory.py       # Capped MEMORY.md/USER.md stores (see Memory & Autonomy)
+│       │   ├── memory_search.py # Recall past sessions (FTS5) + semantic memory search
+│       │   ├── open_loops.py   # Promise/follow-up tracking (see Memory & Autonomy)
+│       │   ├── heartbeat.py    # Ambient idle-time daemon config (see Ambient Heartbeat)
 │       │   ├── mcp_client.py   # MCP client (see MCP Client section)
 │       │   ├── composio.py     # Composio integration (see Composio section)
 │       │   └── _user_model_store.py  # Internal: user model data layer (used by notes.py)
