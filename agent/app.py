@@ -2094,6 +2094,19 @@ def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool
             temp_blocks.append(sh_block)
             used_budget[0] += _est_tokens(sh_block)
 
+    # 7) Open loops (agent promises; dangling ones must be re-owned or dropped)
+    ol_body = ""
+    try:
+        from skills.core import open_loops as ol
+        ol_body = ol._render_block()
+    except Exception:
+        ol_body = ""
+    if ol_body:
+        ol_text = "<OPEN_LOOPS>\n" + ol_body + "\n</OPEN_LOOPS>"
+        if _fits(ol_text):
+            temp_blocks.append(ol_text)
+            used_budget[0] += _est_tokens(ol_text)
+
     snap = "\n\n".join(temp_blocks) if temp_blocks else "Memory empty."
     if temp_blocks:
         _session_memory_snapshot[session_id] = snap
