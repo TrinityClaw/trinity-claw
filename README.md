@@ -51,7 +51,7 @@ This project follows responsible AI agent design practices, but **no system is u
 - **Self-Modifying**: Creates new skills dynamically
 - **Persistent Memory**: ChromaDB vector storage + JSONL logs, daily journaling, goal tracking, and weekly meta-review synthesis across all memory files
 - **Self-Curated Memory Stores**: Agent-remembered facts in two capped file stores — `MEMORY.md` (projects, tools, lessons) and `USER.md` (your preferences and profile) — with size limits, dedup-friendly batch edits, and a context snapshot injected into every new session
-- **Session Memory**: Every new chat starts with a frozen memory snapshot (stores, recent journal, lessons, top notes) plus a checkpoint of your last session's state — the agent picks up where you left off without re-reading files
+- **Session Memory**: Every new chat starts with a frozen memory snapshot (capped stores, lessons, scheduled tasks, open loops) plus a checkpoint of your last session's state — the agent picks up where you left off without re-reading files
 - **Open Promises Tracking**: A lightweight open-loops list keeps the agent accountable for unfinished promises, follow-ups, and suggestions — surfaced in every session, auto-expired after 14 days, checkable off with a 4-character ID
 - **Ambient Heartbeat**: A background loop that ticks every 15 minutes when your agent is idle — reviews its own memory, follows up on open loops, reads its improvement idea backlog, and pings you on Telegram only when something is worth saying; everything else is silent and logged to an audit file
 - **Multi-Step Reasoning**: Agent loop for complex tasks
@@ -350,10 +350,10 @@ Writes fail **with an overflow error and the exact shortfall** when a store is f
 
 Every new chat session gets a `<MEMORY_SNAPSHOT>` block injected once at startup (frozen for the session — mid-session writes surface next time):
 
-- Both capped stores, recent daily-journal bites, learned lessons, top notes, and active scheduler tasks
+- Both capped stores, top-3 learned lessons, active scheduler tasks, and skill-health
 - The **open loops list** (see below)
 - A **session checkpoint** (`memory/session_checkpoints.json`, last 10 kept) so the agent resumes where your previous conversation left off
-- Cross-session **lessons archive** (`memory/lessons.jsonl`) plus FTSS/ChromaDB search via `memory_search` for anything older
+- Cross-session recall (`memory/lessons.jsonl` archive + FTSS/ChromaDB via `memory_search`) for anything older — including daily-journal lookup, which lives at `memory/daily_journal.jsonl`
 
 ### 3. Open Loops (unfinished promises)
 
@@ -1188,7 +1188,7 @@ notes.end_day(
 )
 ```
 
-The journal is injected into the system prompt at the start of every session (last 3–7 days), so the agent always knows what you worked on recently without you repeating yourself.
+The journal lives at `memory/daily_journal.jsonl` (one JSON line per day). The agent reaches it three ways: the last-conversation checkpoint in the session snapshot, `notes.get_last_logs()` / `notes.search_logs()` on demand, and in the raw tick context of its own heartbeat — recent-work questions are answered by searching/recalling, not by wholesale injection.
 
 ### Goal Tracking — `notes.add_goal()` / `notes.list_goals()`
 
