@@ -11,7 +11,7 @@ intervals overdue) or skips stale ones (>= 2 intervals) — never breaks.
 """
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 NAME = "daily_briefing"
@@ -86,6 +86,42 @@ def _today_queue(mem: Path) -> str:
     return "• Next 24h:\n" + "\n".join(due[:6]) if due else "• Next 24h: nothing scheduled."
 
 
+def _stale_loops(mem: Path) -> str:
+    """Open promises digest — dropped first, then the two oldest open ones."""
+    try:
+        data = json.loads((mem / "open_loops.json").read_text(encoding="utf-8"))
+        loops = data.get("loops", []) if isinstance(data, dict) else []
+    except Exception:
+        return ""
+    now = datetime.now(timezone.utc)
+    open_l, dropped = [], []
+    for l in loops:
+        if not isinstance(l, dict) or not l.get("id") or not l.get("text"):
+            continue
+        try:
+            opened = datetime.fromisoformat(str(l.get("opened")))
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        age_days = (now - opened).total_seconds() / 86400.0
+        if l.get("state") == "expired" or (l.get("state") == "open" and age_days > 14):
+            dropped.append(l)
+            continue
+        if l.get("state") == "open":
+            open_l.append((age_days, l))
+    out = []
+    if dropped:
+        out.append("• Dropped promises (let these lapse — re-commit or let go):")
+        for l in dropped[:3]:
+            out.append(f"  - {str(l['text'])[:120]}")
+    if open_l:
+        open_l.sort(reverse=True)  # oldest first
+        shown = [f"  - ({d:.0f}d) {li['text'][:120]}" for d, li in open_l[:2]]
+        extra = f"  (+{len(open_l) - 2} more)" if len(open_l) > 2 else ""
+        out.append("• Still open (oldest first):\n" + "\n".join(shown) + extra)
+    return "\n".join(out) if out else "• Open promises: none hanging."
+
 def _recent_successes(mem: Path) -> str:
     try:
         sj_mod = __import__("success_journal")
@@ -124,6 +160,7 @@ def morning(memory_dir: str = None) -> str:
         _yesterday_summary(base),
         _overnight_learning(base),
         _today_queue(base),
+        _stale_loops(base),
         _recent_successes(base),
     ]
     nudges = _nudges(base)
