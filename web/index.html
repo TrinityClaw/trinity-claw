@@ -403,6 +403,7 @@
             white-space: pre;
         }
         .update-banner-actions { display: flex; gap: 6px; flex-shrink: 0; align-items: flex-start; }
+        .update-banner-actions button:disabled { opacity: 0.5; cursor: default; }
         .update-link-btn {
             background: transparent;
             border: 1px solid rgba(191,144,0,0.4);
@@ -1059,8 +1060,10 @@
                 <div class="update-banner-commits" id="updateCommits"></div>
                 <div class="update-how" id="updateHow" style="display:none">git pull
 docker compose up --build -d</div>
+                <div class="update-banner-commits" id="updateStatus"></div>
             </div>
             <div class="update-banner-actions">
+                <button class="update-link-btn" id="updateNowBtn" onclick="runUpdate()">Update now</button>
                 <button class="update-link-btn" onclick="toggleUpdateDetails()">View changes</button>
                 <button class="update-link-btn" onclick="toggleUpdateHow()">How to update</button>
                 <button class="update-dismiss" onclick="dismissUpdate()" title="Dismiss">✕</button>
@@ -1342,6 +1345,20 @@ docker compose up --build -d</div>
             };
         }
 
+        // True when at least one settings request succeeded during this save
+        let _savedAny = false;
+
+        // POST one config update; tracks overall success for the auto-restart
+        async function postConfig(path, payload) {
+            const res = await fetch(`${agentUrl}${path}`, {
+                method: 'POST',
+                headers: getAuthHeaders(),
+                body: JSON.stringify(payload)
+            });
+            if (res.ok) _savedAny = true;
+            return res.ok;
+        }
+
         // Save all settings
         async function saveSettings() {
             const btn = document.querySelector('.btn-primary');
@@ -1349,9 +1366,9 @@ docker compose up --build -d</div>
             btn.textContent = '⏳ Saving...';
             btn.disabled = true;
             saveStatus.textContent = '';
+            _savedAny = false;
 
             try {
-                // Update LiteLLM config
                 const modelName = modelNameInput.value.trim();
                 const apiBase = apiBaseInput.value.trim();
                 const apiKeyEnv = apiKeyEnvInput.value.trim();
@@ -1362,78 +1379,79 @@ docker compose up --build -d</div>
                 if (agentKey) localStorage.setItem('trinity_api_key', agentKey);
 
                 if (modelName) {
-                    await fetch(`${agentUrl}/config/update`, {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: JSON.stringify({ skill: 'model', function: 'model_name', args: [modelName] })
-                    });
+                    await postConfig('/config/update', { skill: 'model', function: 'model_name', args: [modelName] });
                 }
-
                 if (apiBase) {
-                    await fetch(`${agentUrl}/config/update`, {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: JSON.stringify({ skill: 'api', function: 'base', args: [apiBase] })
-                    });
+                    await postConfig('/config/update', { skill: 'api', function: 'base', args: [apiBase] });
                 }
-
                 if (apiKeyEnv) {
-                    await fetch(`${agentUrl}/config/update`, {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: JSON.stringify({ skill: 'api', function: 'key', args: [apiKeyEnv] })
-                    });
+                    await postConfig('/config/update', { skill: 'api', function: 'key', args: [apiKeyEnv] });
                 }
-
                 if (apiKeyVal) {
-                    await fetch(`${agentUrl}/config/update-api-key`, {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: JSON.stringify({ skill: apiKeyEnv || 'MOONSHOT_API_KEY', function: 'value', args: [apiKeyVal] })
-                    });
+                    await postConfig('/config/update-api-key', { skill: apiKeyEnv || 'MOONSHOT_API_KEY', function: 'value', args: [apiKeyVal] });
                 }
 
-                // Update Telegram config
                 const modelSource = document.getElementById('modelSourceSelect').value;
                 if (modelSource) {
-                    await fetch(`${agentUrl}/config/model-source/set`, {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: JSON.stringify({ source: modelSource })
-                    });
+                    await postConfig('/config/model-source/set', { source: modelSource });
                 }
-                // Save local Ollama model if one is selected
                 const ollamaModel = document.getElementById('ollamaModelSelect').value.trim();
                 if (ollamaModel) {
-                    await fetch(`${agentUrl}/config/ollama/set`, {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: JSON.stringify({ model: ollamaModel })
-                    });
+                    await postConfig('/config/ollama/set', { model: ollamaModel });
                 }
 
                 const telegramToken = telegramTokenInput.value.trim();
                 const telegramChatId = telegramChatIdInput.value.trim();
-
                 if (telegramToken || telegramChatId) {
-                    await fetch(`${agentUrl}/config/telegram/update`, {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: JSON.stringify({
-                            token: telegramToken,
-                            chat_id: telegramChatId
-                        })
+                    await postConfig('/config/telegram/update', {
+                        token: telegramToken,
+                        chat_id: telegramChatId
                     });
                 }
 
-                saveStatus.textContent = '✅ Settings saved! Restart services for changes to take effect.';
-                saveStatus.style.color = 'var(--accent)';
+                if (!_savedAny) {
+                    saveStatus.textContent = 'Nothing to save.';
+                    saveStatus.style.color = 'var(--text-secondary)';
+                    return;
+                }
 
-                setTimeout(() => {
-                    closeSettings();
-                    saveStatus.textContent = '';
-                }, 2500);
-
+                // ── Auto-restart: recreate litellm + agent so changes take effect ──
+                saveStatus.textContent = '💾 Saved — restarting services to apply…';
+                try {
+                    const res = await fetch(`${UPDATER_URL}/restart`, {
+                        method: 'POST',
+                        headers: getAuthHeaders()
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        const tail = (data.output || `HTTP ${res.status}`).trim().split('\n').slice(-2).join(' — ');
+                        saveStatus.textContent = `⚠️ Saved, but restart failed: ${tail}`;
+                        saveStatus.style.color = '#ff6b6b';
+                        return;
+                    }
+                    saveStatus.textContent = '⏳ Waiting for the agent to come back…';
+                    const deadline = Date.now() + 2 * 60 * 1000;
+                    let back = false;
+                    while (Date.now() < deadline) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        try {
+                            const h = await fetch(`${agentUrl}/health`);
+                            if (h.ok) { back = true; break; }
+                        } catch (e) { /* still restarting */ }
+                    }
+                    if (back) {
+                        saveStatus.textContent = '✅ Settings applied';
+                        saveStatus.style.color = 'var(--accent)';
+                        setTimeout(() => { closeSettings(); saveStatus.textContent = ''; }, 1500);
+                    } else {
+                        saveStatus.textContent = '⚠️ Saved, but the agent did not come back in time — check container logs.';
+                        saveStatus.style.color = '#ff6b6b';
+                    }
+                } catch (e) {
+                    // Updater sidecar unreachable (e.g. remote UI) — manual fallback
+                    saveStatus.textContent = '✅ Saved. Auto-restart unavailable here — run: docker compose up -d litellm trinity-agent';
+                    saveStatus.style.color = 'var(--accent)';
+                }
             } catch (e) {
                 console.error('Save error:', e);
                 saveStatus.textContent = `❌ Error: ${e.message}`;
@@ -1678,17 +1696,10 @@ docker compose up --build -d</div>
                 content.appendChild(docBadge);
             }
             const txt = document.createElement('div');
-            let renderedText = text || '';
             if (sender === 'agent') {
-                const stripped = renderedText.replace(/<\/?[a-z0-9_\-:]+[^>]*>/gi, '').trim();
-                if (!stripped && renderedText.trim()) {
-                    renderedText = '`' + renderedText.trim() + '`';
-                } else if (!stripped) {
-                    renderedText = '_No response text generated._';
-                }
-                txt.innerHTML = marked.parse(renderedText);
+                txt.innerHTML = marked.parse(text);
             } else {
-                txt.textContent = renderedText;
+                txt.textContent = text;
             }
             content.appendChild(txt);
             if (sender === 'agent' && executionLog && executionLog.length > 0) {
@@ -1923,20 +1934,23 @@ docker compose up --build -d</div>
         }
 
         // ── Update checker ───────────────────────────────────────────────────
-        // Compares the deployed git SHA (from /version) against GitHub's latest.
-        // No manual BUILD_DATE needed — updates automatically after every deploy.
+        // Compares the deployed git SHA (from the agent's /version) against
+        // GitHub's latest. Checks on load, then once per day.
         const GITHUB_REPO = 'TrinityClaw/trinity-claw';
+        const UPDATER_URL = 'http://localhost:8002';  // one-click updater sidecar (localhost only)
 
         let _updateDetails = null;
+        let _deployedSha = null;
+        let _updating = false;
 
         async function checkForUpdates() {
-            if (GITHUB_REPO === 'TrinityClaw/trinity-claw') return;
             try {
                 // Get the SHA currently running on the server
-                const versionRes = await fetch('/version');
+                const versionRes = await fetch(`${agentUrl}/version`);
                 if (!versionRes.ok) return;
                 const { sha: deployedSha } = await versionRes.json();
                 if (!deployedSha || deployedSha === 'unknown') return;
+                _deployedSha = deployedSha;
 
                 // Get latest commits from GitHub
                 const ghRes = await fetch(
@@ -1987,6 +2001,82 @@ docker compose up --build -d</div>
         function dismissUpdate() {
             if (_updateDetails) localStorage.setItem('update_dismissed', _updateDetails.sha);
             document.getElementById('updateBanner').classList.remove('visible');
+        }
+
+        // ── One-click update (via the localhost updater sidecar) ─────────────
+        async function runUpdate() {
+            if (_updating) return;
+            const btn    = document.getElementById('updateNowBtn');
+            const msg    = document.getElementById('updateBannerMsg');
+            const status = document.getElementById('updateStatus');
+            const how    = document.getElementById('updateHow');
+
+            if (!confirm('Pull the latest version and restart your agent?\n\nThe chat will be unavailable for about a minute.')) return;
+            _updating = true;
+            btn.disabled = true;
+            btn.textContent = '⏳ Updating…';
+            status.textContent = 'Pulling the latest version and recreating containers… this can take a few minutes.';
+
+            try {
+                const res = await fetch(`${UPDATER_URL}/update`, {
+                    method: 'POST',
+                    headers: getAuthHeaders()
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.status === 401) {
+                    status.textContent = '❌ Update rejected — the key saved in this browser does not match this installation.';
+                    _resetUpdateBtn(btn);
+                    return;
+                }
+                if (res.status === 409) {
+                    status.textContent = '⏳ An update is already in progress — hang on.';
+                    _resetUpdateBtn(btn);
+                    return;
+                }
+                if (!res.ok || !data.ok) {
+                    const tail = (data.output || 'unknown error').trim().split('\n').slice(-2).join(' — ');
+                    status.textContent = `❌ Update failed: ${tail}`;
+                    how.style.display = 'block';
+                    _resetUpdateBtn(btn);
+                    return;
+                }
+
+                status.textContent = '✅ Pulled! Waiting for the agent to come back…';
+                await _waitForRestart(btn, msg, status);
+            } catch (e) {
+                // Updater sidecar unreachable (e.g. remote/ hosted UI) — manual fallback
+                status.textContent = 'One-click update is not available from here — use the manual steps:';
+                how.style.display = 'block';
+                _resetUpdateBtn(btn);
+            }
+        }
+
+        async function _waitForRestart(btn, msg, status) {
+            const oldSha = _deployedSha;
+            const deadline = Date.now() + 5 * 60 * 1000;
+            while (Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 5000));
+                try {
+                    const res = await fetch(`${agentUrl}/version`);
+                    if (!res.ok) continue;
+                    const { sha } = await res.json();
+                    if (sha && sha !== 'unknown' && sha !== oldSha) {
+                        localStorage.removeItem('update_dismissed');
+                        msg.innerHTML = '<strong>✅ Updated to the latest version</strong>';
+                        status.textContent = 'Reloading…';
+                        setTimeout(() => location.reload(), 1500);
+                        return;
+                    }
+                } catch (e) { /* agent still restarting */ }
+            }
+            status.textContent = '⚠️ The agent did not report a new version in time — check it in a minute, or update manually.';
+            _resetUpdateBtn(btn);
+        }
+
+        function _resetUpdateBtn(btn) {
+            _updating = false;
+            btn.disabled = false;
+            btn.textContent = 'Update now';
         }
 
         // Check on load, then once per day
