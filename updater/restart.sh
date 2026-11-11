@@ -36,7 +36,22 @@ log "Recreating $SERVICES (project: $PROJECT, compose file: $CFG_NAME)..."
 if docker compose --project-name "$PROJECT" --project-directory "$REPO_DIR" \
         -f "$REPO_DIR/$CFG_NAME" up -d $SERVICES; then
     log "Restart complete — new settings are live."
-    exit 0
+else
+    die "docker compose up failed — run 'docker compose up -d litellm trinity-agent' manually in the install folder."
 fi
 
-die "docker compose up failed — run 'docker compose up -d litellm trinity-agent' manually in the install folder."
+# ── 3. Bring up Ollama when local mode is configured ─────────────────────────
+# The ollama service lives in the 'local' compose profile, so it is not part of
+# a normal 'up -d'. Only start it when the user actually switched to local mode.
+# On Mac, Ollama runs natively (brew services), not in Docker — skip there.
+if [ "$CFG_NAME" = "docker-compose.yml" ] \
+   && grep -q '^MODEL_SOURCE=local' "$REPO_DIR/.env" 2>/dev/null; then
+    log "Local mode configured — starting Ollama container..."
+    if docker compose --profile local \
+            --project-name "$PROJECT" --project-directory "$REPO_DIR" \
+            -f "$REPO_DIR/$CFG_NAME" up -d ollama; then
+        log "Ollama is running."
+    else
+        log "Ollama start failed — run: docker compose --profile local up -d ollama"
+    fi
+fi
