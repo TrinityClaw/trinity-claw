@@ -1,4 +1,17 @@
 #!/bin/bash
+# Re-exec from a real file with terminal stdin when piped (curl ... | bash):
+# the wizard's `read` prompts would otherwise consume the script itself as
+# input, corrupting the questionnaire and aborting before .env is written.
+if [ ! -t 0 ]; then
+    if [ -e /dev/tty ]; then
+        PIPE_TMP=$(mktemp /tmp/trinity-install-XXXXXX.sh)
+        cat > "$PIPE_TMP"
+        exec bash "$PIPE_TMP" "$@" < /dev/tty
+    fi
+    echo "   ⚠️  No terminal detected for the interactive wizard."
+    echo "      Download the installer and run it directly: bash install.sh"
+fi
+
 # Auto-fix Windows CRLF line endings (skip when piped via curl)
 if [ -f "$0" ] && LC_ALL=C grep -q $'\r' "$0"; then
     tmp=$(mktemp); tr -d '\r' < "$0" > "$tmp"; chmod +x "$tmp"; exec bash "$tmp" "$@"

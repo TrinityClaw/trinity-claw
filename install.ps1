@@ -55,8 +55,14 @@ Write-Host "   +======================================================+" -Foregr
 Write-Host ""
 
 # ---------------------------------------------------------------
-# Step 0: Download repo if not already present
+# Step 0: Install root = this script's folder when the repo is there.
+# Launched via double-click / "Run with PowerShell", the CWD is
+# System32 or the home folder — never trust the CWD alone, or the
+# installer re-downloads the repo elsewhere and .env lands there.
 # ---------------------------------------------------------------
+if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "docker-compose.yml"))) {
+    Set-Location $PSScriptRoot
+}
 if (-not (Test-Path "docker-compose.yml")) {
     $installDir = "$env:USERPROFILE\trinity-claw"
     Write-Host "   Downloading TrinityClaw to $installDir..." -ForegroundColor Yellow
