@@ -4,7 +4,7 @@ FROM docker:cli
 RUN apk add --no-cache git python3 docker-cli-compose
 
 WORKDIR /app
-COPY update.sh server.py ./
+COPY update.sh restart.sh server.py ./
 RUN chmod +x update.sh
 
 EXPOSE 8002

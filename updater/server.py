@@ -1,7 +1,9 @@
 """TrinityClaw one-click updater — tiny HTTP sidecar.
 
-POST /update  (X-API-Key header required, must match TRINITY_API_KEY from .env)
+POST /update   (X-API-Key header required, must match TRINITY_API_KEY from .env)
     Runs update.sh: git pull on the host repo + recreate agent/web containers.
+POST /restart  (same auth) — runs restart.sh: recreates litellm + trinity-agent
+    so .env / litellm_config.yaml changes made from the web UI take effect.
 GET  /health  — no auth, lets the UI detect the updater's availability.
 
 Stdlib only. Binds to 127.0.0.1 by default (compose publishes it as
@@ -16,9 +18,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPDATE_SCRIPT = os.getenv("UPDATE_SCRIPT", "/app/update.sh")
+RESTART_SCRIPT = os.getenv("RESTART_SCRIPT", "/app/restart.sh")
 UPDATE_TIMEOUT = int(os.getenv("UPDATE_TIMEOUT", "900"))
+RESTART_TIMEOUT = int(os.getenv("RESTART_TIMEOUT", "300"))
 
 _UPDATE_LOCK = threading.Lock()
+_RESTART_LOCK = threading.Lock()
 
 
 def check_auth(provided: str) -> bool:
@@ -29,18 +34,28 @@ def check_auth(provided: str) -> bool:
     return hmac.compare_digest(provided or "", expected)
 
 
-def run_update():
-    """Run update.sh, return (ok, combined_output)."""
+def run_script(script: str, timeout: int):
+    """Run a shell script, return (ok, combined_output)."""
     try:
         proc = subprocess.run(
-            ["sh", UPDATE_SCRIPT],
-            capture_output=True, text=True, timeout=UPDATE_TIMEOUT,
+            ["sh", script],
+            capture_output=True, text=True, timeout=timeout,
         )
         return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
     except subprocess.TimeoutExpired:
-        return False, f"Update timed out after {UPDATE_TIMEOUT}s — check container logs."
+        return False, f"Script timed out after {timeout}s — check container logs."
     except Exception as e:
-        return False, f"Update failed to start: {e}"
+        return False, f"Script failed to start: {e}"
+
+
+def run_update():
+    """Run update.sh, return (ok, combined_output)."""
+    return run_script(UPDATE_SCRIPT, UPDATE_TIMEOUT)
+
+
+def run_restart():
+    """Run restart.sh, return (ok, combined_output)."""
+    return run_script(RESTART_SCRIPT, RESTART_TIMEOUT)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -73,20 +88,23 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/update":
+        if self.path not in ("/update", "/restart"):
             self._respond(404, {"error": "not found"})
             return
         if not check_auth(self.headers.get("X-API-Key")):
             self._respond(401, {"ok": False, "output": "Invalid or missing X-API-Key header"})
             return
-        if not _UPDATE_LOCK.acquire(blocking=False):
-            self._respond(409, {"ok": False, "output": "An update is already in progress."})
+        lock = _UPDATE_LOCK if self.path == "/update" else _RESTART_LOCK
+        action = "update" if self.path == "/update" else "restart"
+        article = "An" if action == "update" else "A"
+        if not lock.acquire(blocking=False):
+            self._respond(409, {"ok": False, "output": f"{article} {action} is already in progress."})
             return
         try:
-            ok, output = run_update()
+            ok, output = run_update() if action == "update" else run_restart()
             self._respond(200 if ok else 500, {"ok": ok, "output": output})
         finally:
-            _UPDATE_LOCK.release()
+            lock.release()
 
     def log_message(self, fmt, *args):
         print(f"[updater] {self.address_string()} {fmt % args}")
