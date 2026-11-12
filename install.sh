@@ -259,8 +259,38 @@ fi
 echo "   ✅ Docker Compose ready"
 
 # ─────────────────────────────────────────────────────────
-# [1b/5] Download repository if not already present
+# [1b/5] Download repository (fresh) or refresh it (existing install)
 # ─────────────────────────────────────────────────────────
+if [ -f "./docker-compose.yml" ] || [ -f "./docker-compose.mac.yml" ]; then
+    # Existing installation → refresh program files so bug fixes and new
+    # skills from GitHub are applied. User data (.env, memory/, keys) is
+    # preserved — the config questions below regenerate .env afterwards.
+    echo ""
+    echo "   ♻️  Existing installation found — refreshing program files..."
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        if git fetch origin main 2>/dev/null; then
+            git reset --hard origin/main \
+                && echo "   ✅ Program files updated to the latest version."
+        else
+            echo "   [!] Could not reach GitHub — continuing with existing files."
+        fi
+    else
+        # ZIP/tarball install (no git history): re-download and copy over,
+        # leaving user data (.env, memory/, trinity-key.txt) untouched.
+        REFRESH_TMP=$(mktemp -d)
+        if curl -fsSL https://github.com/TrinityClaw/trinity-claw/archive/refs/heads/main.tar.gz \
+            | tar -xz -C "$REFRESH_TMP" --strip-components=1; then
+            find "$REFRESH_TMP" -mindepth 1 -maxdepth 1 \
+                ! -name '.env' ! -name 'memory' ! -name 'trinity-key.txt' \
+                -exec cp -a {} . \; 2>/dev/null
+            echo "   ✅ Program files refreshed (your .env and memory/ were preserved)."
+        else
+            echo "   [!] Download failed — continuing with existing files."
+        fi
+        rm -rf "$REFRESH_TMP"
+    fi
+fi
+
 if [ ! -f "./docker-compose.yml" ] && [ ! -f "./docker-compose.mac.yml" ]; then
     INSTALL_DIR="$HOME/trinity-claw"
     echo ""
@@ -385,11 +415,6 @@ model_list:
       model: ollama/qwen3.5:9b
       api_base: ${OLLAMA_API_BASE}
 
-  - model_name: trinity-vision
-    litellm_params:
-      model: ollama/qwen3.5:9b
-      api_base: ${OLLAMA_API_BASE}
-
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 EOF
@@ -403,7 +428,7 @@ else
     echo -e "   \033[36mLLM Cloud Provider\033[0m"
     echo ""
     echo "   [1] OpenAI      (gpt-4o, vision-capable)"
-    echo "   [2] NVIDIA      (kimi-k2-instruct + llama vision)"
+    echo "   [2] NVIDIA      (kimi-k2-instruct, NVIDIA NIM)"
     echo "   [3] Anthropic   (claude-3-5-sonnet, vision-capable)"
     echo "   [4] Custom      (enter model, base URL and key variable manually)"
     echo ""
@@ -419,25 +444,21 @@ else
     case "$provider" in
         1)
             model_default="openai/gpt-4o"
-            vision_default="openai/gpt-4o"
             api_base_default="https://api.openai.com/v1"
             api_key_name_default="OPENAI_API_KEY"
             ;;
         2)
             model_default="openai/moonshotai/kimi-k2-instruct"
-            vision_default="openai/meta/llama-3.2-90b-vision-instruct"
             api_base_default="https://integrate.api.nvidia.com/v1"
             api_key_name_default="NVIDIA_API_KEY"
             ;;
         3)
             model_default="anthropic/claude-3-5-sonnet-20241022"
-            vision_default="anthropic/claude-3-5-sonnet-20241022"
             api_base_default="https://api.anthropic.com"
             api_key_name_default="ANTHROPIC_API_KEY"
             ;;
         4)
             model_default=""
-            vision_default=""
             api_base_default=""
             api_key_name_default=""
             ;;
@@ -458,17 +479,11 @@ else
         fi
     fi
 
-    if [ -z "$vision_default" ]; then
-        vision_default="$model"
-    fi
-    read -p "   2. Vision model (for photos) [default: $vision_default]: " vision_model
-    vision_model=${vision_model:-$vision_default}
-
     if [ -n "$api_base_default" ]; then
-        read -p "   3. API Base URL [default: $api_base_default]: " api_base
+        read -p "   2. API Base URL [default: $api_base_default]: " api_base
         api_base=${api_base:-$api_base_default}
     else
-        read -p "   3. API Base URL (required, e.g. https://api.openai.com/v1): " api_base
+        read -p "   2. API Base URL (required, e.g. https://api.openai.com/v1): " api_base
     fi
     if [ -z "$api_base" ]; then
         echo "   ❌ API Base URL is required."
@@ -483,7 +498,7 @@ else
     if [ -n "$api_key_name_default" ]; then
         api_key_name="$api_key_name_default"
     else
-        read -p "   4. API Key environment variable name (e.g. MYPROVIDER_API_KEY): " api_key_name
+        read -p "   3. API Key environment variable name (e.g. MYPROVIDER_API_KEY): " api_key_name
         if [ -z "$api_key_name" ]; then
             echo "   ❌ Key variable name is required."
             exit 1
@@ -491,7 +506,7 @@ else
     fi
 
     echo ""
-    read -s -p "   5. API Key value (hidden): " api_key_value
+    read -s -p "   4. API Key value (hidden): " api_key_value
     echo ""
     if [ -z "$api_key_value" ]; then
         echo "   ❌ API key is required."
@@ -516,13 +531,6 @@ model_list:
   - model_name: trinity-default
     litellm_params:
       model: ${model}
-      api_key: os.environ/${api_key_name}
-      api_base: ${api_base}
-
-  # Vision model -- used automatically when photos are sent.
-  - model_name: trinity-vision
-    litellm_params:
-      model: ${vision_model}
       api_key: os.environ/${api_key_name}
       api_base: ${api_base}
 
@@ -778,7 +786,7 @@ LAUNCHER_END
 fi
 
 echo -e "   \033[33m🎤 Voice: Whisper (~150MB) downloads on first voice message.\033[0m"
-echo -e "   \033[33m📸 Vision: uses trinity-vision model in litellm_config.yaml.\033[0m"
+echo -e "   \033[33m📸 Vision: handled automatically — photos are sent to your main model.\033[0m"
 echo -e "   \033[33m🌐 Browser: Playwright + Chromium installed automatically.\033[0m"
 echo ""
 

@@ -63,6 +63,45 @@ Write-Host ""
 if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "docker-compose.yml"))) {
     Set-Location $PSScriptRoot
 }
+if (Test-Path "docker-compose.yml") {
+    # Existing installation → refresh program files so bug fixes and new
+    # skills from GitHub are applied. User data (.env, memory/, keys) is
+    # preserved — the config questions below regenerate .env afterwards.
+    Write-Host "   Existing installation found - refreshing program files..." -ForegroundColor Yellow
+    if (Test-Path ".git") {
+        git fetch origin main 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            git reset --hard origin/main
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "   [OK] Program files updated to the latest version." -ForegroundColor Green
+            }
+        } else {
+            Write-Host "   [!] Could not reach GitHub - continuing with existing files." -ForegroundColor Yellow
+        }
+    } else {
+        # ZIP install (no git history): re-download and copy over, leaving
+        # user data (.env, memory/, trinity-key.txt) untouched.
+        try {
+            $zip = "$env:TEMP\trinity-claw.zip"
+            Invoke-WebRequest -Uri "https://github.com/TrinityClaw/trinity-claw/archive/refs/heads/main.zip" `
+                -OutFile $zip -UseBasicParsing -ErrorAction Stop
+            $extractDir = "$env:TEMP\tc-extract"
+            if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+            Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+            $src = "$extractDir\trinity-claw-main"
+            Get-ChildItem -Path $src -Force | Where-Object {
+                $_.Name -notin @(".env", "memory", "trinity-key.txt")
+            } | ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination (Join-Path (Get-Location) $_.Name) -Recurse -Force
+            }
+            Remove-Item $extractDir -Recurse -Force
+            Remove-Item $zip -Force
+            Write-Host "   [OK] Program files refreshed (your .env and memory/ were preserved)." -ForegroundColor Green
+        } catch {
+            Write-Host "   [!] Download failed - continuing with existing files." -ForegroundColor Yellow
+        }
+    }
+}
 if (-not (Test-Path "docker-compose.yml")) {
     $installDir = "$env:USERPROFILE\trinity-claw"
     Write-Host "   Downloading TrinityClaw to $installDir..." -ForegroundColor Yellow
@@ -208,11 +247,6 @@ model_list:
       model: $model
       api_base: $apiBase
 
-  - model_name: trinity-vision
-    litellm_params:
-      model: $model
-      api_base: $apiBase
-
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 "@
@@ -225,7 +259,7 @@ general_settings:
     Write-Host "   +-----------------------------------------+" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "   [1] OpenAI      (gpt-4o, vision-capable)" -ForegroundColor Gray
-    Write-Host "   [2] NVIDIA      (kimi-k2-instruct + llama vision)" -ForegroundColor Gray
+    Write-Host "   [2] NVIDIA      (kimi-k2-instruct, NVIDIA NIM)" -ForegroundColor Gray
     Write-Host "   [3] Anthropic   (claude-3-5-sonnet, vision-capable)" -ForegroundColor Gray
     Write-Host "   [4] Custom      (enter model, base URL and key variable manually)" -ForegroundColor Gray
     Write-Host ""
@@ -237,25 +271,21 @@ general_settings:
     switch ($provider) {
         '1' {
             $modelDefault   = "openai/gpt-4o"
-            $visionDefault  = "openai/gpt-4o"
             $apiBaseDefault = "https://api.openai.com/v1"
             $apiKeyName     = "OPENAI_API_KEY"
         }
         '2' {
             $modelDefault   = "openai/moonshotai/kimi-k2-instruct"
-            $visionDefault  = "openai/meta/llama-3.2-90b-vision-instruct"
             $apiBaseDefault = "https://integrate.api.nvidia.com/v1"
             $apiKeyName     = "NVIDIA_API_KEY"
         }
         '3' {
             $modelDefault   = "anthropic/claude-3-5-sonnet-20241022"
-            $visionDefault  = "anthropic/claude-3-5-sonnet-20241022"
             $apiBaseDefault = "https://api.anthropic.com"
             $apiKeyName     = "ANTHROPIC_API_KEY"
         }
         '4' {
             $modelDefault   = ""
-            $visionDefault  = ""
             $apiBaseDefault = ""
             $apiKeyName     = ""
         }
@@ -277,17 +307,12 @@ general_settings:
         }
     }
 
-    # Vision model
-    if (-not $visionDefault) { $visionDefault = $model }
-    $vin = (Read-Host "   2. Vision model (for photos) [default: $visionDefault]").Trim()
-    $visionModel = if ($vin) { $vin } else { $visionDefault }
-
     # API base URL
     if ($apiBaseDefault) {
-        $in = (Read-Host "   3. API Base URL [default: $apiBaseDefault]").Trim()
+        $in = (Read-Host "   2. API Base URL [default: $apiBaseDefault]").Trim()
         $apiBase = if ($in) { $in } else { $apiBaseDefault }
     } else {
-        $apiBase = (Read-Host "   3. API Base URL (required, e.g. https://api.openai.com/v1)").Trim()
+        $apiBase = (Read-Host "   2. API Base URL (required, e.g. https://api.openai.com/v1)").Trim()
         if (-not $apiBase) {
             Write-Host "   [FAIL] API Base URL is required." -ForegroundColor Red
             Read-Host "   Press Enter to exit"; exit 1
@@ -300,7 +325,7 @@ general_settings:
 
     # API key variable name (custom providers only)
     if (-not $apiKeyName) {
-        $apiKeyName = (Read-Host "   4. API Key environment variable name (e.g. MYPROVIDER_API_KEY)").Trim()
+        $apiKeyName = (Read-Host "   3. API Key environment variable name (e.g. MYPROVIDER_API_KEY)").Trim()
         if (-not $apiKeyName) {
             Write-Host "   [FAIL] Key variable name is required." -ForegroundColor Red
             Read-Host "   Press Enter to exit"; exit 1
@@ -308,7 +333,7 @@ general_settings:
     }
 
     # API key value (hidden), with proper BSTR cleanup
-    $apiKeySecure = Read-Host "   5. API Key value (hidden)" -AsSecureString
+    $apiKeySecure = Read-Host "   4. API Key value (hidden)" -AsSecureString
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($apiKeySecure)
     try {
         $apiKeyPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr).Trim()
@@ -347,13 +372,6 @@ model_list:
   - model_name: trinity-default
     litellm_params:
       model: $model
-      api_key: os.environ/$apiKeyName
-      api_base: $apiBase
-
-  # Vision model -- used automatically when photos are sent.
-  - model_name: trinity-vision
-    litellm_params:
-      model: $visionModel
       api_key: os.environ/$apiKeyName
       api_base: $apiBase
 
@@ -581,7 +599,7 @@ Write-Host "      Edit: $installPath\.env" -ForegroundColor Yellow
 Write-Host "      Then: $composeCmd restart" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "   Voice: Whisper (~150MB) downloads on first voice message." -ForegroundColor Yellow
-Write-Host "   Vision: uses the trinity-vision model in litellm_config.yaml." -ForegroundColor Yellow
+Write-Host "   Vision: handled automatically — photos are sent to your main model." -ForegroundColor Yellow
 Write-Host "   Browser: Playwright + Chromium installed automatically." -ForegroundColor Yellow
 Write-Host ""
 

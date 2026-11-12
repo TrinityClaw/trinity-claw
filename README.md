@@ -249,18 +249,13 @@ model_list:
       api_key: os.environ/NVIDIA_API_KEY
       api_base: https://integrate.api.nvidia.com/v1
 
-  # Vision model — used automatically when photos are sent.
-  # If your main model supports vision (gpt-4o, claude-3-5-sonnet) set both to the same model.
-  # For NVIDIA text-only models, use a dedicated vision model:
-  - model_name: trinity-vision
-    litellm_params:
-      model: openai/meta/llama-3.2-90b-vision-instruct
-      api_key: os.environ/NVIDIA_API_KEY
-      api_base: https://integrate.api.nvidia.com/v1
-
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 ```
+
+> **One model is enough.** Photos are sent to your main model — no separate vision
+> entry needed. Pick a vision-capable model (gpt-4o, claude-3-5-sonnet, gemini,
+> or a multimodal NVIDIA NIM model) and image understanding works automatically.
 
 ### Agent Security (API Key)
 
@@ -870,7 +865,7 @@ def another_function():
 
 > **Voice transcription** uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) running locally inside Docker — no API key required. The model (~150 MB) downloads automatically on the first voice message and is cached in the `memory/` volume.
 
-> **Image vision** requires a vision-capable model in `trinity-vision` (see Configuration above). For local Ollama mode, `llama3.2-vision` handles images automatically.
+> **Image vision** works automatically with any vision-capable main model in `trinity-default` (see Configuration above). For local Ollama mode, `llama3.2-vision` handles images automatically.
 
 ### Security
 
@@ -1493,7 +1488,7 @@ docker-compose up -d
 | **Google Calendar Access blocked** | Add your Gmail to Test Users: Google Cloud Console → APIs & Services → OAuth consent screen → Audience → Test users |
 | **Ollama model not pulled / missing** | Mac: run `ollama pull qwen3.5:9b`. Linux: the pull runs automatically in `ollama-init` on first startup (~6.6GB) — check progress with `docker logs trinity-claw-ollama-init-1 -f`. To pull manually: `docker exec trinity-claw-ollama-1 ollama pull qwen3.5:9b` |
 | **Voice not transcribed** | First use downloads Whisper model — wait up to 2 min. Check logs: `docker logs trinity-claw-trinity-agent-1 \| grep -i whisper` |
-| **Image described incorrectly** | Ensure `trinity-vision` in `litellm_config.yaml` points to a vision-capable model, then `docker compose restart litellm` |
+| **Image described incorrectly** | Ensure your main model in `litellm_config.yaml` is vision-capable (gpt-4o, claude-3-5-sonnet, gemini, etc.), then `docker compose restart litellm` |
 | **Browser skill not working** | Rebuild the container: `docker-compose build --no-cache trinity-agent && docker-compose up -d`. Chromium installs during build. |
 | **Browser times out on JS pages** | Try `browser_goto` with `wait_until=load` instead of `networkidle` for heavy SPAs |
 | **Gmail not authorized** | Run `gmail.authorize()`, open the URL, click Allow, paste the code back. |
