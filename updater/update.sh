@@ -62,10 +62,32 @@ if [ -z "$CFG_NAME" ] || [ ! -f "$REPO_DIR/$CFG_NAME" ]; then
     [ -f "$REPO_DIR/$CFG_NAME" ] || CFG_NAME="docker-compose.mac.yml"
 fi
 
+# ── 4b. Resolve the HOST path of the repo (bind source of our /repo mount) ───
+# docker compose resolves RELATIVE bind mounts against --project-directory and
+# passes the resulting absolute paths to the HOST daemon. /repo exists only
+# inside this container, so --project-directory /repo makes the daemon look for
+# /repo/agent/app.py on the host — which does not exist ("error mounting
+# /repo/agent/app.py ... not a directory"). Fix: read the bind-mount SOURCE
+# (the real host path), symlink it to /repo here so the CLI can read the
+# files, and use it as the project directory.
+HOST_DIR=""
+SELF_CTR=$(docker ps --filter label=com.docker.compose.service=updater --format '{{.ID}}' 2>/dev/null | head -n 1)
+[ -n "$SELF_CTR" ] || SELF_CTR=$(hostname 2>/dev/null || true)
+if [ -n "$SELF_CTR" ]; then
+    HOST_DIR=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/repo"}}{{.Source}}{{end}}{{end}}' "$SELF_CTR" 2>/dev/null | head -n 1)
+fi
+if [ -n "$HOST_DIR" ] && [ "$HOST_DIR" != "$REPO_DIR" ] && [ ! -e "$HOST_DIR" ]; then
+    mkdir -p "$(dirname "$HOST_DIR")" 2>/dev/null || true
+    ln -s "$REPO_DIR" "$HOST_DIR" 2>/dev/null || true
+fi
+if [ -z "$HOST_DIR" ] || [ ! -d "$HOST_DIR" ]; then
+    HOST_DIR="$REPO_DIR"   # fallback: old behavior (single-host setups only)
+fi
+
 # ── 5. Rebuild + recreate agent & web (skips db/chroma/litellm/ollama) ───────
 log "Recreating containers (project: $PROJECT, compose file: $CFG_NAME)..."
-if docker compose --project-name "$PROJECT" --project-directory "$REPO_DIR" \
-        -f "$REPO_DIR/$CFG_NAME" up -d --build $SERVICES; then
+if docker compose --project-name "$PROJECT" --project-directory "$HOST_DIR" \
+        -f "$HOST_DIR/$CFG_NAME" up -d --build $SERVICES; then
     log "Update complete — agent is restarting with the new version."
     exit 0
 fi
