@@ -202,6 +202,17 @@ _HEARTBEAT_DENYLIST = {
     "autoimprove": ("apply_suggestion", "run_experiment", "run_all", "run_loop"),
 }
 
+# Skills that perform destructive or outward-facing actions. The agent must
+# ask the user for confirmation before executing them (auto-confirmation
+# wrapper). Format: (skill_name, function_name).
+_CONFIRM_REQUIRED = frozenset({
+    ("files", "rm"),
+    ("git_manager", "push"),
+    ("git_manager", "commit"),
+    ("email_sender", "send"),
+    ("terminal", "run_script"),
+})
+
 def _heartbeat_denied(skill_name: str, function_name: str) -> bool:
     if not _TICK_MODE:
         return False
@@ -847,6 +858,23 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
 
     if not hasattr(module, function_name):
         raise ValueError(f"Function '{function_name}' not found in skill '{skill_name}'")
+
+    # Auto-confirmation wrapper: destructive or outward-facing actions require
+    # user approval before execution. Return a confirmation_required marker
+    # instead of executing; callers convert it to an agent__ask_user response.
+    if (skill_name, function_name) in _CONFIRM_REQUIRED:
+        return {
+            "success": False,
+            "confirmation_required": True,
+            "question": (
+                f"⚠️ {skill_name}.{function_name} is a destructive or outward-facing action.\n"
+                f"Reply 'yes' to confirm, or provide a reason to cancel."
+            ),
+            "skill": skill_name,
+            "function": function_name,
+            "args": args,
+            "kwargs": kwargs,
+        }
 
     func = getattr(module, function_name)
 
@@ -2758,6 +2786,28 @@ def execute_skill_tags(response_text: str) -> tuple:
 
     execution_log = []
 
+    # Pre-check: if ANY skill tag requires confirmation, short-circuit before
+    # executing anything — we never run destructive actions without approval.
+    _confirm_req = None
+    for _m in re.finditer(pattern, response_text):
+        _sn = _m.group(1)
+        _fn = _m.group(2)
+        if (_sn, _fn) in _CONFIRM_REQUIRED:
+            _confirm_req = (_sn, _fn)
+            break
+    if _confirm_req:
+        _sn, _fn = _confirm_req
+        execution_log.append({
+            "skill": _sn,
+            "function": _fn,
+            "status": "confirmation_required",
+            "question": (
+                f"⚠️ {_sn}.{_fn} is a destructive or outward-facing action.\n"
+                f"Reply 'yes' to confirm, or provide a reason to cancel."
+            ),
+        })
+        return response_text, execution_log, ""
+
     def replace_tag(match):
         skill_name = match.group(1)
         func_name = match.group(2)
@@ -3141,24 +3191,99 @@ _PLAN_TTL_SECONDS = 2 * 3600
 _PLAN_MAX_STEPS = 15
 _plan_lock = threading.Lock()
 
+# ── Persistent plan store (survives restart) ─────────────────────────────────
+_PLAN_STORE_NAME = "plans.json"
+
+
+def _plan_store() -> Path:
+    return Path(os.getenv("MEMORY_HOME", "/app/memory")) / _PLAN_STORE_NAME
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n",
+                                      dir=str(path.parent), delete=False)
+    try:
+        tmp.write(text)
+        tmp.close()
+        os.replace(tmp.name, str(path))
+    except Exception:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        try:
+            os.remove(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+def _read_plans() -> dict:
+    f = _plan_store()
+    if not f.exists():
+        return {}
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for sid, rec in data.items():
+        if isinstance(rec, dict) and "steps" in rec and "ts" in rec:
+            out[str(sid)] = rec
+    return out
+
+
+def _save_plans(plans: dict) -> None:
+    _atomic_write(_plan_store(), json.dumps(plans, ensure_ascii=False, indent=2))
+
+
+def _load_plans() -> None:
+    """Hydrate in-memory _SESSION_PLANS from disk. Safe to call at import."""
+    global _SESSION_PLANS
+    try:
+        with _plan_lock:
+            _SESSION_PLANS = _read_plans()
+    except Exception:
+        pass
+
+
+_load_plans()
+
 
 def _get_plan(session_id: str) -> List[Dict]:
     with _plan_lock:
         entry = _SESSION_PLANS.get(session_id)
         if not entry:
+            # Hydrate from disk (plan survived a restart).
+            plans = _read_plans()
+            entry = plans.get(session_id)
+            if entry:
+                _SESSION_PLANS[session_id] = entry
+        if not entry:
             return []
         if time.time() - entry["ts"] > _PLAN_TTL_SECONDS:
             _SESSION_PLANS.pop(session_id, None)
+            plans = _read_plans()
+            plans.pop(session_id, None)
+            _save_plans(plans)
             return []
         return [dict(s) for s in entry["steps"]]
 
 
 def _save_plan(session_id: str, steps: List[Dict]) -> None:
     with _plan_lock:
+        entry = {"steps": [dict(s) for s in steps], "ts": time.time()}
+        _SESSION_PLANS[session_id] = entry
+        # Persist to disk so the plan survives a restart.
+        plans = _read_plans()
         if steps:
-            _SESSION_PLANS[session_id] = {"steps": [dict(s) for s in steps], "ts": time.time()}
+            plans[session_id] = entry
         else:
-            _SESSION_PLANS.pop(session_id, None)
+            plans.pop(session_id, None)
+        _save_plans(plans)
 
 
 def _plan_pending(steps: List[Dict]) -> List[tuple]:
@@ -3422,6 +3547,41 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
     """
     tool_result_messages = []
     execution_log = []
+
+    # Pre-check: if ANY tool call requires confirmation, short-circuit before
+    # executing anything — we never run destructive actions without approval.
+    _confirm_req = None
+    for _tc in tool_calls:
+        _tname = (_tc.get("function") or {}).get("name", "")
+        if "__" in _tname:
+            _sn, _fn = _tname.split("__", 1)
+        elif ":" in _tname:
+            _sn, _fn = _tname.split(":", 1)
+        elif "." in _tname:
+            _sn, _fn = _tname.split(".", 1)
+        else:
+            _sn, _fn = _tname, ""
+        if (_sn, _fn) in _CONFIRM_REQUIRED:
+            _confirm_req = (_sn, _fn)
+            break
+    if _confirm_req:
+        _sn, _fn = _confirm_req
+        _tid = tool_calls[0].get("id", str(uuid.uuid4())) if tool_calls else str(uuid.uuid4())
+        execution_log.append({
+            "skill": _sn,
+            "function": _fn,
+            "status": "confirmation_required",
+            "question": (
+                f"⚠️ {_sn}.{_fn} is a destructive or outward-facing action.\n"
+                f"Reply 'yes' to confirm, or provide a reason to cancel."
+            ),
+        })
+        tool_result_messages.append({
+            "role": "tool",
+            "tool_call_id": _tid,
+            "content": f"⏸️ Confirmation required: {_sn}.{_fn} — reply 'yes' to proceed.",
+        })
+        return tool_result_messages, execution_log
 
     for tc in tool_calls:
         tool_call_id = tc.get("id", str(uuid.uuid4()))
@@ -5107,6 +5267,15 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                             execution_log.extend(_one_log)
                     tool_result_messages = [_cap_tool_message(_m) for _m in tool_result_messages]
                     all_execution_logs.extend(execution_log)
+                    # Auto-confirmation: if any skill call requires confirmation,
+                    # hand back to the user with an ask_user action.
+                    _confirm_entry = next(
+                        (l for l in execution_log if l.get("status") == "confirmation_required"),
+                        None,
+                    )
+                    if _confirm_entry:
+                        _ctrl_action = "ask"
+                        _ctrl_text = _confirm_entry.get("question", "Confirmation required.")
                     _unlock_skills_from_results(execution_log, _used_skills_this_req)
                     for _l in execution_log:
                         _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
@@ -5245,6 +5414,15 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     ai_reply
                 )
                 all_execution_logs.extend(execution_log)
+                # Auto-confirmation: if any skill tag requires confirmation,
+                # hand back to the user with the confirmation question.
+                _confirm_entry = next(
+                    (l for l in execution_log if l.get("status") == "confirmation_required"),
+                    None,
+                )
+                if _confirm_entry:
+                    ai_reply = _confirm_entry.get("question", "Confirmation required.")
+                    break
                 _unlock_skills_from_results(execution_log, _used_skills_this_req)
                 for _l in execution_log:
                     _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
