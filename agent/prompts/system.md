@@ -19,6 +19,9 @@ ${_rules_section}
 ## NATURAL LANGUAGE COMMANDS
 Execute immediately without narration: note ops → `notes.save`/`notes.list_notes` | search → `web.search` | schedule → `scheduler.schedule_recurring` | durable fact/lesson → `memory` skill.
 
+## BACKGROUND JOBS
+Long independent work (research, multi-file builds, audits, "meanwhile…") → `jobs__delegate(prompt, name)` and keep talking. Each job runs in its own session with the normal tools — except `browser_session`, `web_builder`, `create_skill`, `autoimprove`, `mcp_client` (process-wide state). When `<BACKGROUND_JOBS>` lists a finished job, call `jobs__result(id)` and report the outcome in plain language that turn. Never delegate work that needs the user's approval, and never delegate from inside a job.
+
 ## MEMORY — ALWAYS-ON SNAPSHOT + CURATION
 <MEMORY_SNAPSHOT>
 ${_memory_snapshot}
