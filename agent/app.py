@@ -832,6 +832,7 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     """
     Improved skill calling with better error handling and logging.
     """
+    _skip_confirm = kwargs.pop("_skip_confirm", False)
     _deny = _heartbeat_denied(skill_name, function_name)
     if _deny:
         return _deny_msg(skill_name, function_name)
@@ -862,7 +863,8 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     # Auto-confirmation wrapper: destructive or outward-facing actions require
     # user approval before execution. Return a confirmation_required marker
     # instead of executing; callers convert it to an agent__ask_user response.
-    if (skill_name, function_name) in _CONFIRM_REQUIRED:
+    # _skip_confirm=True bypasses this (used when user already said 'yes').
+    if (skill_name, function_name) in _CONFIRM_REQUIRED and not _skip_confirm:
         return {
             "success": False,
             "confirmation_required": True,
@@ -2794,6 +2796,7 @@ def execute_skill_tags(response_text: str) -> tuple:
         _fn = _m.group(2)
         if (_sn, _fn) in _CONFIRM_REQUIRED:
             _confirm_req = (_sn, _fn)
+            _confirm_content = _m.group(3).strip()
             break
     if _confirm_req:
         _sn, _fn = _confirm_req
@@ -2805,6 +2808,8 @@ def execute_skill_tags(response_text: str) -> tuple:
                 f"⚠️ {_sn}.{_fn} is a destructive or outward-facing action.\n"
                 f"Reply 'yes' to confirm, or provide a reason to cancel."
             ),
+            "args": [],
+            "kwargs": {"content": _confirm_content} if _confirm_content else {},
         })
         return response_text, execution_log, ""
 
@@ -3253,6 +3258,96 @@ def _load_plans() -> None:
 _load_plans()
 
 
+# ── Persistent pending-confirmation store (survives restart) ─────────────────
+_CONFIRM_STORE_NAME = "confirmations.json"
+_CONFIRM_TTL_SECONDS = 2 * 3600  # pending confirmations expire after 2h
+_confirm_lock = threading.Lock()
+
+
+def _confirm_store() -> Path:
+    return Path(os.getenv("MEMORY_HOME", "/app/memory")) / _CONFIRM_STORE_NAME
+
+
+def _read_confirms() -> dict:
+    f = _confirm_store()
+    if not f.exists():
+        return {}
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    now = time.time()
+    for sid, rec in data.items():
+        if not isinstance(rec, dict):
+            continue
+        if "skill" not in rec or "function" not in rec:
+            continue
+        # Drop expired confirmations
+        if now - rec.get("ts", 0) > _CONFIRM_TTL_SECONDS:
+            continue
+        out[str(sid)] = rec
+    return out
+
+
+def _save_confirms(confirms: dict) -> None:
+    _atomic_write(_confirm_store(), json.dumps(confirms, ensure_ascii=False, indent=2))
+
+
+def _load_confirms() -> None:
+    """No-op at import — confirms are read lazily per-session (no global state)."""
+    pass
+
+
+_load_confirms()
+
+
+def _get_pending_confirm(session_id: str) -> dict | None:
+    with _confirm_lock:
+        confirms = _read_confirms()
+        return confirms.get(session_id)
+
+
+def _set_pending_confirm(session_id: str, rec: dict) -> None:
+    with _confirm_lock:
+        confirms = _read_confirms()
+        rec["ts"] = time.time()
+        confirms[session_id] = rec
+        _save_confirms(confirms)
+
+
+def _clear_pending_confirm(session_id: str) -> None:
+    with _confirm_lock:
+        confirms = _read_confirms()
+        if session_id in confirms:
+            del confirms[session_id]
+            _save_confirms(confirms)
+
+
+def _confirm_yes(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in ("yes", "y", "ye", "yea", "yeah", "yep", "sure", "ok", "okay",
+                 "confirm", "confirmed", "approve", "approved", "go", "go ahead",
+                 "proceed", "do it", "execute")
+
+
+def _confirm_no(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in ("no", "n", "nope", "cancel", "cancelled", "canceled", "abort",
+                 "stop", "dont", "don't", "do not", "never", "reject", "rejected")
+
+
+def _format_confirm_result(result: dict) -> str:
+    """Turn a call_skill_improved result dict into a plain-text reply."""
+    if result.get("confirmation_required"):
+        return result.get("question", "Confirmation still required.")
+    if result.get("success"):
+        return str(result.get("result", ""))
+    return f"❌ {result.get('error', 'Action failed')}"
+
+
 def _get_plan(session_id: str) -> List[Dict]:
     with _plan_lock:
         entry = _SESSION_PLANS.get(session_id)
@@ -3563,6 +3658,11 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
             _sn, _fn = _tname, ""
         if (_sn, _fn) in _CONFIRM_REQUIRED:
             _confirm_req = (_sn, _fn)
+            _confirm_args = func_info.get("arguments", "{}")
+            try:
+                _confirm_kwargs = json.loads(_confirm_args) if isinstance(_confirm_args, str) else {}
+            except json.JSONDecodeError:
+                _confirm_kwargs = {}
             break
     if _confirm_req:
         _sn, _fn = _confirm_req
@@ -3575,6 +3675,8 @@ def _execute_tool_calls(tool_calls: list) -> tuple:
                 f"⚠️ {_sn}.{_fn} is a destructive or outward-facing action.\n"
                 f"Reply 'yes' to confirm, or provide a reason to cancel."
             ),
+            "args": [],
+            "kwargs": _confirm_kwargs,
         })
         tool_result_messages.append({
             "role": "tool",
@@ -4540,6 +4642,26 @@ def _maybe_push_automation(successful_skills: list, task_snippet: str) -> None:
 def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     session_id = req.session_id or "default"
 
+    # ── Pending-confirmation queue (survives restart) ────────────────────────
+    # If a destructive action is waiting for user approval, handle the yes/no
+    # answer before doing anything else.
+    _pending = _get_pending_confirm(session_id)
+    if _pending is not None:
+        if _confirm_yes(req.message):
+            _clear_pending_confirm(session_id)
+            _result = call_skill_improved(
+                _pending["skill"], _pending["function"],
+                *_pending.get("args", []),
+                _skip_confirm=True,
+                **_pending.get("kwargs", {}),
+            )
+            return {"response": _format_confirm_result(_result)}
+        if _confirm_no(req.message):
+            _clear_pending_confirm(session_id)
+            return {"response": "⏹️ Cancelled — the pending action was not executed."}
+        # Unclear answer: re-surface the confirmation question.
+        return {"response": _pending.get("question", "Confirmation still required.")}
+
     # Internal job dispatches (jobs.py) are not user traffic — they must not
     # consume the per-minute budget or be throttled mid-chain.
     if not session_id.startswith("job_"):
@@ -5276,6 +5398,14 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     if _confirm_entry:
                         _ctrl_action = "ask"
                         _ctrl_text = _confirm_entry.get("question", "Confirmation required.")
+                        # Persist pending confirmation so it survives a restart.
+                        _set_pending_confirm(session_id, {
+                            "skill": _confirm_entry.get("skill"),
+                            "function": _confirm_entry.get("function"),
+                            "args": _confirm_entry.get("args", []),
+                            "kwargs": _confirm_entry.get("kwargs", {}),
+                            "question": _confirm_entry.get("question", "Confirmation required."),
+                        })
                     _unlock_skills_from_results(execution_log, _used_skills_this_req)
                     for _l in execution_log:
                         _stream_emit({"type": "skill", "skill": _l.get("skill"), "function": _l.get("function"), "status": _l.get("status")})
@@ -5422,6 +5552,14 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 )
                 if _confirm_entry:
                     ai_reply = _confirm_entry.get("question", "Confirmation required.")
+                    # Persist pending confirmation so it survives a restart.
+                    _set_pending_confirm(session_id, {
+                        "skill": _confirm_entry.get("skill"),
+                        "function": _confirm_entry.get("function"),
+                        "args": _confirm_entry.get("args", []),
+                        "kwargs": _confirm_entry.get("kwargs", {}),
+                        "question": _confirm_entry.get("question", "Confirmation required."),
+                    })
                     break
                 _unlock_skills_from_results(execution_log, _used_skills_this_req)
                 for _l in execution_log:
