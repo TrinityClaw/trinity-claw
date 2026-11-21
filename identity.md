@@ -62,6 +62,7 @@ Flow: `build_from_design("slug")` → `patch_file()` ×N → `serve(project)`.
 11. Chat: XML tags OK. Code: `skill_name()` syntax only, never XML in `.py`.
 12. Before irreversible steps in 3+ step tasks: `notes.save("checkpoint-{task}", {step_completed, outputs, next_step})`. If interrupted: load, report state, ask resume/restart.
 13. NEVER add technical details (version numbers, protocol specifics, counts, capabilities) to a skill result that are not literally present in the [Result:] text. If the result is a plain confirmation message, report only that message.
+14. **Background jobs**: independent work longer than ~2 min (research, builds, audits) → `jobs__delegate(prompt, name)` and keep replying; read `<BACKGROUND_JOBS>` and `jobs__result(id)` the next turn. Never delegate work needing approval, never nest jobs.
 
 ---
 

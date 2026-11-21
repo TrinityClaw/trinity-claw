@@ -55,6 +55,7 @@ This project follows responsible AI agent design practices, but **no system is u
 - **Open Promises Tracking**: A lightweight open-loops list keeps the agent accountable for unfinished promises, follow-ups, and suggestions — surfaced in every session, auto-expired after 14 days, checkable off with a 4-character ID
 - **Ambient Heartbeat**: A background loop that ticks every 15 minutes when your agent is idle — reviews its own memory, follows up on open loops, reads its improvement idea backlog, and pings you on Telegram only when something is worth saying; everything else is silent and logged to an audit file
 - **Multi-Step Reasoning**: Agent loop for complex tasks
+- **Background Jobs**: Long independent work runs in a parallel agent session — research, builds, and audits continue while you keep chatting; results surface in the next turn
 - **Dynamic Skills**: Core system skills + user-created skills
 - **Web Browsing**: Fetch and analyze web content, including JS-rendered pages
 - **Browser Automation**: Full Playwright-powered browser control — navigate, click, type, screenshot, evaluate JS, fill forms
@@ -392,10 +393,38 @@ HEARTBEAT_MAX_CLOUD=1             # max cloud escalations per rolling hour (0 = 
 
 ---
 
-## Core Skills (37)
+## Background Jobs
+
+Long work no longer has to block the conversation. Ask for it in the background — or let the agent decide — and a second agent session works on it while you keep chatting:
+
+> "Research three competitors and draft a comparison — run it in the background."
+> "While that runs, summarize this PDF."
+
+| Function | What it does |
+|----------|-------------|
+| `delegate(prompt, name, model)` | Start a job; returns its id immediately |
+| `list(state)` | All jobs, newest first — status, elapsed, and name |
+| `result(id)` | A finished job's output (marks it read) |
+| `cancel(id)` | Stop a queued or running job |
+
+**How it works**
+
+- A job is a POST to the agent's own `/chat` with a dedicated `session_id` (`job_<id>`) — the same self-dispatch pattern the scheduler uses. It gets its own history, JSONL transcript, and cancellation event.
+- Defaults: **2 concurrent** workers (`JOBS_MAX_WORKERS`), **4 active** jobs (`JOBS_MAX_ACTIVE`), **30-minute** cap (`JOBS_TIMEOUT_SECONDS`). Extra jobs queue.
+- Jobs are denied `browser_session`, `web_builder`, `create_skill`, `autoimprove`, and `mcp_client` — these hold process-wide state or rewrite the skill registry (override with `JOBS_DENY_SKILLS`).
+- Jobs cannot delegate again (depth limit 1), and they cannot ask the user questions — give them a self-contained prompt.
+- On each new turn the agent sees a compact `<BACKGROUND_JOBS>` block with running jobs and unread results; it calls `jobs__result(id)` and reports.
+- On completion a Telegram message is sent (disable with `JOBS_NOTIFY=0`).
+- The Web UI has a **Jobs** panel (status, elapsed, preview, cancel). Jobs interrupted by a restart are marked `interrupted` on boot.
+- Storage: `memory/jobs.json` + `memory/jobs/<id>.log`; capped at the 100 most recent finished jobs (`JOBS_KEEP`).
+
+---
+
+## Core Skills
 
 | Skill | Description | Functions |
 |-------|-------------|-----------|
+| `jobs` | Background jobs — run independent work in a separate agent session while the chat stays responsive; results surface in the next turn's `<BACKGROUND_JOBS>` block | `delegate`, `list`, `result`, `cancel` |
 | `memory` | Agent-curated persistent memory — two capped stores: `MEMORY.md` (agent/project facts) and `USER.md` (user profile); writes persist immediately and surface in the next session's snapshot | `add`, `patch`, `remove`, `batch`, `consolidate` |
 | `memory_search` | Recall past context on demand — keyword search over conversation history (FTS5) and semantic search over lessons/memory (ChromaDB) | `session_search`, `semantic_search`, `prune_memory_db` |
 | `open_loops` | Track unfinished promises, follow-ups, and suggestions; rendered into every session snapshot; loops auto-expire after 14 days | `add`, `done`, `list` |
