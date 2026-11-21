@@ -5040,7 +5040,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                 print(f"⚠️  daily_review failed: {_dr_err}")
         threading.Thread(target=_bg_daily_review, daemon=True, name="daily-review").start()
 
-        # On new sessions: check if recurring failures warrant autoimprove — park result, never blocks
+        # On new sessions: check if recurring failures warrant autoimprove —
+        # run the suggested loop in the background instead of just parking an idea.
         def _bg_should_improve():
             try:
                 from skills.core import self_improvement as _si
@@ -5058,7 +5059,17 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
                     pass
                 if result.get("improve"):
                     _ai = skills.get("autoimprove")
-                    if _ai and hasattr(_ai, "park_idea"):
+                    if _ai and hasattr(_ai, "run_loop"):
+                        loop = result.get("suggested_loop")
+                        if loop:
+                            try:
+                                _summary = _ai.run_loop(loop)
+                                print(f"🔁 Autoimprove loop '{loop}' complete: {_summary[:120]}")
+                            except Exception as _loop_err:
+                                print(f"⚠️ Autoimprove loop '{loop}' failed: {_loop_err}")
+                        else:
+                            print(f"🔁 should_self_improve: {result['reason'][:120]} (no loop specified)")
+                    elif _ai and hasattr(_ai, "park_idea"):
                         top = result["patterns"][0]
                         idea = (
                             f"[auto] should_self_improve triggered: '{top['error_type']}' "
