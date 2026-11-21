@@ -171,6 +171,96 @@ After installation, open the Web UI at: **http://localhost:8080**
 
 ---
 
+## 🖥️ VPS / Public-Facing Deployment
+
+⚠️ **Security Warning:** TrinityClaw is designed for local use. The agent has code-execution capabilities (`terminal`, `code_executor` skills) and a single API key protects everything. Running on a public VPS requires additional hardening — see [SECURITY.md](./SECURITY.md) for full details.
+
+### Prerequisites
+- A VPS with Docker and Docker Compose installed
+- A domain name pointing to your VPS IP
+- A reverse proxy with TLS (Caddy, Nginx, Traefik, or Cloudflare Tunnel)
+
+### Step 1 — Clone the repo on your VPS
+```bash
+git clone https://github.com/TrinityClaw/trinity-claw.git
+cd trinity-claw
+```
+
+### Step 2 — Create strong secrets
+Generate random keys on your VPS:
+```bash
+openssl rand -hex 32   # TRINITY_API_KEY
+openssl rand -hex 32   # LITELLM_MASTER_KEY
+```
+
+Create `.env.production`:
+```bash
+TRINITY_API_KEY=<paste-your-random-key-here>
+LITELLM_MASTER_KEY=<paste-your-random-key-here>
+POSTGRES_PASSWORD=<strong-random-password>
+CORS_ORIGINS=https://your-domain.com
+RATE_LIMIT_RPM=30
+SESSION_AUTO_COMPRESS_HOURS=2
+```
+
+> Never commit `.env.production` to git.
+
+### Step 3 — Create a localhost-only compose override
+Create `docker-compose.override.yml` (do not commit this to git):
+
+```yaml
+services:
+  trinity-agent:
+    ports:
+      - "127.0.0.1:8001:8001"   # localhost only — reverse proxy handles public
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"   # read-only
+      - "./.env:/app/.env:ro"                             # read-only
+    environment:
+      - CORS_ORIGINS=https://your-domain.com
+      - RATE_LIMIT_RPM=30
+  updater:
+    ports:
+      - "127.0.0.1:8002:8002"   # never expose publicly
+```
+
+### Step 4 — Set up a reverse proxy with TLS
+
+**Example — Caddyfile:**
+```caddyfile
+your-domain.com {
+    reverse_proxy localhost:8001
+    encode zstd gzip
+    rate_limit {
+        zone per_ip {
+            key {remote_host}
+            requests 30
+            window 1 minute
+        }
+    }
+}
+```
+
+Or use Nginx, Traefik, or Cloudflare Tunnel. The key requirements are TLS termination and rate limiting.
+
+### Step 5 — Start TrinityClaw
+```bash
+docker compose -f docker-compose.yml -f docker-compose.override.yml --env-file .env.production up -d
+```
+
+### Critical Do's and Don'ts
+- ✅ Bind `trinity-agent` ports to `127.0.0.1` only; let the reverse proxy handle public traffic
+- ✅ Use TLS (HTTPS) — never expose plain HTTP
+- ✅ Use strong, randomly-generated `TRINITY_API_KEY` and `LITELLM_MASTER_KEY`
+- ✅ Keep the updater on `127.0.0.1:8002` — never expose it publicly
+- ✅ Keep Docker socket read-only (`:ro`) inside the agent container
+- ❌ Do not publish ports 8001, 8080, 8090, or 8002 to `0.0.0.0`
+- ❌ Do not commit `.env` or `.env.production` to git
+- ❌ Do not disable CORS restrictions
+
+---
+
 ## Configuration
 
 ### LLM Setup
