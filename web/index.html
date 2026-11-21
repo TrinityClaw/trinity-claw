@@ -15,6 +15,12 @@
             --surface-3:     #222230;
             --border:        rgba(255,255,255,0.07);
             --border-strong: rgba(255,255,255,0.12);
+            --modal-border:  rgba(255,255,255,0.10);
+            --input-bg:      #1a1a23;
+            --input-border:  rgba(255,255,255,0.08);
+            --input-text:    #ededf0;
+            --text-main:     #ededf0;
+            --text-secondary:#a0a0b0;
             --text:          #ededf0;
             --text-muted:    #7a7a8a;
             --text-dim:      #4a4a5a;
@@ -1434,7 +1440,7 @@ docker compose up --build -d</div>
                             const res = await fetch(`${agentUrl}/config/get-all`, { headers: getAuthHeaders() });
                             if (res.ok) {
                                 saveStatus.textContent = '✅ Key verified — you\'re connected!';
-                                saveStatus.style.color = 'var(--accent)';
+                                saveStatus.style.color = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
                                 setTimeout(() => { closeSettings(); saveStatus.textContent = ''; }, 1500);
                             } else if (res.status === 401 || res.status === 403) {
                                 saveStatus.textContent = '❌ Key rejected — it must match trinity-key.txt in the install folder.';
@@ -1449,7 +1455,7 @@ docker compose up --build -d</div>
                         }
                     } else {
                         saveStatus.textContent = 'Nothing to save.';
-                        saveStatus.style.color = 'var(--text-secondary)';
+                        saveStatus.style.color = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim();
                     }
                     return;
                 }
@@ -1483,7 +1489,7 @@ docker compose up --build -d</div>
                     }
                     if (back) {
                         saveStatus.textContent = '✅ Settings applied';
-                        saveStatus.style.color = 'var(--accent)';
+                        saveStatus.style.color = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
                         setTimeout(() => { closeSettings(); saveStatus.textContent = ''; }, 1500);
                     } else {
                         saveStatus.textContent = '⚠️ Saved, but the agent did not come back in time — check container logs.';
@@ -1492,7 +1498,7 @@ docker compose up --build -d</div>
                 } catch (e) {
                     // Updater sidecar unreachable (e.g. remote UI) — manual fallback
                     saveStatus.textContent = '✅ Saved. Auto-restart unavailable here — run: docker compose up -d litellm trinity-agent';
-                    saveStatus.style.color = 'var(--accent)';
+                    saveStatus.style.color = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
                 }
             } catch (e) {
                 console.error('Save error:', e);
