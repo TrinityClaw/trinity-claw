@@ -2299,11 +2299,79 @@ def _memory_skill_health() -> str:
     return ""
 
 
+def _build_cross_session_context(session_id: str) -> str:
+    """Cross-session context: open plans from other sessions + recurring lessons.
+
+    Reads plans.json (plans survive restarts) and lessons.jsonl (mistakes survive
+    restarts) to surface context from previous sessions that the current session
+    should be aware of. Budget-aware — returns '' when nothing relevant exists.
+    """
+    blocks: list = []
+
+    # 1) Open plans from OTHER sessions (current session's plan is injected
+    # separately via _plan_note; here we surface plans left dangling elsewhere).
+    try:
+        all_plans = _read_plans()
+        now = time.time()
+        other_open = []
+        for sid, rec in all_plans.items():
+            if sid == session_id:
+                continue
+            if not isinstance(rec, dict) or "steps" not in rec or "ts" not in rec:
+                continue
+            if now - rec["ts"] > _PLAN_TTL_SECONDS:
+                continue
+            steps = rec.get("steps", [])
+            pend = [(i, s["text"]) for i, s in enumerate(steps, 1) if not s.get("done")]
+            if pend:
+                other_open.append((sid, pend))
+        if other_open:
+            lines = ["Open plans from previous sessions:"]
+            for sid, pend in other_open[:5]:
+                lines.append(f"  [{sid[:8]}…] {pend[0][1]}")
+                for _, t in pend[1:]:
+                    lines.append(f"      → {t}")
+            if len(other_open) > 5:
+                lines.append(f"… {len(other_open) - 5} more")
+            blocks.append("\n".join(lines))
+    except Exception:
+        pass
+
+    # 2) Recurring lessons from lessons.jsonl (errors seen across sessions).
+    try:
+        from pathlib import Path
+        lessons_file = Path(os.getenv("MEMORY_HOME", "/app/memory")) / "lessons.jsonl"
+        if lessons_file.exists():
+            lines = lessons_file.read_text(encoding="utf-8").splitlines()
+            if lines:
+                # Count error types from the last 20 lessons
+                from collections import Counter
+                counts: Counter = Counter()
+                for line in lines[-20:]:
+                    try:
+                        import json as _json
+                        rec = _json.loads(line)
+                        et = rec.get("error_type") or rec.get("type") or "unknown"
+                        counts[et] += 1
+                    except Exception:
+                        continue
+                top = counts.most_common(3)
+                if top:
+                    lesson_lines = ["Recurring errors across sessions:"]
+                    for et, c in top:
+                        lesson_lines.append(f"  • {et} — {c}x in last 20 lessons")
+                    blocks.append("\n".join(lesson_lines))
+    except Exception:
+        pass
+
+    return "\n\n".join(blocks) if blocks else ""
+
+
 def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool, domain_map: dict) -> str:
     """Tier-1 frozen memory snapshot. Built once per session, budget-enforced.
     Priority order: USER.md → MEMORY.md → top-3 lessons → scheduled tasks →
-    gated checkpoint → skill-health. Over-budget optional blocks are dropped
-    (lowest priority first)."""
+    gated checkpoint → skill-health → cross-session context. Over-budget optional
+    blocks are dropped (lowest priority first)."""
     cached = _session_memory_snapshot.get(session_id)
     if cached is not None:
         return cached
@@ -2382,6 +2450,14 @@ def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool
         if _fits(ol_text):
             temp_blocks.append(ol_text)
             used_budget[0] += _est_tokens(ol_text)
+
+    # 8) Cross-session context (open plans from other sessions + recurring lessons)
+    ctx = _build_cross_session_context(session_id)
+    if ctx:
+        ctx_block = "<CROSS_SESSION>\n" + ctx + "\n</CROSS_SESSION>"
+        if _fits(ctx_block):
+            temp_blocks.append(ctx_block)
+            used_budget[0] += _est_tokens(ctx_block)
 
     snap = "\n\n".join(temp_blocks) if temp_blocks else "Memory empty."
     if temp_blocks:
