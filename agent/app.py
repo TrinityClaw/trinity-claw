@@ -169,6 +169,7 @@ def _msg_tokens(text: str) -> set:
 SESSION_MAX_MESSAGES = 16        # 8 turns (user + assistant pairs) for cloud models
 SESSION_MAX_MESSAGES_LOCAL = 6   # 3 turns for local models — tighter context windows
 SESSION_TIMEOUT_MINUTES = 120    # auto-expire after 2h inactivity
+SESSION_AUTO_COMPRESS_HOURS = int(os.getenv("SESSION_AUTO_COMPRESS_HOURS", "2"))  # surface checkpoint for sessions idle this long
 SESSION_SUMMARY_KEEP = 4         # Keep only last 4 messages verbatim (reduced from 6)
 JSONL_MAX_LINES = 500            # compact session_logs.jsonl when it exceeds this
 TOOL_RESULT_PRUNE_CHARS = 120    # prune tool results longer than this in older turns (reduced from 300)
@@ -2367,6 +2368,45 @@ def _build_cross_session_context(session_id: str) -> str:
     return "\n\n".join(blocks) if blocks else ""
 
 
+def _build_auto_compress_context(session_id: str) -> str:
+    """Auto-compress old sessions: when a session returns after inactivity,
+    surface the saved checkpoint as a structured previous-session summary.
+
+    Checkpoints are written by get_session_history() when a session expires
+    (>SESSION_TIMEOUT_MINUTES idle). This block makes them visible in the
+    system prompt so the agent remembers what was left unfinished.
+    """
+    try:
+        data = _load_session_checkpoints()
+        ck = data.get(session_id)
+        if not ck or not isinstance(ck, dict):
+            return ""
+        from datetime import timedelta as _td
+        cutoff = datetime.now() - _td(hours=SESSION_AUTO_COMPRESS_HOURS)
+        try:
+            ts = datetime.fromisoformat(ck.get("timestamp", ""))
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
+        except Exception:
+            return ""
+        if ts < cutoff:
+            return ""
+        summary = ck.get("summary", "")
+        if not summary:
+            return ""
+        turns = ck.get("turns", 0)
+        hours_ago = max(0, int((datetime.now() - ts).total_seconds() // 3600))
+        return (
+            f"<AUTO_COMPRESS>\n"
+            f"Previous session ({turns} turn(s), {hours_ago}h ago) was auto-compressed.\n"
+            f"Resume where it left off:\n"
+            f"{summary}\n"
+            f"</AUTO_COMPRESS>"
+        )
+    except Exception:
+        return ""
+
+
 def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool, domain_map: dict) -> str:
     """Tier-1 frozen memory snapshot. Built once per session, budget-enforced.
     Priority order: USER.md → MEMORY.md → top-3 lessons → scheduled tasks →
@@ -2458,6 +2498,14 @@ def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool
         if _fits(ctx_block):
             temp_blocks.append(ctx_block)
             used_budget[0] += _est_tokens(ctx_block)
+
+    # 9) Auto-compress previous session summary
+    ac = _build_auto_compress_context(session_id)
+    if ac:
+        ac_block = ac
+        if _fits(ac_block):
+            temp_blocks.append(ac_block)
+            used_budget[0] += _est_tokens(ac_block)
 
     snap = "\n\n".join(temp_blocks) if temp_blocks else "Memory empty."
     if temp_blocks:
