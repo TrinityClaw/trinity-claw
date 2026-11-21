@@ -692,24 +692,6 @@ _register_condition("skill_exists", _cond_skill_exists)
 _register_condition("error_count_above", _cond_error_count_above)
 
 
-def _load_error_patterns() -> Dict:
-    """Load error patterns from memory dir."""
-    path = MEMORY_DIR / "error_patterns.json"
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_error_patterns(patterns: Dict) -> None:
-    """Save error patterns to memory dir."""
-    path = MEMORY_DIR / "error_patterns.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(patterns, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
 def _check_idea_conditions(idea: Dict) -> tuple:
     """Check if an idea's conditions are met.
 
@@ -775,29 +757,9 @@ def _try_act_on_idea(idea: Dict) -> str:
     if not conditions_met:
         return ""
 
-    # Action: discover_patterns → add to error_patterns.json
+    # Action: discover_patterns → deprecated, no longer supported
     if source == "discover_patterns":
-        match = re.search(r"'(\w+)'", text)
-        if match:
-            error_type = match.group(1)
-            patterns = _load_error_patterns()
-            if error_type not in patterns:
-                patterns[error_type] = {
-                    "fix": "see lessons.jsonl for examples",
-                    "first_seen": datetime.now().isoformat(),
-                }
-                _save_error_patterns(patterns)
-                idea["status"] = "implemented"
-                idea["implemented_as"] = "error_pattern_added"
-                idea["implemented_at"] = datetime.now().isoformat()
-                all_ideas = _load_ideas()
-                for idx, item in enumerate(all_ideas):
-                    if item.get("id") == iid:
-                        all_ideas[idx] = idea
-                        break
-                _save_ideas(all_ideas)
-                return f"Added '{error_type}' to error_patterns.json [{iid}]"
-        return ""
+        return "❌ discover_patterns is deprecated — use lessons_to_proposals() instead"
 
     # Action: auto_detect with error_recovery → ensure lesson recorded
     if source == "auto_detect" and "error_recovery" in text.lower():
@@ -2737,141 +2699,6 @@ def _loop_pattern_mining(days=7, min_occurrences=3, max_proposals=5) -> str:
         f"— review with autoimprove.list_ideas()"
     )
 
-
-# ── Discover new error pattern types ─────────────────────────────────────────
-
-def _discover_new_patterns(min_occurrences: int = 2, max_proposals: int = 10) -> str:
-    """
-    Scan lessons.jsonl for error/failure types NOT already tracked in
-    error_patterns.json.  Uses the LLM to analyze recurring unknown failure modes
-    and propose new pattern definitions.  Results are parked via park_idea() for
-    human review — nothing is auto-added.
-
-    This closes the blind spot where error_reduce only improves patterns it already
-    knows about while silently ignoring new categories accumulating in lessons.jsonl.
-
-    Args:
-        min_occurrences: Min times an untracked type must appear before analysis
-                         (default 2 — low bar since the LLM decides severity).
-        max_proposals:   Max ideas to park per run (default 10) — prevents flooding
-                         improvement_ideas.jsonl when lessons.jsonl is large.
-
-    Returns:
-        Summary of untracked types found and ideas parked.
-    """
-    try:
-        min_occurrences = int(min_occurrences)
-    except (ValueError, TypeError):
-        min_occurrences = 2
-    try:
-        max_proposals = int(max_proposals)
-    except (ValueError, TypeError):
-        max_proposals = 10
-
-    if not LESSONS_FILE.exists():
-        return "NO_DATA: lessons.jsonl not found — run skills first to accumulate lessons"
-
-    # Build the set of already-known pattern types
-    known_types: set = set(AUTO_FIXABLE)
-    if PATTERNS_FILE.exists():
-        try:
-            with PATTERNS_FILE.open(encoding="utf-8") as f:
-                known_types |= set(json.load(f).keys())
-        except Exception:
-            pass
-
-    # Tally untracked error types, collecting example messages for context
-    unknown_counts: Dict[str, List[str]] = {}
-    try:
-        for line in LESSONS_FILE.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                lesson = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            et  = (lesson.get("error_type") or lesson.get("type", "")).strip()
-            msg = (lesson.get("error_message") or lesson.get("message", "")).strip()
-            if not et or et in known_types:
-                continue
-            unknown_counts.setdefault(et, []).append(msg[:200])
-    except Exception as e:
-        return f"❌ _discover_new_patterns: could not read lessons.jsonl — {e}"
-
-    if not unknown_counts:
-        return "✅ discover_patterns: no untracked error types in lessons.jsonl"
-
-    qualifying = {
-        et: msgs
-        for et, msgs in unknown_counts.items()
-        if len(msgs) >= min_occurrences
-    }
-
-    if not qualifying:
-        below = len(unknown_counts)
-        return (
-            f"✅ discover_patterns: {below} untracked type(s) in lessons — "
-            f"none meet the {min_occurrences}x threshold yet"
-        )
-
-    proposed = 0
-    lines = [f"🔍 discover_patterns: {len(qualifying)} qualifying untracked type(s):"]
-
-    for et, msgs in sorted(qualifying.items(), key=lambda x: -len(x[1])):
-        if proposed >= max_proposals:
-            lines.append(f"  … capped at {max_proposals} proposals — remaining types skipped")
-            break
-        # Dedupe while preserving order
-        unique_msgs = list(dict.fromkeys(msgs))
-        examples_str = "\n".join(f"  - {m}" for m in unique_msgs[:5])
-
-        prompt = (
-            f"You are analyzing a recurring failure type in an AI agent skill system.\n\n"
-            f"Error type name : {et}\n"
-            f"Occurrences     : {len(msgs)}\n"
-            f"Example messages:\n{examples_str}\n\n"
-            f"Respond in this EXACT format (3 lines, no extra text):\n"
-            f"DESCRIPTION: <one sentence — what this failure pattern is>\n"
-            f"FIX: <one sentence — how to prevent or fix it in Python code>\n"
-            f"SEVERITY: low|medium|high|critical"
-        )
-
-        analysis = _call_llm_simple(prompt, max_tokens=150)
-
-        if analysis:
-            idea_text = (
-                f"New error pattern discovered: '{et}' ({len(msgs)}x in lessons.jsonl).\n"
-                f"LLM analysis:\n{analysis}\n"
-                f"Consider adding to error_patterns.json — and to AUTO_FIXABLE if a safe "
-                f"deterministic fix exists."
-            )
-        else:
-            # LLM unavailable — surface raw data so a human can still act on it
-            sample = "; ".join(unique_msgs[:3])
-            idea_text = (
-                f"New error pattern discovered: '{et}' ({len(msgs)}x in lessons.jsonl). "
-                f"Examples: {sample}. "
-                f"Consider adding to error_patterns.json."
-            )
-
-        park_idea(idea_text, source="discover_patterns")
-        lines.append(f"  • '{et}' ({len(msgs)}x) → parked for review")
-        proposed += 1
-
-    _log({
-        "timestamp":       datetime.now().isoformat(),
-        "loop":            "discover_patterns",
-        "outcome":         "DISCOVERED",
-        "untracked_total": len(unknown_counts),
-        "qualifying":      len(qualifying),
-        "proposed":        proposed,
-        "min_occurrences": min_occurrences,
-    })
-
-    lines.append(f"\nReview with: autoimprove.list_ideas()")
-    return "\n".join(lines)
-
-
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
@@ -2879,7 +2706,7 @@ def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
     Run a single named improvement loop.
 
     Args:
-        loop_name:       ast_audit | error_reduce | daily_review | suggest_core | pattern_mining | discover_patterns
+        loop_name:       ast_audit | error_reduce | daily_review | suggest_core | pattern_mining
         max_experiments: Max experiments / skills to scan
 
     Returns:
@@ -2892,17 +2719,9 @@ def run_loop(loop_name: str, max_experiments=10, **_ignored) -> str:
         "daily_review":      _loop_daily_review,
         "suggest_core":      lambda: suggest_core(max_skills=max_experiments),
         "pattern_mining":    _loop_pattern_mining,
-        "discover_patterns": lambda: _discover_new_patterns(max_proposals=max_experiments),
     }
     if loop_name not in _loops:
         return f"❌ Unknown loop '{loop_name}'. Available: {list(_loops.keys())}"
-
-    if loop_name == "discover_patterns":
-        sys.stderr.write(
-            "[autoimprove] WARNING: discover_patterns is deprecated — "
-            "it runs 180s of LLM calls producing auto-dismissed noise. "
-            "Use lessons_to_proposals() instead.\n"
-        )
 
     start   = time.time()
     result  = _loops[loop_name]()

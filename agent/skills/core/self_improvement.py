@@ -1986,9 +1986,6 @@ def status() -> str:
 # BACKWARDS COMPATIBILITY ALIASES
 # ============================================================================
 
-analyze = audit
-improve = fix
-
 # ============================================================================
 # EXPORT LIST (Helps skill loader detect public functions)
 # ============================================================================
@@ -2008,9 +2005,6 @@ __all__ = [
     "run_tests",
     "learn_from_feedback",
     "status",
-    # Aliases
-    "analyze",
-    "improve",
     # Semantic lesson search
     "search_lessons_semantic",
     "index_all_lessons",
