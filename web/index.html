@@ -1004,6 +1004,10 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 Cron Jobs
             </button>
+            <button class="sidebar-tab" data-panel="jobs" onclick="showPanel('jobs')" title="Background Jobs">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/><path d="M14 4h6v6h-6z"/><path d="M4 14h6v6H4z"/></svg>
+                Jobs
+            </button>
         </nav>
 
         <div class="sidebar-content">
@@ -1033,6 +1037,15 @@
                     <button class="panel-refresh-btn" onclick="loadCronJobs()">↻</button>
                 </div>
                 <div id="crons-list"><div class="panel-empty">Loading…</div></div>
+            </div>
+
+            <!-- Background Jobs Panel -->
+            <div class="panel" id="panel-jobs">
+                <div class="panel-header">
+                    <span class="panel-title">Background Jobs <span id="jobs-count" class="count-badge"></span></span>
+                    <button class="panel-refresh-btn" onclick="loadJobs()">↻</button>
+                </div>
+                <div id="jobs-list"><div class="panel-empty">Loading…</div></div>
             </div>
 
         </div>
@@ -1374,8 +1387,11 @@ docker compose up --build -d</div>
                 const apiKeyEnv = apiKeyEnvInput.value.trim();
                 const apiKeyVal = apiKeyValueInput.value.trim();
 
-                // Save Agent API key to localStorage first
+                // Save Agent API key to localStorage only — the key already lives
+                // in .env on the server (installer-generated) and is sent as the
+                // X-API-Key header on every request, so it NEVER needs a restart.
                 const agentKey = agentApiKeyInput.value.trim();
+                const agentKeyChanged = agentKey && agentKey !== localStorage.getItem('trinity_api_key');
                 if (agentKey) localStorage.setItem('trinity_api_key', agentKey);
 
                 if (modelName) {
@@ -1410,12 +1426,38 @@ docker compose up --build -d</div>
                 }
 
                 if (!_savedAny) {
-                    saveStatus.textContent = 'Nothing to save.';
-                    saveStatus.style.color = 'var(--text-secondary)';
+                    if (agentKeyChanged) {
+                        // First-time key entry — verify it authenticates against the
+                        // agent. No restart needed: the key is browser-side only.
+                        saveStatus.textContent = '🔑 Verifying key…';
+                        try {
+                            const res = await fetch(`${agentUrl}/config/get-all`, { headers: getAuthHeaders() });
+                            if (res.ok) {
+                                saveStatus.textContent = '✅ Key verified — you\'re connected!';
+                                saveStatus.style.color = 'var(--accent)';
+                                setTimeout(() => { closeSettings(); saveStatus.textContent = ''; }, 1500);
+                            } else if (res.status === 401 || res.status === 403) {
+                                saveStatus.textContent = '❌ Key rejected — it must match trinity-key.txt in the install folder.';
+                                saveStatus.style.color = '#ff6b6b';
+                            } else {
+                                saveStatus.textContent = `⚠️ Agent replied HTTP ${res.status} — check container logs.`;
+                                saveStatus.style.color = '#ff6b6b';
+                            }
+                        } catch (e) {
+                            saveStatus.textContent = '⚠️ Could not reach the agent to verify the key.';
+                            saveStatus.style.color = '#ff6b6b';
+                        }
+                    } else {
+                        saveStatus.textContent = 'Nothing to save.';
+                        saveStatus.style.color = 'var(--text-secondary)';
+                    }
                     return;
                 }
 
-                // ── Auto-restart: recreate litellm + agent so changes take effect ──
+                // ── Auto-restart: only when settings actually need it ──────────
+                // Model/provider changes → litellm must re-read its config.
+                // Telegram/email changes → agent must re-read env vars.
+                // The Trinity API key alone never lands here (no restart needed).
                 saveStatus.textContent = '💾 Saved — restarting services to apply…';
                 try {
                     const res = await fetch(`${UPDATER_URL}/restart`, {
@@ -1425,7 +1467,7 @@ docker compose up --build -d</div>
                     const data = await res.json().catch(() => ({}));
                     if (!res.ok) {
                         const tail = (data.output || `HTTP ${res.status}`).trim().split('\n').slice(-2).join(' — ');
-                        saveStatus.textContent = `⚠️ Saved, but restart failed: ${tail}`;
+                        saveStatus.textContent = `⚠️ Saved, but restart failed: ${tail} — settings are stored; run 'docker compose up -d litellm trinity-agent' in the install folder to apply them.`;
                         saveStatus.style.color = '#ff6b6b';
                         return;
                     }
@@ -2094,6 +2136,7 @@ docker compose up --build -d</div>
             });
             if (name === 'health') loadHealth();
             if (name === 'crons') loadCronJobs();
+            if (name === 'jobs') loadJobs();
         }
 
         async function loadSkills() {
@@ -2257,6 +2300,68 @@ docker compose up --build -d</div>
             }
         }
 
+        // ── Background jobs ────────────────────────────────────────────────
+        function _esc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        async function loadJobs() {
+            const el = document.getElementById('jobs-list');
+            const cnt = document.getElementById('jobs-count');
+            if (!el) return;
+            try {
+                const res = await fetch(`${agentUrl}/jobs`, { headers: getAuthHeaders() });
+                if (!res.ok) throw new Error(res.status);
+                const data = await res.json();
+                const jobs = data.jobs || [];
+                if (cnt) cnt.textContent = data.active ? `${data.active} active` : jobs.length;
+                if (jobs.length === 0) {
+                    el.innerHTML = '<div class="panel-empty">No background jobs</div>';
+                    return;
+                }
+                const icons = {queued:'⏳', running:'🔄', done:'✅', failed:'❌',
+                               cancelled:'⏹️', interrupted:'⚠️'};
+                el.innerHTML = jobs.map(j => {
+                    const icon = icons[j.status] || '•';
+                    const badge = (j.status === 'running' || j.status === 'queued')
+                        ? 'badge-recurring' : 'badge-once';
+                    const name = _esc((j.name || '').slice(0, 70));
+                    const preview = _esc((j.result || j.error || '').slice(0, 140));
+                    const cancel = (j.status === 'queued' || j.status === 'running')
+                        ? `<button class="cron-delete" onclick="cancelJob('${j.id}')" title="Cancel">✕</button>`
+                        : '';
+                    return `
+                    <div class="cron-item" id="job-${j.id}">
+                        <div class="cron-row1">
+                            <span class="cron-name" title="${name}">${icon} ${j.id}</span>
+                            <span class="cron-badge ${badge}">${j.status}</span>
+                            ${cancel}
+                        </div>
+                        <div class="cron-meta">${_esc(j.elapsed || '')} · ${name}</div>
+                        ${preview ? `<div class="cron-prompt">${preview}</div>` : ''}
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                el.innerHTML = '<div class="panel-empty">Could not load jobs</div>';
+            }
+        }
+
+        async function cancelJob(id) {
+            if (!confirm(`Cancel job ${id}?`)) return;
+            try {
+                const res = await fetch(`${agentUrl}/jobs/${encodeURIComponent(id)}/cancel`, {
+                    method: 'POST',
+                    headers: getAuthHeaders()
+                });
+                if (res.ok) loadJobs();
+                else alert('Cancel failed');
+            } catch (e) {
+                alert('Could not reach agent');
+            }
+        }
+
         // Auto-load skills on page startup
         loadSkills();
 
@@ -2269,6 +2374,11 @@ docker compose up --build -d</div>
         setInterval(() => {
             if (document.getElementById('panel-crons').classList.contains('active')) loadCronJobs();
         }, 15000);
+
+        // Auto-refresh background jobs every 5s while panel is visible
+        setInterval(() => {
+            if (document.getElementById('panel-jobs').classList.contains('active')) loadJobs();
+        }, 5000);
         // ────────────────────────────────────────────────────────────────────
     </script>
 </body>
