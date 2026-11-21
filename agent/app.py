@@ -123,6 +123,8 @@ _SKILL_TRIGGER_OVERRIDES: Dict[str, set] = {
                         "cloudy", "celsius", "fahrenheit"},
     "notes":           {"memo", "remember", "jot"},
     "email_sender":    {"compose", "draft", "forward", "outbox", "bcc"},
+    "jobs":            {"delegate", "background", "parallel", "async", "job", "jobs",
+                        "subagent", "overnight", "meanwhile"},
 }
 _skill_trigger_cache: Dict[str, Dict[str, frozenset]] = {}
 
@@ -179,6 +181,12 @@ session_store: Dict[str, Dict] = {}
 # iteration boundary. Prevents zombie runs from abandoned HTTP clients
 # (Telegram timeouts, closed tabs) from hogging Ollama for 20+ minutes.
 _active_runs: Dict[str, threading.Event] = {}
+
+# Serialises session_logs.jsonl append + compaction. Background jobs made
+# concurrent writers routine; without this a compaction can drop entries that
+# another run appended while it was rewriting the file. RLock because
+# save_to_jsonl() calls compact_jsonl() while holding it.
+_jsonl_lock = threading.RLock()
 
 # ── Heartbeat state ──────────────────────────────────────────────────────────
 _TICK_MODE = False                      # True only while a heartbeat tick runs
@@ -816,6 +824,15 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     _deny = _heartbeat_denied(skill_name, function_name)
     if _deny:
         return _deny_msg(skill_name, function_name)
+    # Delegated jobs may not touch skills that hold process-wide state.
+    _jobs_mod = skills.get("jobs")
+    if _jobs_mod is not None:
+        try:
+            _job_deny = _jobs_mod._job_denial(skill_name)
+        except Exception:
+            _job_deny = None
+        if _job_deny:
+            return _job_deny
     if skill_name not in skills:
         raise ValueError(f"Skill '{skill_name}' not found. Available: {list(skills.keys())}")
 
@@ -1440,8 +1457,9 @@ def save_to_jsonl(user_message: str, ai_reply: str, metadata: Optional[Dict] = N
             "id": str(uuid.uuid4()),
             "session_id": session_id
         }
-        with open(MEMORY_FILE, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        with _jsonl_lock:
+            with open(MEMORY_FILE, "a") as f:
+                f.write(json.dumps(entry) + "\n")
         # Index into FTS5 for episodic recall via notes.search_logs()
         try:
             _notes_mod = skills.get("notes")
@@ -1455,15 +1473,16 @@ def save_to_jsonl(user_message: str, ai_reply: str, metadata: Optional[Dict] = N
         # Compact if the file has grown large (by size) or line count is high.
         # Both checks are O(1)/cheap and must agree with the guard inside compact_jsonl().
         try:
-            _mf_size = os.path.getsize(MEMORY_FILE)
-            if _mf_size > 2_000_000:
-                compact_jsonl()
-            else:
-                # Fast line-count check: avoids reading the whole file on every save.
-                with open(MEMORY_FILE, "rb") as _mf:
-                    _mf_lines = _mf.read().count(b"\n")
-                if _mf_lines > JSONL_MAX_LINES:
+            with _jsonl_lock:
+                _mf_size = os.path.getsize(MEMORY_FILE)
+                if _mf_size > 2_000_000:
                     compact_jsonl()
+                else:
+                    # Fast line-count check: avoids reading the whole file on every save.
+                    with open(MEMORY_FILE, "rb") as _mf:
+                        _mf_lines = _mf.read().count(b"\n")
+                    if _mf_lines > JSONL_MAX_LINES:
+                        compact_jsonl()
         except OSError:
             pass
     except Exception as e:
@@ -1758,7 +1777,13 @@ def summarize_messages(messages: List[Dict], existing_summary: str = "") -> str:
 
 
 def compact_jsonl():
-    """When session_logs.jsonl exceeds JSONL_MAX_LINES, summarize the oldest half and archive it."""
+    """When session_logs.jsonl exceeds JSONL_MAX_LINES, summarize the oldest half and archive it.
+    Serialised with save_to_jsonl(): the rewrite must not race a concurrent append."""
+    with _jsonl_lock:
+        _compact_jsonl_unlocked()
+
+
+def _compact_jsonl_unlocked():
     if not os.path.exists(MEMORY_FILE):
         return
     try:
@@ -2057,25 +2082,26 @@ def _remove_last_turn_from_disk(session_id: str) -> bool:
     """Remove the newest session_logs.jsonl entry for a session (one line
     per turn). Used by /session/undo and /chat/retry."""
     try:
-        if not os.path.exists(MEMORY_FILE):
-            return False
-        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        last_idx = None
-        for i in range(len(lines) - 1, -1, -1):
-            try:
-                e = json.loads(lines[i])
-                if (e.get("session_id") or "default") == session_id:
-                    last_idx = i
-                    break
-            except json.JSONDecodeError:
-                continue
-        if last_idx is None:
-            return False
-        del lines[last_idx]
-        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-        return True
+        with _jsonl_lock:  # whole-file rewrite must not race a job's append
+            if not os.path.exists(MEMORY_FILE):
+                return False
+            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            last_idx = None
+            for i in range(len(lines) - 1, -1, -1):
+                try:
+                    e = json.loads(lines[i])
+                    if (e.get("session_id") or "default") == session_id:
+                        last_idx = i
+                        break
+                except json.JSONDecodeError:
+                    continue
+            if last_idx is None:
+                return False
+            del lines[last_idx]
+            with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return True
     except Exception as e:
         print(f"⚠️  Disk undo failed: {e}")
         return False
@@ -3695,6 +3721,15 @@ def reload_skills_endpoint():
 def call_skill_endpoint(req: SkillRequest):
     """Call a skill function with improved error handling."""
     try:
+        # Direct API calls are user traffic, not delegated runs. Clear any
+        # thread-local job context left over from a previous request on this
+        # reused worker thread so the job deny list never applies here.
+        _jobs_mod = skills.get("jobs")
+        if _jobs_mod is not None:
+            try:
+                _jobs_mod._set_run_context(None)
+            except Exception:
+                pass
         args = req.args or []
         kwargs = req.kwargs or {}
         result = call_skill_improved(req.skill, req.function, *args, **kwargs)
@@ -3780,6 +3815,45 @@ def undo_session(session_id: str):
     if not removed and not disk_removed:
         return {"success": False, "message": "Nothing to undo"}
     return {"success": True, "message": f"Last turn removed (RAM: {removed}, disk: {disk_removed})"}
+
+# ── Background jobs (jobs skill) ─────────────────────────────────────────────
+def _jobs_skill():
+    mod = skills.get("jobs")
+    if mod is None:
+        raise HTTPException(status_code=503, detail="jobs skill not loaded")
+    return mod
+
+
+@app.get("/jobs", dependencies=[Depends(verify_api_key)])
+def jobs_index():
+    """List background jobs (newest first) + status counts."""
+    return _jobs_skill()._api_list()
+
+
+@app.get("/jobs/{job_id}", dependencies=[Depends(verify_api_key)])
+def jobs_detail(job_id: str):
+    """One background job, including its prompt and result."""
+    rec = _jobs_skill()._api_get(job_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"no job '{job_id}'")
+    return rec
+
+
+@app.post("/jobs/{job_id}/cancel", dependencies=[Depends(verify_api_key)])
+def jobs_cancel_endpoint(job_id: str):
+    """Cancel a queued or running background job."""
+    return _jobs_skill()._api_cancel(job_id)
+
+
+@app.post("/session/cancel", dependencies=[Depends(verify_api_key)])
+def cancel_session(session_id: str):
+    """Cancel the active run for a session at its next iteration boundary."""
+    ev = _active_runs.get(session_id)
+    if ev is None or ev.is_set():
+        return {"success": False, "message": f"no active run for session '{session_id}'"}
+    ev.set()
+    return {"success": True, "message": f"cancel requested for session '{session_id}'"}
+
 
 @app.get("/session/info", dependencies=[Depends(verify_api_key)])
 def session_info(session_id: str):
@@ -4302,10 +4376,23 @@ def _maybe_push_automation(successful_skills: list, task_snippet: str) -> None:
 
 @app.post("/chat")
 def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
-    _check_rate_limit(api_key)
+    session_id = req.session_id or "default"
+
+    # Internal job dispatches (jobs.py) are not user traffic — they must not
+    # consume the per-minute budget or be throttled mid-chain.
+    if not session_id.startswith("job_"):
+        _check_rate_limit(api_key)
+
+    # Tell the jobs skill whether this run is delegated (recursion guard +
+    # process-state deny list). Overwritten every request, so thread reuse is safe.
+    _jobs_mod = skills.get("jobs")
+    if _jobs_mod is not None:
+        try:
+            _jobs_mod._set_run_context(session_id)
+        except Exception:
+            pass
 
     # Load in-memory session history first — needed to decide whether ChromaDB is useful.
-    session_id = req.session_id or "default"
     history = get_session_history(session_id)
     print(f"📖 Session {session_id[:12]}... — {len(history) // 2} prior turn(s) in memory")
 
@@ -4779,6 +4866,16 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
 
     # Prepend note/lesson directive to url_directive so both share the top-of-prompt slot
     _url_directive = _note_directive + _url_directive
+
+    # Background jobs: running work + unread results, at the top of every user
+    # turn. Skipped inside a job session — that prompt already forbids nesting.
+    if _jobs_mod is not None and not session_id.startswith("job_"):
+        try:
+            _jobs_block = _jobs_mod._render_block()
+        except Exception:
+            _jobs_block = ""
+        if _jobs_block:
+            _url_directive = _url_directive + _jobs_block + "\n\n"
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.safe_substitute(
         _url_directive       = _url_directive,
         _identity_prefix     = _identity_prefix,
@@ -4905,10 +5002,10 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             print(f"🔁 Agent iteration {iteration}/{MAX_ITERATIONS}")
             _stream_emit({"type": "iteration", "n": iteration, "max": MAX_ITERATIONS})
 
-            # Same-session supersede: a newer /chat for this session asked us to stop.
+            # Same-session supersede / explicit cancel (POST /session/cancel).
             if _cancel_event.is_set():
-                print(f"🛑 Run superseded by newer request (session {session_id[:12]}...)")
-                ai_reply = (ai_reply or "") + "\n\n[Stopped — superseded by a newer message.]"
+                print(f"🛑 Run cancelled (session {session_id[:12]}...)")
+                ai_reply = (ai_reply or "") + "\n\n[Stopped — cancelled or superseded by a newer message.]"
                 _stream_emit({"type": "superseded"})
                 break
 
@@ -5511,7 +5608,8 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
             print(f"⚠️  Agent loop reached max iterations ({MAX_ITERATIONS})")
             ai_reply += f"\n\n[⚠️ Agent reached max reasoning steps ({MAX_ITERATIONS}). Task may be incomplete.]"
 
-        _active_runs.pop(session_id, None)  # this run is no longer the active one
+        if _active_runs.get(session_id) is _cancel_event:
+            _active_runs.pop(session_id, None)  # only if we are still the active run
 
         # In cloud mode the LLM's final text should never contain [✅ ...] blocks
         # (real results come through tool messages). Strip any the LLM hallucinated.
