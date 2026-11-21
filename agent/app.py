@@ -5075,20 +5075,36 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop â€
                     tool_result_messages = []
                     execution_log = []
                     _ctrl_action, _ctrl_text = None, ""
-                    for _tc in tool_calls:
-                        if _is_agent_control_call(_tc):
-                            _c_res, _c_act, _c_txt = _handle_agent_control_call(_tc, session_id, _agent_state)
-                            tool_result_messages.append({
-                                "role": "tool",
-                                "tool_call_id": _tc.get("id") or str(uuid.uuid4()),
-                                "content": _c_res,
-                            })
-                            if _c_act and not _ctrl_action:
-                                _ctrl_action, _ctrl_text = _c_act, _c_txt
-                            continue
-                        _one_msgs, _one_log = _execute_tool_calls([_tc])
-                        tool_result_messages.extend(_one_msgs)
-                        execution_log.extend(_one_log)
+                    # Control calls (agent__plan/ask_user/finish) mutate session
+                    # state â€” run them sequentially first. Independent skill calls
+                    # can run in parallel since they only read the skill registry.
+                    _ctrl_calls = [_tc for _tc in tool_calls if _is_agent_control_call(_tc)]
+                    _skill_calls = [_tc for _tc in tool_calls if not _is_agent_control_call(_tc)]
+                    for _tc in _ctrl_calls:
+                        _c_res, _c_act, _c_txt = _handle_agent_control_call(_tc, session_id, _agent_state)
+                        tool_result_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _tc.get("id") or str(uuid.uuid4()),
+                            "content": _c_res,
+                        })
+                        if _c_act and not _ctrl_action:
+                            _ctrl_action, _ctrl_text = _c_act, _c_txt
+                    # Parallel execution of independent skill calls.
+                    if _skill_calls and _ctrl_action not in ("finish", "ask"):
+                        _max_parallel = max(1, int(os.getenv("MAX_PARALLEL_TOOLS", "4")))
+                        _results_by_idx: dict = {}
+                        with ThreadPoolExecutor(max_workers=_max_parallel) as _pool:
+                            _futures = {}
+                            for _idx, _tc in enumerate(_skill_calls):
+                                _futures[_pool.submit(_execute_tool_calls, [_tc])] = _idx
+                            for _fut in _futures:
+                                _idx = _futures[_fut]
+                                _results_by_idx[_idx] = _fut.result()
+                        # Re-emit results in original tool_calls order.
+                        for _idx in sorted(_results_by_idx):
+                            _one_msgs, _one_log = _results_by_idx[_idx]
+                            tool_result_messages.extend(_one_msgs)
+                            execution_log.extend(_one_log)
                     tool_result_messages = [_cap_tool_message(_m) for _m in tool_result_messages]
                     all_execution_logs.extend(execution_log)
                     _unlock_skills_from_results(execution_log, _used_skills_this_req)
