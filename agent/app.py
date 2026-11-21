@@ -3110,6 +3110,8 @@ _NATIVE_AGENT_REMINDER = (
     "prompt, <skill:NAME.FUNC>args</skill:NAME.FUNC>, mean: call tool NAME__FUNC with those arguments. "
     "Never write skill tags yourself.\n"
     "Keep working until the WHOLE request is finished:\n"
+    "0. Think first: call think__think(reasoning=\"...\") to lay out what you know, "
+    "what you're unsure about, and your plan — before calling any action tool.\n"
     "1. A task with 2+ steps: call agent__plan(steps=[...]) first (short, concrete steps).\n"
     "2. Execute the steps one after another. After every tool result, immediately call the next tool. "
     "Do NOT stop, summarise, or ask the user 'shall I continue / what next' between steps.\n"
@@ -4545,6 +4547,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
             "\n## SKILL USAGE REMINDER\n\n"
             "You CANNOT read files, save data, browse the web, or perform any external action without a skill tag.\n"
             "Every action needs a tag. Syntax: <skill:SKILLNAME.FUNCTIONNAME>arg1,arg2</skill:SKILLNAME.FUNCTIONNAME>\n"
+            "Think first: <skill:think.think>reasoning here</skill:think.think> before acting on anything non-trivial.\n"
             "CRITICAL RULE: Never say 'I will do X' — just DO it. Output the skill tag immediately.\n"
             "For multi-step tasks: after each skill result, output the NEXT skill tag without waiting.\n"
             "Only write a text reply when ALL steps are done and all results are in context.\n"
@@ -4587,12 +4590,14 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
 
 Format: <skill:name.function>args</skill:name.function>
 Args: comma-separated. No args: <skill:dashboard.status></skill:dashboard.status>
+Think first: <skill:think.think>I need to check X, then do Y because...</skill:think.think>
 """
 
         _rules_section = """\
 ## RULES
 
 1. Emit skill tag to act. Never describe results before the tag runs.
+2. Think first: for any multi-step or ambiguous task, call <skill:think.think> to reason before acting.
 2. Never write [✅] or [❌] blocks yourself — only the execution engine produces these.
 3. Never claim you created/saved/ran something without seeing a real [✅ Result:] block first.
 4. On [❌ Error]: acknowledge failure. Never continue as if it worked.
@@ -4609,6 +4614,7 @@ Args: comma-separated. No args: <skill:dashboard.status></skill:dashboard.status
 
 Call tools directly via function-calling interface. Tool names: skill_name__function_name.
 Example: web__search, google_drive__upload_to_folder.
+Think first: call think__think(reasoning="I need to check X, then do Y because...") before any action tool.
 
 NEVER write fake [✅] or [❌] blocks — only real tool runs produce these.
 CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop — that produces no action."""
@@ -4617,6 +4623,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
 ## RULES
 
 1. Call tools to act — never describe action as done before tool result arrives.
+2. Think first: call think__think(reasoning="...") before any action tool on multi-step or ambiguous tasks.
 2. On tool error: tell user what failed. Never continue as if it worked.
 3. Only skills in "YOUR TOOLS" exist. If not listed → say so.
 4. New skills (create_skill__create_new_skill) saved to /app/skills/dynamic/.
