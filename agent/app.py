@@ -2407,7 +2407,36 @@ def _build_auto_compress_context(session_id: str) -> str:
         return ""
 
 
-def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool, domain_map: dict) -> str:
+def _build_semantic_recall_context(session_id: str, user_message: str) -> str:
+    """Cross-session semantic recall: search past conversations for turns
+    relevant to the current user message, without the user having to re-explain.
+
+    Calls memory_search__semantic_search (ChromaDB-backed semantic search over
+    archived conversation turns) and injects top results into the system prompt.
+    Returns '' when nothing relevant exists or memory_search isn't loaded.
+    """
+    if not user_message or not user_message.strip():
+        return ""
+    try:
+        ms = skills.get("memory_search")
+        if ms is None or not hasattr(ms, "semantic_search"):
+            return ""
+        result = ms.semantic_search(user_message, n=3)
+        if not result or "No" in result[:20] or "nothing" in result.lower()[:30]:
+            return ""
+        # Trim to budget-friendly size
+        result = result[:1200]
+        return (
+            f"<SEMANTIC_RECALL>\n"
+            f"Relevant past conversations:\n"
+            f"{result}\n"
+            f"</SEMANTIC_RECALL>"
+        )
+    except Exception:
+        return ""
+
+
+def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool, domain_map: dict, user_message: str = "") -> str:
     """Tier-1 frozen memory snapshot. Built once per session, budget-enforced.
     Priority order: USER.md → MEMORY.md → top-3 lessons → scheduled tasks →
     gated checkpoint → skill-health → cross-session context. Over-budget optional
@@ -2506,6 +2535,22 @@ def _build_memory_snapshot(session_id: str, msg_words: set, is_local_model: bool
         if _fits(ac_block):
             temp_blocks.append(ac_block)
             used_budget[0] += _est_tokens(ac_block)
+
+    # 10) Session handoff from previous turn
+    hb = _build_handoff_context(session_id)
+    if hb:
+        hb_block = hb
+        if _fits(hb_block):
+            temp_blocks.append(hb_block)
+            used_budget[0] += _est_tokens(hb_block)
+
+    # 11) Cross-session semantic recall (relevant past turns)
+    sr = _build_semantic_recall_context(session_id, user_message)
+    if sr:
+        sr_block = sr
+        if _fits(sr_block):
+            temp_blocks.append(sr_block)
+            used_budget[0] += _est_tokens(sr_block)
 
     snap = "\n\n".join(temp_blocks) if temp_blocks else "Memory empty."
     if temp_blocks:
@@ -3470,6 +3515,78 @@ def _format_confirm_result(result: dict) -> str:
     if result.get("success"):
         return str(result.get("result", ""))
     return f"❌ {result.get('error', 'Action failed')}"
+
+
+# ── Session handoff store (survives restart) ─────────────────────────────────
+_HANDOFF_STORE_NAME = "handoffs.json"
+_handoff_lock = threading.Lock()
+
+
+def _handoff_store() -> Path:
+    return Path(os.getenv("MEMORY_HOME", "/app/memory")) / _HANDOFF_STORE_NAME
+
+
+def _read_handoffs() -> dict:
+    f = _handoff_store()
+    if not f.exists():
+        return {}
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    now = time.time()
+    for sid, rec in data.items():
+        if not isinstance(rec, dict):
+            continue
+        if "note" not in rec:
+            continue
+        # Drop expired handoffs (>7 days)
+        if now - rec.get("ts", 0) > 7 * 86400:
+            continue
+        out[str(sid)] = rec
+    return out
+
+
+def _save_handoffs(handoffs: dict) -> None:
+    _atomic_write(_handoff_store(), json.dumps(handoffs, ensure_ascii=False, indent=2))
+
+
+def _get_pending_handoff(session_id: str) -> dict | None:
+    with _handoff_lock:
+        handoffs = _read_handoffs()
+        return handoffs.get(session_id)
+
+
+def _save_handoff(session_id: str, note: str) -> None:
+    with _handoff_lock:
+        handoffs = _read_handoffs()
+        handoffs[session_id] = {"note": note, "ts": time.time()}
+        _save_handoffs(handoffs)
+
+
+def _clear_pending_handoff(session_id: str) -> None:
+    with _handoff_lock:
+        handoffs = _read_handoffs()
+        if session_id in handoffs:
+            del handoffs[session_id]
+            _save_handoffs(handoffs)
+
+
+def _build_handoff_context(session_id: str) -> str:
+    """Return the previous session's handoff note if one exists."""
+    rec = _get_pending_handoff(session_id)
+    if not rec:
+        return ""
+    # Drop expired handoffs (>7 days) using float timestamp comparison
+    if time.time() - rec.get("ts", 0) > 7 * 86400:
+        return ""
+    note = rec.get("note", "")
+    if not note:
+        return ""
+    return f"<SESSION_HANDOFF>\nPrevious session left off:\n{note}\n</SESSION_HANDOFF>"
 
 
 def _get_plan(session_id: str) -> List[Dict]:
@@ -5075,7 +5192,7 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
     # note/lesson directives below still need it; plan assumed it was computed elsewhere.)
     from datetime import date as _date
     _today_str = _date.today().isoformat()
-    _memory_snapshot = _build_memory_snapshot(session_id, _msg_words, _is_local_model, _domain_map)
+    _memory_snapshot = _build_memory_snapshot(session_id, _msg_words, _is_local_model, _domain_map, user_message)
 
     # Parked idea: only when the message is improvement-related (dynamic)
     _IDEA_KEYWORDS = {"improve", "idea", "suggestion", "better", "enhance",
@@ -6310,6 +6427,41 @@ CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop �
 
         _n_skills_called = len([l for l in all_execution_logs if l.get("status") != "lesson_warning"])
         _stream_emit({"type": "reply", "reply": ai_reply, "skills_called": _n_skills_called, "token_est": _token_est})
+
+        # Session handoff: save structured "where I left off" note for next session
+        try:
+            _handoff_parts = []
+            # Plan status
+            try:
+                pend = _plan_pending(_get_plan(session_id))
+                if pend:
+                    _handoff_parts.append("Open plan steps: " + "; ".join(t for _, t in pend[:5]))
+            except Exception:
+                pass
+            # Open loops
+            try:
+                from skills.core import open_loops as _ol
+                _ol_body = _ol._render_block()
+                if _ol_body:
+                    _handoff_parts.append(_ol_body)
+            except Exception:
+                pass
+            # Pending confirmation
+            try:
+                _pc = _get_pending_confirm(session_id)
+                if _pc:
+                    _handoff_parts.append("PENDING CONFIRMATION: " + _pc.get("question", "")[:200])
+            except Exception:
+                pass
+            # Last user message + outcome
+            _handoff_parts.append(f"Last user message: {req.message[:300]}")
+            _handoff_parts.append(f"Outcome: {ai_reply[:300]}")
+            _handoff_note = "\n".join(_handoff_parts)
+            if _handoff_note.strip():
+                _save_handoff(session_id, _handoff_note)
+        except Exception:
+            pass
+
         return {
             "reply": ai_reply,
             "execution_log": all_execution_logs,
