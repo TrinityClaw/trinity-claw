@@ -343,6 +343,9 @@ if [ -z "$GIT_SHA" ]; then
 fi
 [ -z "$GIT_SHA" ] && GIT_SHA="unknown"
 
+# Write .git-sha file so the agent can resolve its version without git
+echo "$GIT_SHA" > .git-sha
+
 # Re-run safety: back up any existing config before overwriting
 backup_file ".env"
 backup_file "trinity-key.txt"

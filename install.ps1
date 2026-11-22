@@ -216,6 +216,9 @@ if (-not $gitSha) {
 }
 if (-not $gitSha) { $gitSha = "unknown" }
 
+# Write .git-sha file so the agent can resolve its version without git
+$gitSha | Out-File -FilePath ".git-sha" -Encoding utf8
+
 if ($modelSource -eq "local") {
 
     # -- LOCAL (Ollama) path --
