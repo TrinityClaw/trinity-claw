@@ -4107,6 +4107,14 @@ _GIT_SHA_FILE = "/app/.git-sha"
 def _resolve_deployed_sha() -> str:
     env_sha = (os.getenv("TRINITY_GIT_SHA") or "").strip()
     if env_sha and env_sha.lower() != "unknown":
+        # Persist to .git-sha so it survives container restarts
+        # even if the env var is dropped later.
+        try:
+            _GIT_SHA_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(_GIT_SHA_FILE, "w", encoding="utf-8") as f:
+                f.write(env_sha + "\n")
+        except Exception:
+            pass
         return env_sha
     try:
         with open(_GIT_SHA_FILE, encoding="utf-8") as f:
@@ -4116,14 +4124,23 @@ def _resolve_deployed_sha() -> str:
     except Exception:
         pass
     try:
-        return subprocess.check_output(
+        sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
             cwd=str(Path(__file__).parent),
             stderr=subprocess.DEVNULL,
             timeout=5
         ).decode().strip()
+        if sha:
+            try:
+                _GIT_SHA_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with open(_GIT_SHA_FILE, "w", encoding="utf-8") as f:
+                    f.write(sha + "\n")
+            except Exception:
+                pass
+        return sha
     except Exception:
-        return "unknown"
+        pass
+    return "unknown"
 
 
 @app.get("/version")
