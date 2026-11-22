@@ -19,7 +19,7 @@ import hmac
 import math
 import uuid
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Depends, Security, status
+from fastapi import FastAPI, HTTPException, Depends, Security, status, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
@@ -1475,6 +1475,46 @@ def set_ollama_model(req: OllamaModelRequest):
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to set Ollama model: {str(e)}")
+
+
+class PullModelRequest(BaseModel):
+    model: str
+
+
+@app.post("/config/ollama/pull")
+def pull_ollama_model(req: PullModelRequest, api_key: Optional[str] = Query(None)):
+    """Pull/download an Ollama model with SSE progress streaming.
+
+    Auth: checks X-API-Key header or api_key query param (EventSource
+    cannot set custom headers, so query param is the fallback).
+    """
+    # Auth: check header or query param
+    expected_key = os.getenv("TRINITY_API_KEY", "")
+    provided_key = api_key  # query param for EventSource
+    if expected_key:
+        if not provided_key or provided_key != expected_key:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    ollama_base = os.getenv("OLLAMA_API_BASE", "http://ollama:11434")
+
+    def _generate():
+        try:
+            resp = requests.post(
+                f"{ollama_base}/api/pull",
+                json={"name": req.model.strip()},
+                stream=True,
+                timeout=(10, 600),
+            )
+            if not resp.ok:
+                yield f"data: {json.dumps({'error': f'Ollama error {resp.status_code}: {resp.text[:200]}'})}\n\n"
+                return
+            for line in resp.iter_lines():
+                if line:
+                    yield f"data: {line.decode('utf-8', errors='replace')}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(_generate(), media_type="text/event-stream")
 
 
 def save_to_jsonl(user_message: str, ai_reply: str, metadata: Optional[Dict] = None, session_id: Optional[str] = None):
