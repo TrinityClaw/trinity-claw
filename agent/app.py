@@ -200,7 +200,10 @@ _HEARTBEAT_DENYLIST = {
     "heartbeat": "*",
     "knowledge_base": ("ingest_folder",),
     "git_manager": ("push", "pull", "commit"),
-    "autoimprove": ("apply_suggestion", "run_experiment", "run_all", "run_loop"),
+    # Core-skill mutations stay off-limits during ticks, but dynamic-skill
+    # auto-fixes (run_experiment) are sandboxed and reversible — allow them so
+    # the agent can self-heal while idle instead of waiting for your next msg.
+    "autoimprove": ("apply_suggestion", "run_all", "run_loop"),
 }
 
 # ── Cached skill prompt sections (built once, reused per request) ──────────────
@@ -497,6 +500,14 @@ def _supersede_active_run(session_id: str) -> None:
 # skill-health) are built ONCE per session and never re-shipped per turn.
 # Mid-session memory writes persist to disk but appear only next session.
 _session_memory_snapshot: Dict[str, str] = {}
+
+# ── Auto self-improvement ─────────────────────────────────────────────────────
+# When recurring errors show up in lessons, run a bounded auto-improvement loop
+# over dynamic skills only (sandboxed, reversible). Core skills stay suggest-only.
+_SELF_IMPROVE_LAST_RUN: Dict[str, float] = {}
+_SELF_IMPROVE_COOLDOWN_SECONDS = int(os.getenv("SELF_IMPROVE_COOLDOWN_SECONDS", "1800"))
+_SELF_IMPROVE_MAX_EXPERIMENTS = int(os.getenv("SELF_IMPROVE_MAX_EXPERIMENTS", "1"))
+_SELF_IMPROVE_MAX_RUNTIME = int(os.getenv("SELF_IMPROVE_MAX_RUNTIME_SECONDS", "60"))
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
 RATE_LIMIT_RPM = int(os.getenv("CHAT_RATE_LIMIT_RPM", "20"))  # requests per minute per API key
@@ -5019,6 +5030,57 @@ def _maybe_push_automation(successful_skills: list, task_snippet: str) -> None:
     print(f"💡 Automation proposal pushed to Telegram ({chain_key}, {len(days)} days)")
 
 
+def _maybe_self_improve(session_id: str) -> str:
+    """If recent lessons show recurring errors, run a bounded auto-improvement
+    loop over dynamic skills only. Cooldown prevents hammering on every message."""
+    now = time.time()
+    last = _SELF_IMPROVE_LAST_RUN.get(session_id, 0.0)
+    if now - last < _SELF_IMPROVE_COOLDOWN_SECONDS:
+        return ""
+    _SELF_IMPROVE_LAST_RUN[session_id] = now
+
+    si = skills.get("self_improvement")
+    ai = skills.get("autoimprove")
+    if si is None or ai is None:
+        return ""
+
+    try:
+        # Any recent error (threshold=1) is enough to attempt a bounded fix loop.
+        decision = call_skill_improved(
+            "self_improvement", "should_self_improve",
+            threshold=1, window_days=7, _skip_confirm=True,
+        )
+        if not decision.get("success"):
+            return ""
+        d = decision.get("result", {})
+        if isinstance(d, str):
+            try:
+                import json as _json
+                d = _json.loads(d)
+            except Exception:
+                return ""
+        if not isinstance(d, dict) or not d.get("improve"):
+            return ""
+
+        reason = d.get("reason", "recurring failures")
+        patterns = d.get("patterns", [])
+
+        print(f"🔧 Self-improvement triggered: {reason} (patterns: {patterns})")
+
+        result = call_skill_improved(
+            "autoimprove", "run_loop",
+            max_experiments=_SELF_IMPROVE_MAX_EXPERIMENTS,
+            max_runtime_seconds=_SELF_IMPROVE_MAX_RUNTIME,
+            _skip_confirm=True,
+        )
+        if result.get("success"):
+            return f"🔧 Auto self-improvement ran ({reason}): {str(result.get('result',''))[:300]}"
+        return f"⚠️ Self-improvement loop ran but reported: {result.get('error','unknown')}"
+    except Exception as e:
+        print(f"⚠️ Self-improvement skipped: {e}")
+        return ""
+
+
 @app.post("/chat")
 def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     session_id = req.session_id or "default"
@@ -5073,6 +5135,11 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
     # Load in-memory session history first — needed to decide whether ChromaDB is useful.
     history = get_session_history(session_id)
     print(f"📖 Session {session_id[:12]}... — {len(history) // 2} prior turn(s) in memory")
+
+    # ── Auto self-improvement (once per session) ──────────────────────────────
+    _self_improve_note = _maybe_self_improve(session_id)
+    if _self_improve_note:
+        print(_self_improve_note)
 
     # Same-session supersession: kill any active run for this session, then
     # register ours so an even newer message can cancel US in turn.
