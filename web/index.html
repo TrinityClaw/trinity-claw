@@ -1192,8 +1192,33 @@ docker compose up --build -d</div>
                     </div>
                     <div class="form-hint">Models pulled in Ollama • Only shown when Local is active</div>
                 </div>
-            </div>
-            <!-- Telegram Configuration -->
+
+                <!-- Ollama Model Pull -->
+                <div class="form-section" id="ollamaPullSection" style="display:none;">
+                    <div class="form-section-title">📥 Pull New Ollama Model</div>
+                    <div class="form-group">
+                        <label class="form-label" for="ollamaPullModel">Model Name</label>
+                        <input type="text" id="ollamaPullModel" class="form-input"
+                               placeholder="qwen2.5:7b, llama3.1:8b, codellama:7b, deepseek-coder:6.7b">
+                        <div class="form-hint">Full model name from ollama.com/library. HF models also work.</div>
+                    </div>
+                    <div class="form-group">
+                        <button class="btn btn-primary" id="ollamaPullBtn" onclick="pullOllamaModel()">
+                            ⬇ Download Model
+                        </button>
+                        <button class="btn btn-secondary" id="ollamaPullCancelBtn" onclick="cancelOllamaPull()" style="display:none; margin-left:8px;">
+                            ⏹ Cancel
+                        </button>
+                    </div>
+                    <div id="ollamaPullProgress" style="margin-top:8px;">
+                        <div style="width:100%; background:#22232c; border-radius:6px; height:8px; overflow:hidden;">
+                            <div id="ollamaProgressBar" style="width:0%; background:var(--accent); height:100%; transition:width 0.3s;"></div>
+                        </div>
+                        <div id="ollamaPullStatus" style="margin-top:6px; font-size:0.85rem; color:var(--text-muted);"></div>
+                    </div>
+                </div>
+
+                <!-- Telegram Configuration -->
             <div class="form-section">
                 <div class="form-section-title">📱 Telegram Bot</div>
 
@@ -1253,8 +1278,9 @@ docker compose up --build -d</div>
 
         // Show/hide local model group based on source selection
         document.getElementById('modelSourceSelect').addEventListener('change', function () {
-            document.getElementById('localModelGroup').style.display =
-                this.value === 'local' ? 'block' : 'none';
+            const isLocal = this.value === 'local';
+            document.getElementById('localModelGroup').style.display = isLocal ? 'block' : 'none';
+            document.getElementById('ollamaPullSection').style.display = isLocal ? 'block' : 'none';
         });
 
         async function loadOllamaModels() {
@@ -1298,6 +1324,117 @@ docker compose up --build -d</div>
                 btn.textContent = '↻';
                 btn.disabled = false;
             }
+        }
+
+        // ── Ollama Model Pull with Progress ─────────────────────────────────
+        let _ollamaPullEventSource = null;
+
+        async function pullOllamaModel() {
+            const modelName = document.getElementById('ollamaPullModel').value.trim();
+            if (!modelName) {
+                document.getElementById('ollamaPullStatus').textContent = '❌ Please enter a model name';
+                return;
+            }
+            const btn = document.getElementById('ollamaPullBtn');
+            const cancelBtn = document.getElementById('ollamaPullCancelBtn');
+            const status = document.getElementById('ollamaPullStatus');
+            const progressBar = document.getElementById('ollamaProgressBar');
+
+            btn.disabled = true;
+            btn.textContent = '⏳ Downloading…';
+            cancelBtn.style.display = 'inline-block';
+            status.textContent = 'Connecting to Ollama…';
+            progressBar.style.width = '0%';
+            status.style.color = '';
+
+            // Cancel any existing stream
+            if (_ollamaPullEventSource) {
+                _ollamaPullEventSource.close();
+                _ollamaPullEventSource = null;
+            }
+
+            try {
+                const apiKey = document.getElementById('agentApiKeyInput')?.value || '';
+                _ollamaPullEventSource = new EventSource(
+                    `${agentUrl}/config/ollama/pull?model=${encodeURIComponent(modelName)}${
+                        apiKey ? `&api_key=${encodeURIComponent(apiKey)}` : ''
+                    }`
+                );
+
+                _ollamaPullEventSource.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.error) {
+                            status.textContent = `❌ ${data.error}`;
+                            status.style.color = '#ff6b6b';
+                            if (_ollamaPullEventSource) {
+                                _ollamaPullEventSource.close();
+                                _ollamaPullEventSource = null;
+                            }
+                            btn.disabled = false;
+                            btn.textContent = '⬇ Download Model';
+                            cancelBtn.style.display = 'none';
+                            return;
+                        }
+
+                        if (data.status === 'success') {
+                            status.textContent = '✅ Download complete!';
+                            status.style.color = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+                            progressBar.style.width = '100%';
+                            if (_ollamaPullEventSource) {
+                                _ollamaPullEventSource.close();
+                                _ollamaPullEventSource = null;
+                            }
+                            btn.disabled = false;
+                            btn.textContent = '⬇ Download Model';
+                            cancelBtn.style.display = 'none';
+                            loadOllamaModels(); // refresh model list
+                            return;
+                        }
+
+                        if (data.total && data.completed) {
+                            const pct = Math.round((data.completed / data.total) * 100);
+                            progressBar.style.width = `${pct}%`;
+                            const mb = (data.completed / 1048576).toFixed(1);
+                            const totalMb = (data.total / 1048576).toFixed(1);
+                            status.textContent = `⬇ ${mb} MB / ${totalMb} MB (${pct}%)`;
+                        } else if (data.status) {
+                            status.textContent = `⬇ ${data.status}…`;
+                        }
+                    } catch (e) {
+                        // ignore parse errors on individual lines
+                    }
+                };
+
+                _ollamaPullEventSource.onerror = () => {
+                    status.textContent = '❌ Connection lost during download';
+                    status.style.color = '#ff6b6b';
+                    if (_ollamaPullEventSource) {
+                        _ollamaPullEventSource.close();
+                        _ollamaPullEventSource = null;
+                    }
+                    btn.disabled = false;
+                    btn.textContent = '⬇ Download Model';
+                    cancelBtn.style.display = 'none';
+                };
+            } catch (e) {
+                status.textContent = `❌ Failed to start: ${e.message}`;
+                status.style.color = '#ff6b6b';
+                btn.disabled = false;
+                btn.textContent = '⬇ Download Model';
+                cancelBtn.style.display = 'none';
+            }
+        }
+
+        function cancelOllamaPull() {
+            if (_ollamaPullEventSource) {
+                _ollamaPullEventSource.close();
+                _ollamaPullEventSource = null;
+            }
+            document.getElementById('ollamaPullStatus').textContent = 'Download cancelled.';
+            document.getElementById('ollamaPullBtn').disabled = false;
+            document.getElementById('ollamaPullBtn').textContent = '⬇ Download Model';
+            document.getElementById('ollamaPullCancelBtn').style.display = 'none';
         }
 
         const agentApiKeyInput = document.getElementById('agentApiKeyInput');
