@@ -1,4 +1,6 @@
+from datetime import datetime
 import os
+import json
 import ast
 import time
 import urllib.request
@@ -17,6 +19,7 @@ DOC = (
 # Path mapping for Docker environment
 SKILLS_DIR = Path("/app/skills/dynamic").resolve()
 CORE_SKILLS_DIR = Path("/app/skills/core").resolve()
+PENDING_SKILLS_DIR = Path("/app/memory/pending_skills").resolve()
 
 # Max chars for SHORT_DOC before it inflates the skills_doc line noticeably
 _SHORT_DOC_LIMIT = 120
@@ -105,8 +108,12 @@ def _audit_skill_tokens(skill_name: str, tree: ast.Module):
     return errors, warnings, token_report
 
 
-def create_new_skill(skill_filename: str, code: str) -> str:
-    """The only way Trinity can write new code to his own brain."""
+def create_new_skill(skill_filename: str, code: str, approved: bool = False) -> str:
+    """The only way Trinity can write new code to his own brain.
+    When approved=False the skill is saved as a pending proposal awaiting your
+    sign-off. Call approve_skill(filename) to write it, or deny_skill(filename)
+    to discard.
+    """
     try:
         # 1. Path Lockdown — take only the first line and strip whitespace
         # (guards against LLM passing "name\ndoc string" as the filename arg)
@@ -215,8 +222,31 @@ def create_new_skill(skill_filename: str, code: str) -> str:
 
         # 4. Ensure Directory Exists
         SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        PENDING_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 5. Physical Write & Verification
+        # 5. Approval gate — never write to disk without your sign-off
+        if not approved:
+            proposal_id = filename[:-3]
+            proposal = {
+                "id": proposal_id,
+                "filename": filename,
+                "code": code,
+                "created_at": datetime.now().isoformat(),
+                "status": "pending",
+            }
+            (PENDING_SKILLS_DIR / f"{proposal_id}.json").write_text(
+                json.dumps(proposal, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            preview = code[:400].replace("\n", "\\n")
+            return (
+                f"⏸️ PENDING APPROVAL: '{filename}' ({len(code)} bytes) passed all safety checks "
+                f"but is NOT written yet.\n"
+                f"Preview: {preview}{'…' if len(code) > 400 else ''}\n\n"
+                f"Reply 'approve {proposal_id}' to write and install the skill, "
+                f"or 'deny {proposal_id}' to discard it."
+            )
+
+        # 5b. Physical Write & Verification (only runs when approved=True)
         file_path.write_text(code, encoding='utf-8')
 
         # --- THE REALITY CHECK ---
@@ -232,6 +262,11 @@ def create_new_skill(skill_filename: str, code: str) -> str:
             node.name for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and not node.name.startswith('_')
         ]
+
+        # Remove pending proposal if it existed
+        pending_file = PENDING_SKILLS_DIR / f"{skill_name}.json"
+        if pending_file.exists():
+            pending_file.unlink()
 
         # 7. Auto-reload so the skill is immediately usable (no separate reload step)
         reload_result = reload()
@@ -255,6 +290,70 @@ def create_new_skill(skill_filename: str, code: str) -> str:
 
     except Exception as e:
         return f"❌ SYSTEM ERROR: {str(e)}"
+
+
+def _proposal_path(skill_name: str) -> Path:
+    return PENDING_SKILLS_DIR / f"{skill_name}.json"
+
+
+def list_pending_skills() -> str:
+    """List dynamic skill proposals awaiting your approval."""
+    if not PENDING_SKILLS_DIR.exists():
+        return "No pending skill proposals."
+    proposals = []
+    for p in sorted(PENDING_SKILLS_DIR.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            proposals.append(data)
+        except Exception:
+            continue
+    if not proposals:
+        return "No pending skill proposals."
+    lines = ["⏸️ Pending skill proposals (awaiting your approval):"]
+    for p in proposals:
+        lines.append(
+            f"  • {p.get('id','?')} — {p.get('filename','?')} "
+            f"({len(p.get('code',''))} bytes, created {str(p.get('created_at',''))[:16]})"
+        )
+    lines.append("")
+    lines.append("Approve: approve_skill('<id>')  |  Deny: deny_skill('<id>')")
+    return "\n".join(lines)
+
+
+def approve_skill(skill_name: str) -> str:
+    """Write and install a previously pending dynamic skill after your approval."""
+    proposal_file = _proposal_path(skill_name)
+    if not proposal_file.exists():
+        return f"❌ No pending proposal for '{skill_name}'. Run create_skill first, or check list_pending_skills()."
+    try:
+        data = json.loads(proposal_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        return f"❌ Failed to read pending proposal '{skill_name}': {e}"
+    filename = data.get("filename", f"{skill_name}.py")
+    code = data.get("code", "")
+    if not code:
+        return f"❌ Pending proposal '{skill_name}' has no code — discard it with deny_skill()."
+    result = create_new_skill(filename, code, approved=True)
+    try:
+        proposal_file.unlink()
+    except Exception:
+        pass
+    return result
+
+
+def deny_skill(skill_name: str) -> str:
+    """Discard a pending dynamic skill proposal without writing it to disk."""
+    proposal_file = _proposal_path(skill_name)
+    if not proposal_file.exists():
+        return f"❌ No pending proposal for '{skill_name}'."
+    try:
+        proposal_file.unlink()
+    except Exception as e:
+        return f"❌ Failed to discard proposal '{skill_name}': {e}"
+    return f"⏹️ Denied — proposal '{skill_name}' discarded, nothing written to disk."
+
+
+__all__ = ["NAME", "DOC", "create_new_skill", "reload", "approve_skill", "deny_skill", "list_pending_skills"]
 
 
 def reload() -> str:
