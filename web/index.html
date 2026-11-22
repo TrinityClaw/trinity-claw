@@ -1997,7 +1997,6 @@ docker compose up --build -d</div>
                 const versionRes = await fetch(`${agentUrl}/version`);
                 if (!versionRes.ok) return;
                 const { sha: deployedSha } = await versionRes.json();
-                if (!deployedSha || deployedSha === 'unknown') return;
                 _deployedSha = deployedSha;
 
                 // Get latest commits from GitHub
@@ -2010,6 +2009,26 @@ docker compose up --build -d</div>
                 if (!commits.length) return;
 
                 const latestSha = commits[0].sha;
+
+                // If we don't know the deployed SHA (no git in container, bad install),
+                // still show a banner so the user can manually check for updates.
+                if (!deployedSha || deployedSha === 'unknown') {
+                    const dismissed = localStorage.getItem('update_dismissed');
+                    if (dismissed === latestSha) return; // user already dismissed
+                    _updateDetails = {
+                        sha: latestSha,
+                        lines: commits.slice(0, 5).map(c =>
+                            `• ${c.commit.message.split('\n')[0].slice(0, 72)}`
+                        ).join('\n')
+                    };
+                    document.getElementById('updateBannerMsg').innerHTML =
+                        `<strong>Version unknown</strong> — unable to verify installed version.`;
+                    document.getElementById('updateCommits').textContent =
+                        `Latest on GitHub: ${latestSha.slice(0, 8)}\n${_updateDetails.lines}`;
+                    document.getElementById('updateBanner').classList.add('visible');
+                    return;
+                }
+
                 if (latestSha === deployedSha) return; // already up to date
 
                 const dismissed = localStorage.getItem('update_dismissed');
