@@ -1027,12 +1027,57 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
     except Exception as e:
         error_msg = f"Error in {skill_name}.{function_name}: {str(e)}"
         print(f"❌ {error_msg}")
+        # Record the mistake for learning
         try:
             si = skills.get("self_improvement")
             if si:
                 si.record_mistake(skill_name, type(e).__name__, str(e))
         except Exception:
             pass
+
+        # ── Auto-fix: repair the failing dynamic skill immediately, on any task ──
+        # Not just recurring errors — every failure triggers a bounded fix attempt.
+        _meta = skill_metadata.get(skill_name, {})
+        _skill_path = str(_meta.get("path", ""))
+        if "/dynamic/" in _skill_path:
+            try:
+                ai = skills.get("autoimprove")
+                if ai and hasattr(ai, "run_experiment"):
+                    _fix = call_skill_improved(
+                        "autoimprove", "run_experiment",
+                        skill_name, type(e).__name__, _skip_confirm=True,
+                    )
+                    if _fix.get("success"):
+                        # Reload so the patched code is live, then retry once
+                        reload_skills()
+                        _module = skills.get(skill_name)
+                        _func = getattr(_module, function_name, None) if _module else None
+                        if _func:
+                            try:
+                                import asyncio as _re_asyncio
+                                if _re_asyncio.iscoroutinefunction(_func):
+                                    _result = _re_asyncio.run(_func(*args, **kwargs))
+                                else:
+                                    _result = _func(*args, **kwargs)
+                                if skill_name == "mcp_client" and isinstance(_result, str):
+                                    _result = _sanitize_external_content(
+                                        _result, source=f"mcp_client:{function_name}"
+                                    )
+                                return {
+                                    "success": True,
+                                    "result": _result,
+                                    "skill": skill_name,
+                                    "function": function_name,
+                                }
+                            except Exception as _retry_exc:
+                                return {
+                                    "success": False,
+                                    "error": f"{error_msg} | auto-fix retry failed: {_retry_exc}",
+                                    "skill": skill_name,
+                                    "function": function_name,
+                                }
+            except Exception:
+                pass
         return {"success": False, "error": error_msg, "skill": skill_name, "function": function_name}
 
 # Load all skills on startup
