@@ -3626,6 +3626,20 @@ def _format_confirm_result(result: dict) -> str:
     return f"❌ {result.get('error', 'Action failed')}"
 
 
+def _parse_skill_approve_deny(text: str):
+    """Parse 'approve <id>' / 'deny <id>' user replies for pending skill proposals.
+    Returns (action, skill_id) or None."""
+    import re as _re
+    t = (text or "").strip()
+    m = _re.match(r"^(approve|deny)\s+([A-Za-z0-9_.-]+)\s*$", t, _re.IGNORECASE)
+    if not m:
+        return None
+    verb = m.group(1).lower()
+    skill_id = m.group(2)
+    action = "approve_skill" if verb == "approve" else "deny_skill"
+    return (action, skill_id)
+
+
 # ── Session handoff store (survives restart) ─────────────────────────────────
 _HANDOFF_STORE_NAME = "handoffs.json"
 _handoff_lock = threading.Lock()
@@ -5028,6 +5042,19 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
             return {"response": "⏹️ Cancelled — the pending action was not executed."}
         # Unclear answer: re-surface the confirmation question.
         return {"response": _pending.get("question", "Confirmation still required.")}
+
+    # ── Direct skill approve/deny (user sign-off for new dynamic skills) ───────
+    _skill_action = _parse_skill_approve_deny(req.message)
+    if _skill_action is not None:
+        _action, _skill_id = _skill_action
+        _cs = skills.get("create_skill")
+        if _cs is None or not hasattr(_cs, _action):
+            return {"response": f"❌ Skill action '{_action}' not available."}
+        if _action == "approve_skill":
+            _result = call_skill_improved("create_skill", "approve_skill", _skill_id, _skip_confirm=True)
+        else:
+            _result = call_skill_improved("create_skill", "deny_skill", _skill_id, _skip_confirm=True)
+        return {"response": _format_confirm_result(_result)}
 
     # Internal job dispatches (jobs.py) are not user traffic — they must not
     # consume the per-minute budget or be throttled mid-chain.
