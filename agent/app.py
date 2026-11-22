@@ -203,6 +203,73 @@ _HEARTBEAT_DENYLIST = {
     "autoimprove": ("apply_suggestion", "run_experiment", "run_all", "run_loop"),
 }
 
+# ── Cached skill prompt sections (built once, reused per request) ──────────────
+# These sections only depend on the skill registry, not on the user message.
+# Rebuilt by reload_skills() when skills change.
+_SKILL_USAGE_SECTION_LOCAL = None
+_SKILL_USAGE_SECTION_CLOUD = None
+_RULES_SECTION_LOCAL = None
+_RULES_SECTION_CLOUD = None
+_SKILL_INDEX_LINE = None
+
+def _BUILD_SKILL_PROMPT_SECTIONS():
+    """Build skill-related prompt sections once, reuse across requests.
+    
+    These sections only depend on the loaded skills registry, not on the
+    user message, so they can be cached and reused to save per-request
+    string building (est. 300-500 tokens of processing per request).
+    """
+    global _SKILL_USAGE_SECTION_LOCAL, _SKILL_USAGE_SECTION_CLOUD
+    global _RULES_SECTION_LOCAL, _RULES_SECTION_CLOUD
+    global _SKILL_INDEX_LINE
+
+    skill_names_list = list(skill_metadata.keys())
+    _SKILL_INDEX_LINE = "Skills you have: " + ", ".join(skill_names_list)
+
+    # Local (XML tags) mode sections
+    _SKILL_USAGE_SECTION_LOCAL = """\
+## HOW TO USE SKILLS
+
+Format: <skill:name.function>args</skill:name.function>
+Args: comma-separated. No args: <skill:dashboard.status></skill:dashboard.status>
+Think first: <skill:think.think>I need to check X, then do Y because...</skill:think.think>
+"""
+
+    _RULES_SECTION_LOCAL = """\
+## RULES
+
+1. Emit skill tag to act. Never describe results before the tag runs.
+2. Think first: for any multi-step or ambiguous task, call <skill:think.think> to reason before acting.
+3. Never write [✅] or [❌] blocks yourself — only the execution engine produces these.
+4. Never claim you created/saved/ran something without seeing a real [✅ Result:] block first.
+5. On [❌ Error]: acknowledge failure. Never continue as if it worked.
+6. Only skills in "YOUR TOOLS" exist. If not listed → say so. EXCEPTION: web.search always exists.
+7. New skills saved to /app/skills/dynamic/ are immediately usable.
+8. VERBATIM OUTPUT: When a result contains a URL, token, or exact string to copy — reproduce word-for-word.
+9. SCREENSHOTS: Call web.browser_screenshot AT MOST 2× per task (full_page=True captures everything). Report saved_to path."""
+
+    # Cloud (native function calling) mode sections
+    _SKILL_USAGE_SECTION_CLOUD = """\
+## HOW TO USE SKILLS
+
+Call tools directly via function-calling interface. Tool names: skill_name__function_name.
+Example: web__search, google_drive__upload_to_folder.
+Think first: call think__think(reasoning="I need to check X, then do Y because...") before any action tool.
+
+NEVER write fake [✅] or [❌] blocks — only real tool runs produce these.
+CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop — that produces no action."""
+
+    _RULES_SECTION_CLOUD = """\
+## RULES
+
+1. Call tools to act — never describe action as done before tool result arrives.
+2. Think first: call think__think(reasoning="...") before any action tool on multi-step or ambiguous tasks.
+3. Never write fake [✅] or [❌] blocks — only real tool runs produce these.
+4. Never claim you created/saved/ran something without seeing a real tool result first.
+5. On tool error: tell user what failed. Never continue as if it worked.
+6. Only skills in "YOUR TOOLS" exist. If not listed → say so.
+7. New skills (create_skill__create_new_skill) saved to /app/skills/dynamic/."""
+
 # Skills that perform destructive or outward-facing actions. The agent must
 # ask the user for confirmation before executing them (auto-confirmation
 # wrapper). Format: (skill_name, function_name).
@@ -597,7 +664,8 @@ def reload_skills():
     global skills, _TOOLS_SCHEMA_CACHE
     skills = load_skills_improved()
     _TOOLS_SCHEMA_CACHE = _build_tools_schema()
-    print(f"✅ Tools schema cache rebuilt ({len(_TOOLS_SCHEMA_CACHE)} tool entries)")
+    _BUILD_SKILL_PROMPT_SECTIONS()
+    print(f"✅ Tools schema cached ({len(_TOOLS_SCHEMA_CACHE)} tool entries)")
     return f"Reloaded {len(skills)} skills"
 
 
@@ -960,6 +1028,7 @@ def call_skill_improved(skill_name: str, function_name: str, /, *args, **kwargs)
 print("\n🎯 Loading TrinityClaw Skills...")
 skills = load_skills_improved()
 print(f"✅ Loaded {len(skills)} skill(s)")
+_BUILD_SKILL_PROMPT_SECTIONS()
 _TOOLS_SCHEMA_CACHE = _build_tools_schema()
 print(f"✅ Tools schema cached ({len(_TOOLS_SCHEMA_CACHE)} tool entries)\n")
 
@@ -5094,7 +5163,7 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
         available_skills.append(f"[SKILL: {name}] {_sd} (functions: {func_sigs})")
 
     skills_doc = "\n".join(available_skills)
-    _skill_index_line = "Skills you have: " + ", ".join(skill_names_list)
+    _skill_index_line = _SKILL_INDEX_LINE
 
     # MCP tools: one compact summary line per connected server instead of full
     # per-tool docs (those cost 100-300+ tokens per server on EVERY request).
@@ -5164,52 +5233,15 @@ def chat(req: PromptRequest, api_key: str = Depends(verify_api_key)):
 
     # ── Mode-conditional system prompt sections ───────────────────────────────
     # Local + native tools uses the native (function-calling) wording below, same as cloud.
+    # Sections are pre-built at startup (_BUILD_SKILL_PROMPT_SECTIONS) to avoid
+    # rebuilding them on every request.
     if _local_model and not _native_local:
-        _skill_usage_section = """\
-## HOW TO USE SKILLS
-
-Format: <skill:name.function>args</skill:name.function>
-Args: comma-separated. No args: <skill:dashboard.status></skill:dashboard.status>
-Think first: <skill:think.think>I need to check X, then do Y because...</skill:think.think>
-"""
-
-        _rules_section = """\
-## RULES
-
-1. Emit skill tag to act. Never describe results before the tag runs.
-2. Think first: for any multi-step or ambiguous task, call <skill:think.think> to reason before acting.
-2. Never write [✅] or [❌] blocks yourself — only the execution engine produces these.
-3. Never claim you created/saved/ran something without seeing a real [✅ Result:] block first.
-4. On [❌ Error]: acknowledge failure. Never continue as if it worked.
-5. Only skills in "YOUR TOOLS" exist. If not listed → say so. EXCEPTION: web.search always exists.
-6. New skills saved to /app/skills/dynamic/ are immediately usable.
-7. Multi-step tasks: brief plan first, then first skill. Single-step commands → emit skill tag immediately.
-8. VERBATIM OUTPUT: When a result contains a URL, token, or exact string to copy — reproduce word-for-word.
-9. SCREENSHOTS: Call web.browser_screenshot AT MOST 2× per task (full_page=True captures everything). Report saved_to path."""
-
+        _skill_usage_section = _SKILL_USAGE_SECTION_LOCAL
+        _rules_section = _RULES_SECTION_LOCAL
     else:
         # Cloud mode: native function calling — no XML tags needed or wanted
-        _skill_usage_section = """\
-## HOW TO USE SKILLS
-
-Call tools directly via function-calling interface. Tool names: skill_name__function_name.
-Example: web__search, google_drive__upload_to_folder.
-Think first: call think__think(reasoning="I need to check X, then do Y because...") before any action tool.
-
-NEVER write fake [✅] or [❌] blocks — only real tool runs produce these.
-CRITICAL: Call tools IN THE SAME RESPONSE. Never write "I will do X" and stop — that produces no action."""
-
-        _rules_section = """\
-## RULES
-
-1. Call tools to act — never describe action as done before tool result arrives.
-2. Think first: call think__think(reasoning="...") before any action tool on multi-step or ambiguous tasks.
-2. On tool error: tell user what failed. Never continue as if it worked.
-3. Only skills in "YOUR TOOLS" exist. If not listed → say so.
-4. New skills (create_skill__create_new_skill) saved to /app/skills/dynamic/.
-5. Multi-step tasks: brief plan, then call first tool.
-6. VERBATIM OUTPUT: When a result contains URL, token, or exact string to copy — reproduce word-for-word.
-7. SCREENSHOTS: Call web__browser_screenshot AT MOST 2× (full_page=True captures everything). Report saved_to."""
+        _skill_usage_section = _SKILL_USAGE_SECTION_CLOUD
+        _rules_section = _RULES_SECTION_CLOUD
 
     # Script-calling: multi-step tasks (3+ tool calls) collapse into ONE
     # zero-context turn - the script calls skills via RPC with no LLM in the
